@@ -18,12 +18,13 @@ Routing and schematics that look like a person made them, and more ways to check
 
 ### Changed
 - **Router.** Differential pairs run side by side. Nets with extra vias or detours get a second pass, and nets that fail get another try. On a large board: every net routed, 9% fewer vias, 2% less track.
-- **Schematics.** Drawn by rule: parts grouped by function, decoupling at the pins, gate resistors with their pull-downs, notes kept clear of parts, and sheets packed onto the smallest paper that fits.
+- **Schematics.** Drawn by rule: parts grouped by function, decoupling at the pins, gate resistors with their pull-downs, neighboring pins on one net wired together, notes kept clear of parts, and sheets packed onto the smallest paper that fits.
 - **Toolkit updates.** Changes you or Claude made to a project's copy of the toolkit are saved before an update replaces them.
 
 ### Fixed
 - **Stop.** Stop works in the first moments of a turn.
 - **Answers.** Your answers in the chat no longer end with "(Recommended)".
+- **Freerouting.** Stops when it stops making progress, instead of running for up to an hour, and leaves the board as it was.
 
 ## [0.2.0] - 2026-09-27
 
