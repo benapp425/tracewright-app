@@ -84,7 +84,10 @@ def _kpy_inline(code, *args, timeout=900):
     return kicad.last_json(out) or {"ok": False, "error": (err or out)[-1500:]}
 
 
-def route(project=None, max_passes=30, threads=None, on_progress=None, log=print, timeout=3600):
+STALL_PASSES = 50          # Freerouting 2.1 ignores its pass limit and retries what it cannot route until pass 999
+
+
+def route(project=None, max_passes=30, threads=None, on_progress=None, log=print, timeout=1200):
     project = project or env.project()
     jar = find_jar()
     if not jar:
@@ -107,8 +110,13 @@ def route(project=None, max_passes=30, threads=None, on_progress=None, log=print
            "--gui.enabled=false", "--api_server.enabled=false", "--usage_and_diagnostic_data.disable_analytics=true"]
     log("  freerouting: " + " ".join(os.path.basename(c) if os.sep in c else c for c in cmd[1:]))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=work)
-    last = {}
+    import threading
+    why = []
+    watchdog = threading.Timer(timeout, lambda: (why.append(f"no result after {timeout // 60:.0f} min"), proc.kill()))
+    watchdog.daemon = True
+    watchdog.start()
     lines = []
+    best, best_pass = None, 0
     try:
         for line in proc.stdout:
             line = line.rstrip()
@@ -119,16 +127,25 @@ def route(project=None, max_passes=30, threads=None, on_progress=None, log=print
                 if len(m.groups()) == 2:
                     ev["pass"], ev["unrouted"] = int(m.group(1)), int(m.group(2))
                 on_progress(ev)
-            if time.time() - t0 > timeout:
-                proc.kill()
-                break
+            if m and len(m.groups()) == 2:
+                n, left = int(m.group(1)), int(m.group(2))
+                if best is None or left < best:
+                    best, best_pass = left, n
+                elif left and n - best_pass >= STALL_PASSES:   # the same connections again and again: stop
+                    why.append(f"no progress in {STALL_PASSES} passes with {best} connections it cannot route")
+                    proc.kill()
+                    break
         proc.wait(timeout=60)
     except Exception:
         proc.kill()
+    finally:
+        watchdog.cancel()
     with open(os.path.join(work, "freerouting.log"), "w") as f:
         f.write("\n".join(lines) + "\n")
-    if not os.path.exists(ses):
-        return {"summary": {"ok": False, "error": "Freerouting produced no session file", "log": lines[-30:]}}
+    if why or not os.path.exists(ses):
+        return {"summary": {"ok": False, "engine": "freerouting", "seconds": round(time.time() - t0, 1),
+                            "error": f"Freerouting stopped: {why[0]}; the board is unchanged" if why else
+                                     "Freerouting produced no session file; the board is unchanged", "log": lines[-12:]}}
     r = _kpy_inline(KPY_IMPORT, project.pcb, ses)
     summary = {"ok": bool(r.get("ok")), "engine": "freerouting", "seconds": round(time.time() - t0, 1),
                "tracks": r.get("tracks"), "log": lines[-8:]}

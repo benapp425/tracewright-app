@@ -321,7 +321,7 @@ def tool_list(rt, app):
 
     @reg("route", "Route nets with the grid router (human style: 0/45/90, few vias, supplies first; streamed live to the "
          "app and into KiCad when the board is open). nets: names (default: every unrouted net); clear: tear up those "
-         "nets first; engine: grid | freerouting (whole board, dense jobs).",
+         "nets first; engine: grid | freerouting (the whole board only, replacing what is routed; no nets).",
          {"type": "object", "properties": {"nets": {"type": "array", "items": {"type": "string"}}, "clear": {"type": "boolean"},
                                            "engine": {"type": "string", "enum": ["grid", "freerouting"]}}})
     async def route(args):
@@ -329,6 +329,10 @@ def tool_list(rt, app):
         tw = proj()
         nets = args.get("nets") or None
         engine = args.get("engine", "grid")
+        if engine == "freerouting" and nets:
+            return _text("Freerouting routes the whole board and replaces what is already routed; it cannot route "
+                         "chosen nets. Route these with the grid router (engine grid), or call freerouting without nets "
+                         "for a whole-board run.", error=True)
         link = await run(twlive.link_for, tw.pcb) if rt.live.get("board_open") else None
         mirror = LiveMirror(link) if link and engine == "grid" else None
         if link:
