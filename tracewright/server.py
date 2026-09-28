@@ -1,0 +1,2006 @@
+"""The local web app (aiohttp): REST API + WebSocket events + the static UI."""
+import os, re, sys, json, time, asyncio, mimetypes, subprocess, traceback, logging, shutil, glob
+from aiohttp import web, WSMsgType
+
+from . import __version__, REPO_URL, config, history, knowledge, scaffold, auth, accounts
+from .projects import ProjectStore, STAGES, RUN_MODES
+from .bus import Hubs
+from .runtime import ProjectRuntime
+from tw import env as twenv, live as twlive
+
+WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+TEXT_EXT = {".md", ".txt", ".py", ".json", ".kicad_pro", ".kicad_sch", ".kicad_pcb", ".kicad_dru", ".kicad_sym", ".kicad_mod",
+            ".csv", ".net", ".rpt", ".log", ".sh", ".cmd", ".toml", ".yaml", ".yml", ".gitignore", ".ipc", ".drl", ".gbr"}
+HIDDEN = {".git", "__pycache__", "node_modules", ".DS_Store"}
+
+
+class App:
+    def __init__(self):
+        self.settings = config.settings()
+        self.store = ProjectStore()
+        self.hubs = Hubs()
+        self.runtimes = {}
+        self.agents = {}
+        self.jobs = {}
+        # on a server: no local KiCad window, no Finder, no file dialogs -- uploads, downloads and GitHub instead
+        self.server_mode = os.environ.get("TW_SERVER_MODE") == "1" or bool(self.settings.get("server_mode"))
+        self.require_auth = False              # set by run(): a password is needed beyond 127.0.0.1
+        self.local_key = None                  # set by run() on this machine: only Tracewright's own window may use it
+        self.port = None
+        self.tickets = {}                      # one-time sign-ins for a browser window: ticket -> expiry
+        self.logfile = os.path.join(config.data_dir(), "tracewright.log")
+
+    # ------------------------------------------------------------------ the window key (this machine)
+    def local_hosts(self):
+        return {f"127.0.0.1:{self.port}", f"localhost:{self.port}", f"[::1]:{self.port}"}
+
+    def local_origins(self):
+        return {f"http://{h}" for h in self.local_hosts()}
+
+    def window_ok(self, request):
+        """The request comes from a Tracewright window: its cookie, or the launch key itself (the
+        Mac app's first request, the `tracewright` command)."""
+        k = self.local_key
+        return bool(k) and (auth.same(request.cookies.get(auth.LOCAL_COOKIE), auth.window_cookie(k))
+                            or auth.same(request.headers.get(auth.KEY_HEADER), k))
+
+    def shared(self):
+        """Can other people reach this Tracewright (server mode, or listening beyond 127.0.0.1)? Then new
+        accounts are closed unless the owner opens them, and making the first one takes the server's password."""
+        return bool(self.server_mode or (self.require_auth and not self.local_key))
+
+    def accounts_on(self):
+        """Is an account needed to use the app? (Settings: accounts_required; TW_ACCOUNTS=0 turns it off.)"""
+        if os.environ.get("TW_ACCOUNTS") == "0":
+            return False
+        return bool(self.settings.get("accounts_required", True))
+
+    def user(self, request):
+        """The signed-in account (public fields), or None."""
+        return accounts.session_user(request.cookies.get(accounts.COOKIE))
+
+    def ticket(self, seconds=120):
+        import secrets
+        now = time.time()
+        self.tickets = {t: e for t, e in self.tickets.items() if e > now}
+        t = secrets.token_urlsafe(24)
+        self.tickets[t] = now + seconds
+        return t
+
+    def log(self, msg):
+        try:
+            with open(self.logfile, "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------ project runtimes
+    def rt(self, pid):
+        p = self.store.get(pid)
+        r = self.runtimes.get(p.id)
+        if r is None or r.p.root != p.root:
+            if scaffold.toolkit_outdated(p.root):          # keep ./tw in step with the app (checkpoint first)
+                try:
+                    scaffold.refresh(p.root, p.cfg)
+                    p.save()
+                    self.log(f"{p.id}: toolkit updated to match the app")
+                except Exception as e:
+                    self.log(f"{p.id}: toolkit update failed: {e}")
+            try:
+                gone = scaffold.clean_conflicts(p.root)      # iCloud's "checks 3" copies of the app's own files
+                if gone:
+                    self.log(f"{p.id}: removed {len(gone)} iCloud conflict copies: {', '.join(gone[:6])}")
+            except Exception as e:
+                self.log(f"{p.id}: conflict cleanup failed: {e}")
+            r = ProjectRuntime(self, p)
+            self.runtimes[p.id] = r
+            r.start()
+        return r
+
+    def agent(self, pid):
+        from .agent import AgentManager
+        rt = self.rt(pid)
+        a = self.agents.get(rt.p.id)
+        if a is None:
+            a = AgentManager(self, rt)
+            self.agents[rt.p.id] = a
+        return a
+
+    def agent_busy(self, pid):
+        a = self.agents.get(pid)
+        return bool(a and a.busy)
+
+    def hubs_emit_all(self, type_, **data):
+        for h in self.hubs.all():
+            h.emit(type_, **data)
+
+    # ------------------------------------------------------------------ desktop integration
+    def open_in_kicad(self, project, what="project"):
+        tw = project.tw
+        target = {"project": tw.pro, "board": tw.pcb, "schematic": tw.sch}.get(what) or tw.pro
+        if not target or not os.path.exists(target):
+            raise FileNotFoundError(f"no {what} file yet")
+        k = twenv.kicad()
+        if sys.platform == "darwin":
+            app = {"board": "PCB Editor", "schematic": "Schematic Editor"}.get(what)
+            base = os.path.dirname(k["app"]) if k.get("app") else "/Applications/KiCad"
+            if app and os.path.exists(os.path.join(base, f"{app}.app")):
+                subprocess.Popen(["open", "-a", os.path.join(base, f"{app}.app"), target])
+            else:
+                subprocess.Popen(["open", "-a", k.get("app") or "KiCad", target])
+        elif os.name == "nt":
+            os.startfile(target)
+        else:
+            exe = {"board": "pcbnew", "schematic": "eeschema"}.get(what, "kicad")
+            subprocess.Popen([shutil.which(exe) or "xdg-open", target])
+
+    def reveal(self, path):
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        elif os.name == "nt":
+            subprocess.Popen(["explorer", "/select,", path])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(path)])
+
+    def pick(self, kind):
+        """A native folder / file chooser (macOS); None when there is none (the UI then asks for a path)."""
+        if sys.platform != "darwin":
+            return None
+        script = ('POSIX path of (choose folder with prompt "Choose a KiCad project folder")' if kind == "folder" else
+                  'POSIX path of (choose file with prompt "Choose a KiCad project, board or zip")')
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=600)
+        return r.stdout.strip() or None
+
+
+def jresp(obj, status=200):
+    return web.json_response(obj, status=status, dumps=lambda o: json.dumps(o, default=str))
+
+
+def err(msg, status=400):
+    return jresp({"error": msg}, status)
+
+
+def _disposition(name, attachment=False):
+    """Content-Disposition naming the file (RFC 6266: an ASCII fallback plus the UTF-8 name)."""
+    from urllib.parse import quote
+    ascii_name = "".join(ch if 32 <= ord(ch) < 127 and ch not in '"\\' else "_" for ch in name)
+    return f'{"attachment" if attachment else "inline"}; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(name)}'
+
+
+def safe_join(root, rel):
+    p = os.path.abspath(os.path.join(root, rel or ""))
+    if not (p == root or p.startswith(root + os.sep)):
+        raise web.HTTPForbidden(text="outside the project")
+    return p
+
+
+def make_app():
+    app = App()
+    routes = web.RouteTableDef()
+
+    OPEN = ("/login", "/api/login", "/api/health", "/favicon.ico")
+    LINKABLE = ("/", "/auth", "/api/auth/google/callback")   # pages another site may link to or send the browser back to
+    # the browser comes back from Google here: it has no window key (it is not the app's window), and
+    # all it can do is finish a sign-in a window started (state + PKCE)
+    NO_WINDOW = ("/api/health", "/api/auth/google/callback")
+
+    def refuse(text, status=403):
+        return web.Response(text=text, status=status, content_type="text/plain")
+
+    @web.middleware
+    async def local_guard(request, handler):
+        """On this machine Tracewright answers only its own window. The Host must be this server's own
+        address (a web page that rebinds its domain to 127.0.0.1 is refused); requests other web pages
+        make (a cross-site Origin or Sec-Fetch-Site) are refused; and the API needs the launch key: the
+        window's cookie or the X-Tracewright-Key header. The WebSocket handshake goes through the same."""
+        if not app.local_key:
+            return await handler(request)
+        if request.headers.get("Host", "").lower() not in app.local_hosts():
+            return refuse("Refused: this is not Tracewright's address.")
+        origin = request.headers.get("Origin")
+        site = request.headers.get("Sec-Fetch-Site")
+        linked = request.method == "GET" and request.path in LINKABLE and request.headers.get("Sec-Fetch-Mode", "navigate") == "navigate"
+        if (origin and origin.lower() not in app.local_origins()) or (site and site not in ("same-origin", "none") and not linked):
+            return refuse("Refused: requests from other web pages cannot use Tracewright.")
+        if request.path.startswith("/api/") and request.path not in NO_WINDOW and not app.window_ok(request):
+            return jresp({"error": "open Tracewright from its app (or run `tracewright`)", "locked": True}, 401)
+        return await handler(request)
+
+    @web.middleware
+    async def gate(request, handler):
+        """Accounts: every API request needs a signed-in account (the sign-in endpoints, the page itself
+        and its static files excepted: the page shows the sign-in screen). Without accounts, beyond
+        127.0.0.1 the server's password session is needed (the older single-password sign-in)."""
+        path = request.path
+        if path in OPEN or path.startswith("/static/") or path == "/api/auth/state":
+            return await handler(request)
+        if app.accounts_on():
+            if path == "/" or path.startswith("/api/auth/"):              # the page shows the sign-in screen
+                return await handler(request)
+            if app.user(request) or (app.require_auth and auth.valid(request.cookies.get(auth.COOKIE, ""))):
+                return await handler(request)
+            if path.startswith("/api/"):
+                return jresp({"error": "sign in first", "signin": True}, 401)
+            raise web.HTTPFound("/")
+        if not app.require_auth or auth.valid(request.cookies.get(auth.COOKIE, "")) or app.window_ok(request):
+            return await handler(request)
+        if path.startswith("/api/"):
+            return err("sign in first", 401)
+        raise web.HTTPFound("/login")
+
+    @web.middleware
+    async def errors(request, handler):
+        try:
+            return await handler(request)
+        except web.HTTPException:
+            raise
+        except KeyError as e:
+            return err(f"not found: {e}", 404)
+        except Exception as e:
+            app.log(traceback.format_exc())
+            return err(f"{type(e).__name__}: {e}", 500)
+
+    # ------------------------------------------------------------------ sign-in (servers)
+    @routes.get("/login")
+    async def login_page(request):
+        return web.Response(text=auth.LOGIN_PAGE, content_type="text/html", headers={"Cache-Control": "no-cache"})
+
+    @routes.post("/api/login")
+    async def login(request):
+        ip = request.headers.get("X-Forwarded-For", request.remote or "").split(",")[0].strip()
+        if auth.throttled(ip):
+            return err("too many attempts. Try again in 10 minutes.", 429)
+        body = await request.json()
+        if not auth.password_set() or not auth.check_password(str(body.get("password", ""))):
+            auth.failed(ip)
+            await asyncio.sleep(1.0)
+            return err("wrong password", 401)
+        r = jresp({"ok": True})
+        secure = request.secure or request.headers.get("X-Forwarded-Proto", "") == "https"
+        r.set_cookie(auth.COOKIE, auth.new_session(), max_age=auth.DAYS * 86400, httponly=True, samesite="Strict",
+                     secure=secure, path="/")
+        return r
+
+    @routes.post("/api/logout")
+    async def logout(request):
+        r = jresp({"ok": True})
+        r.del_cookie(auth.COOKIE, path="/")
+        return r
+
+    # ------------------------------------------------------------------ accounts
+    def _client_ip(request):
+        return request.headers.get("X-Forwarded-For", request.remote or "").split(",")[0].strip()
+
+    def _signed_in(request, user, remember=True):
+        token = accounts.new_session(user["id"], remember, request.headers.get("User-Agent", ""))
+        r = jresp({"ok": True, "user": user})
+        secure = request.secure or request.headers.get("X-Forwarded-Proto", "") == "https"
+        r.set_cookie(accounts.COOKIE, token, max_age=accounts.DAYS * 86400 if remember else None, httponly=True,
+                     samesite="Lax", secure=secure, path="/")
+        return r
+
+    def _first_account_ok(request, body=None):
+        """The first account owns this Tracewright. On your Mac that is you (the app's own window); on a
+        server it is whoever knows the server's password (its session, or the password typed in the form):
+        the first visitor to a new server is not always the one who set it up."""
+        if accounts.count() or not app.shared() or app.window_ok(request):
+            return True
+        if auth.valid(request.cookies.get(auth.COOKIE, "")):
+            return True
+        pw, ip = (body or {}).get("server_password") or "", _client_ip(request)
+        if not pw or auth.throttled(ip):
+            return False
+        if auth.check_password(pw):
+            return True
+        auth.failed(ip)
+        return False
+
+    @routes.get("/api/auth/state")
+    async def auth_state(request):
+        """Who is signed in, and what the sign-in screen can offer (claim: making the first account here
+        takes the server's password)."""
+        return jresp({"user": app.user(request), "required": app.accounts_on(), "accounts": accounts.count(),
+                      "signups": accounts.signups_open(app.settings, app.shared()),
+                      "claim": app.accounts_on() and not _first_account_ok(request),
+                      "google": bool(accounts.google_config(app.settings)), "server_mode": app.server_mode,
+                      "version": __version__})
+
+    @routes.post("/api/auth/register")
+    async def auth_register(request):
+        body = await request.json()
+        if not app.accounts_on():
+            return err("accounts are off here", 403)
+        if not accounts.signups_open(app.settings, app.shared()):
+            return err("new accounts are closed here", 403)
+        if not _first_account_ok(request, body):
+            await asyncio.sleep(0.6)
+            return jresp({"error": "the first account needs the server password",
+                          "claim": True}, 403)
+        try:
+            u = await asyncio.to_thread(accounts.register, body.get("email"), body.get("name"), body.get("password") or "")
+        except accounts.AccountError as e:
+            return err(str(e))
+        return _signed_in(request, u, bool(body.get("remember", True)))
+
+    @routes.post("/api/auth/login")
+    async def auth_login(request):
+        body = await request.json()
+        if not app.accounts_on():
+            return err("accounts are off here", 403)
+        try:
+            u = await asyncio.to_thread(accounts.authenticate, body.get("email"), body.get("password") or "", _client_ip(request))
+        except accounts.AccountError as e:
+            await asyncio.sleep(0.6)
+            return err(str(e), 401)
+        return _signed_in(request, u, bool(body.get("remember", True)))
+
+    @routes.post("/api/auth/logout")
+    async def auth_logout(request):
+        accounts.end_session(request.cookies.get(accounts.COOKIE))
+        r = jresp({"ok": True})
+        r.del_cookie(accounts.COOKIE, path="/")
+        return r
+
+    @routes.patch("/api/auth/me")
+    async def auth_me(request):
+        u = app.user(request)
+        if not u:
+            return err("sign in first", 401)
+        body = await request.json()
+        try:
+            return jresp(accounts.update(u["id"], name=body.get("name"), onboarded=body.get("onboarded"), prefs=body.get("prefs")))
+        except accounts.AccountError as e:
+            return err(str(e))
+
+    @routes.post("/api/auth/password")
+    async def auth_password(request):
+        u = app.user(request)
+        if not u:
+            return err("sign in first", 401)
+        body = await request.json()
+        try:
+            await asyncio.to_thread(accounts.change_password, u["id"], body.get("old") or "", body.get("new") or "")
+        except accounts.AccountError as e:
+            return err(str(e))
+        return jresp({"ok": True})
+
+    @routes.get("/api/auth/sessions")
+    async def auth_sessions(request):
+        u = app.user(request)
+        if not u:
+            return err("sign in first", 401)
+        return jresp(accounts.sessions_of(u["id"], request.cookies.get(accounts.COOKIE)))
+
+    @routes.post("/api/auth/sessions/end-others")
+    async def auth_end_others(request):
+        u = app.user(request)
+        if not u:
+            return err("sign in first", 401)
+        accounts.end_other_sessions(u["id"], request.cookies.get(accounts.COOKIE))
+        return jresp({"ok": True})
+
+    @routes.get("/api/auth/users")
+    async def auth_users(request):
+        u = app.user(request)
+        if not u or u["role"] != "owner":
+            return err("only the owner can view accounts", 403)
+        return jresp(accounts.users())
+
+    @routes.delete("/api/auth/users/{uid}")
+    async def auth_remove(request):
+        u = app.user(request)
+        try:
+            accounts.remove(request.match_info["uid"], u["id"] if u else "")
+        except accounts.AccountError as e:
+            return err(str(e), 403)
+        return jresp({"ok": True})
+
+    @routes.patch("/api/auth/config")
+    async def auth_config(request):
+        """The owner's sign-in settings: open sign-ups, Google's client."""
+        u = app.user(request)
+        if not u or u["role"] != "owner":
+            return err("only the owner can change sign-in", 403)
+        body = await request.json()
+        changes = {k: body[k] for k in ("allow_signups", "google_client_id", "google_client_secret", "accounts_required") if k in body}
+        if "google_client_secret" in changes and not changes["google_client_secret"]:
+            del changes["google_client_secret"]                        # an empty field keeps the stored secret
+        app.settings.update(changes)
+        return jresp({"ok": True, "google": bool(accounts.google_config(app.settings)),
+                      "signups": accounts.signups_open(app.settings, app.shared())})
+
+    def _google_redirect(request):
+        if app.local_key:                           # this Mac: Google allows any loopback port for a desktop client
+            return f"http://127.0.0.1:{app.port}/api/auth/google/callback"
+        proto = request.headers.get("X-Forwarded-Proto") or request.scheme
+        host = request.headers.get("X-Forwarded-Host") or request.host
+        return f"{proto}://{host}/api/auth/google/callback"
+
+    @routes.post("/api/auth/google/start")
+    async def google_start(request):
+        """body.link: link Google to the signed-in account (Settings) rather than sign in."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        if not app.accounts_on():
+            return err("accounts are off here", 403)
+        me = app.user(request)
+        if body.get("link") and not me:
+            return err("sign in first", 401)
+        if not _first_account_ok(request):
+            return err("create the owner account first", 403)
+        try:
+            return jresp(accounts.google_start(app.settings, _google_redirect(request),
+                                               link_uid=me["id"] if body.get("link") and me else None, shared=app.shared()))
+        except accounts.AccountError as e:
+            return err(str(e))
+
+    @routes.get("/api/auth/google/callback")
+    async def google_callback(request):
+        """Where Google sends the browser back: finish the sign-in, then tell the person to return."""
+        q = request.query
+        ok, msg = False, ""
+        if q.get("error"):
+            msg = "Google sign-in was cancelled" if q["error"] == "access_denied" else f"Google said: {q['error']}"
+            accounts.google_fail(q.get("state"), msg)
+        else:
+            try:
+                u = await accounts.google_finish(app.settings, q.get("state"), q.get("code"))
+                ok, msg = True, f"Signed in as {u['email']}."
+            except accounts.AccountError as e:
+                msg = str(e)
+                accounts.google_fail(q.get("state"), msg)
+            except Exception as e:
+                app.log(traceback.format_exc())
+                msg = f"Google sign-in failed: {type(e).__name__}"
+                accounts.google_fail(q.get("state"), msg)
+        return web.Response(text=auth.google_done_page(ok, msg), content_type="text/html", headers={"Cache-Control": "no-store"})
+
+    @routes.post("/api/auth/google/poll")
+    async def google_poll(request):
+        body = await request.json()
+        status, val = accounts.google_poll(body.get("poll", ""), body.get("secret", ""))
+        if status == "ok":
+            return _signed_in(request, accounts.get(val), bool(body.get("remember", True)))
+        if status == "pending":
+            return jresp({"status": "pending"})
+        return jresp({"status": "error", "error": val}, 400)
+
+    @routes.get("/api/health")
+    async def health(request):
+        return jresp({"ok": True, "version": __version__})
+
+    # ------------------------------------------------------------------ the window key (this machine)
+    @routes.get("/auth")
+    async def window_auth(request):
+        """A browser window's one-time ticket (opened by `tracewright`) becomes its cookie."""
+        exp = app.tickets.pop(request.query.get("t", ""), 0)
+        if not app.local_key or exp < time.time():
+            return web.Response(text=auth.LOCKED_PAGE, content_type="text/html", status=403, headers={"Cache-Control": "no-store"})
+        nxt = request.query.get("next", "/")
+        if not nxt.startswith("/") or nxt.startswith("//"):
+            nxt = "/"
+        r = web.Response(status=302, headers={"Location": nxt, "Cache-Control": "no-store"})
+        r.set_cookie(auth.LOCAL_COOKIE, auth.window_cookie(app.local_key), httponly=True, samesite="Strict", path="/")
+        return r
+
+    @routes.post("/api/ticket")
+    async def new_ticket(request):
+        """A one-time sign-in for another window (the `tracewright` command asks, with the key)."""
+        t = app.ticket()
+        return jresp({"ticket": t, "url": f"http://127.0.0.1:{app.port}/auth?t={t}"})
+
+    # ------------------------------------------------------------------ app-level
+    @routes.get("/api/info")
+    async def info(request):
+        k = await asyncio.to_thread(twenv.kicad)
+        return jresp({"version": __version__, "kicad": k, "data_dir": config.data_dir(), "workspace": config.workspace(),
+                      "settings": app.settings.public(), "git": history.available(),
+                      "claude_cli": shutil.which("claude"), "stages": [{"id": s[0], "title": s[1], "description": s[2]}
+                                                                      for s in STAGES],
+                      "freerouting": os.environ.get("TW_FREEROUTING"), "java": shutil.which("java"),
+                      "live_api": twlive.HAVE_KIPY and not app.server_mode, "platform": sys.platform,
+                      "problems": await asyncio.to_thread(config.native_problems),
+                      "server_mode": app.server_mode, "auth": app.require_auth, "claude_auth": _claude_auth(app.settings),
+                      "repo": REPO_URL})
+
+    @routes.get("/api/update")
+    async def update_check(request):
+        from . import update
+        if not app.settings.get("update_check", True):
+            return jresp({"current": __version__, "configured": False, "off": True})
+        return jresp(await asyncio.to_thread(update.check, request.query.get("force") == "1"))
+
+    @routes.get("/api/changelog")
+    async def changelog(request):
+        """CHANGELOG.md as releases: [{version, date, body (markdown)}], newest first."""
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md")
+        try:
+            text = open(path, encoding="utf-8").read()
+        except OSError:
+            return jresp({"releases": []})
+        rel, cur = [], None
+        for line in text.splitlines():
+            m = re.match(r"^## \[?([0-9][^\]\s]*)\]?(?:\s*-\s*(.+))?$", line)
+            if m:
+                cur = {"version": m.group(1), "date": (m.group(2) or "").strip(), "lines": []}
+                rel.append(cur)
+            elif cur is not None and not line.startswith("[") :
+                cur["lines"].append(line)
+        return jresp({"releases": [{"version": r["version"], "date": r["date"], "body": "\n".join(r["lines"]).strip()} for r in rel]})
+
+    @routes.get("/api/settings")
+    async def get_settings(request):
+        return jresp(app.settings.public())
+
+    @routes.patch("/api/settings")
+    async def patch_settings(request):
+        body = await request.json()
+        for key in ("anthropic_api_key", "github_token", "server_password"):
+            if str(body.get(key, "")).startswith("set, ends"):
+                body.pop(key)
+        body.pop("server_password_hash", None)            # only ever computed here, from a typed password
+        pw = body.pop("server_password", None)
+        if pw:
+            body["server_password_hash"] = auth.hash_password(str(pw))
+        app.settings.update(body)
+        for a in app.agents.values():
+            if not a.busy:
+                await a.disconnect()
+        return jresp(app.settings.public())
+
+    @routes.get("/api/live")
+    async def live_status(request):
+        return jresp(await asyncio.to_thread(twlive.status))
+
+    @routes.post("/api/kicad/enable-api")
+    async def enable_api(request):
+        """Turn on KiCad's IPC API server (kicad_common.json api.enable_server) -- the setting KiCad's
+        Preferences > Plugins > "Enable KiCad API" writes. Takes effect when KiCad next starts. A KiCad
+        that is running now may write its old settings back when it quits, so the setting is checked
+        again (and re-applied) once it has."""
+        try:
+            path, already = await asyncio.to_thread(twlive.enable_api)
+        except (OSError, ValueError) as e:
+            return err(f"KiCad's settings file could not be changed ({e}); turn the API on in KiCad: Preferences > Plugins")
+        if already:
+            return jresp({"ok": True, "already": True, "path": path})
+        running = await asyncio.to_thread(twlive.kicad_process_running)
+        watcher = app.jobs.get(("kicad-api", ""))
+        if running and (watcher is None or watcher.done()):
+            async def reapply():
+                for _ in range(7200):                                   # up to 4 h
+                    await asyncio.sleep(2)
+                    if not await asyncio.to_thread(twlive.kicad_process_running):
+                        await asyncio.sleep(2)                          # let it finish writing its settings
+                        if await asyncio.to_thread(twlive.api_enabled) is False:
+                            await asyncio.to_thread(twlive.enable_api)
+                            app.log("KiCad wrote its old settings back on quitting; the API setting was re-applied")
+                        return
+            app.jobs[("kicad-api", "")] = asyncio.create_task(reapply())
+        return jresp({"ok": True, "path": path, "restart_needed": running,
+                      "note": "Quit and reopen KiCad to start its API server." if running else "Open KiCad: its API server starts with it."})
+
+    @routes.get("/api/activity")
+    async def activity(request):
+        """Projects where Claude, the checks or the outputs are working now (the Mac app asks before quitting)."""
+        busy = {pid for pid, a in app.agents.items() if a.busy}
+        busy |= {k[1] for k, j in app.jobs.items() if k[0] in ("checks", "outputs") and not j.done()}
+        out = []
+        for pid in sorted(busy):
+            try:
+                out.append({"id": pid, "name": app.store.get(pid).name})
+            except Exception:
+                out.append({"id": pid, "name": pid})
+        return jresp({"busy": out})
+
+    @routes.post("/api/quit")
+    async def quit_app(request):
+        asyncio.get_running_loop().call_later(0.3, lambda: os._exit(0))
+        return jresp({"ok": True})
+
+    @routes.post("/api/pick")
+    async def pick(request):
+        if app.server_mode:
+            return jresp({"path": None})
+        body = await request.json()
+        path = await asyncio.to_thread(app.pick, body.get("kind", "folder"))
+        return jresp({"path": path})
+
+    # ------------------------------------------------------------------ projects
+    @routes.get("/api/projects")
+    async def list_projects(request):
+        return jresp(await asyncio.to_thread(app.store.list))
+
+    @routes.post("/api/projects")
+    async def create_project(request):
+        body = await request.json()
+        name = (body.get("name") or "").strip() or "Untitled board"
+        brief = body.get("brief", "")
+        p = await asyncio.to_thread(app.store.create, name, brief, {"layers": body.get("layers", 2),
+                                                                    "fab_house": body.get("fab_house", "jlcpcb"),
+                                                                    "assembly": body.get("assembly", True),
+                                                                    "run_mode": body.get("run_mode")})
+        if body.get("start") and brief.strip():
+            a = app.agent(p.id)
+            await a.new_session()
+            await a.send(kickoff_text(p.run_mode()) + "\n\n" + brief, title=f"Kickoff: {name}")
+        return jresp(p.summary())
+
+    @routes.post("/api/projects/import")
+    async def import_project(request):
+        body = await request.json()
+        path = (body.get("path") or "").strip()
+        if not path:
+            return err("choose a KiCad project folder, a .kicad_pro, a .zip, or another tool's board file")
+        mode = body.get("mode", "copy")
+        from . import github
+        if github.is_git_url(path):
+            try:
+                p = await asyncio.to_thread(app.store.import_git, path, body.get("name") or None)
+            except github.GitHubError as e:
+                return err(str(e))
+        elif app.server_mode and not os.path.exists(os.path.expanduser(path)):
+            return err("on a server, upload the project as a .zip or give its GitHub URL")
+        elif mode == "in_place":
+            p = await asyncio.to_thread(app.store.open_in_place, path, body.get("name") or None)
+        else:
+            p = await asyncio.to_thread(app.store.import_copy, path, body.get("name") or None)
+        await _after_import(p, body.get("review"))
+        return jresp(p.summary())
+
+    async def _after_import(p, review):
+        if review:
+            a = app.agent(p.id)
+            await a.new_session()
+            await a.send("This KiCad project was just imported. Review it (skill import-review): summarise the design, run every "
+                         "check, and tell me what is verified, what looks wrong, and what needs the built board. Don't change "
+                         "anything yet.", title="Design review")
+
+    @routes.post("/api/projects/import/upload")
+    async def import_upload(request):
+        """A project uploaded as a .zip (or a single board file from another tool), streamed to disk."""
+        tmp = os.path.join(config.data_dir(), "tmp")
+        os.makedirs(tmp, exist_ok=True)
+        fields, saved = {}, None
+        reader = await request.multipart()
+        async for part in reader:
+            if part.filename:
+                name = os.path.basename(part.filename)
+                saved = os.path.join(tmp, f"upload-{int(time.time() * 1000)}-{name}")
+                await _stream(part, saved, 4 * 1024 ** 3)
+            else:
+                fields[part.name] = (await part.text()).strip()
+        if not saved:
+            return err("no file in the upload")
+        try:
+            p = await asyncio.to_thread(app.store.import_copy, saved, fields.get("name") or None)
+        finally:
+            os.remove(saved)
+        await _after_import(p, fields.get("review") in ("1", "true", "yes"))
+        return jresp(p.summary())
+
+    @routes.post("/api/projects/{pid}/upload")
+    async def project_upload(request):
+        """Files into the project (data sheets, reference designs): multipart files + field `dir`."""
+        rt = app.rt(request.match_info["pid"])
+        target, out = "uploads", []
+        reader = await request.multipart()
+        async for part in reader:
+            if not part.filename:
+                if part.name == "dir":
+                    target = (await part.text()).strip().strip("/") or "uploads"
+                continue
+            dest = safe_join(rt.p.root, os.path.join(target, os.path.basename(part.filename)))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            await _stream(part, dest, 512 * 1024 ** 2)
+            out.append(os.path.relpath(dest, rt.p.root))
+        return jresp({"saved": out})
+
+    @routes.get("/api/projects/{pid}/download")
+    async def project_download(request):
+        """The project as a .zip, to open in your own KiCad (history and app state left out unless git=1)."""
+        rt = app.rt(request.match_info["pid"])
+        path = await asyncio.to_thread(_zip_project, rt.p, request.query.get("git") == "1")
+        name = f"{rt.p.id}.zip"
+        return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                               "Cache-Control": "no-cache"})
+
+    @routes.post("/api/projects/demo")
+    async def demo_project(request):
+        """A copy of the toolkit's example board (USB-C, AMS1117, ATtiny85, Qwiic) to explore."""
+        from tw.checks.selftest import FIXTURE
+        p = await asyncio.to_thread(app.store.import_copy, FIXTURE, "Demo: USB-C ATtiny85 board")
+        p.cfg["kind"] = "demo"
+        p.cfg["description"] = "The example board: USB-C sink, AMS1117 3.3 V, ATtiny85, Qwiic I2C, power LED. Placed, routed and checked."
+        p.cfg["stages"] = {s: {"status": "done", "note": "", "updated": ""} for s in
+                           ("brief", "architecture", "parts", "schematic", "board_setup", "placement", "routing")}
+        p.cfg["stages"]["verification"] = {"status": "active", "note": "USB pair skew to review", "updated": ""}
+        p.save()
+        return jresp(p.summary())
+
+    @routes.get("/api/projects/{pid}")
+    async def get_project(request):
+        rt = app.rt(request.match_info["pid"])
+        p = rt.p.reload()
+        s = p.summary()
+        s["brief"] = p.brief()
+        s["live"] = rt.live
+        s["annotations"] = _annotations(p)
+        s["toolkit_current"] = not scaffold.toolkit_outdated(p.root)
+        return jresp(s)
+
+    @routes.patch("/api/projects/{pid}")
+    async def patch_project(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        p = rt.p
+        for k in ("name", "description", "archived"):
+            if k in body:
+                p.cfg[k] = body[k]
+        if body.get("run_mode") in RUN_MODES:
+            p.cfg["run_mode"] = body["run_mode"]
+        if "fab" in body:
+            p.cfg.setdefault("fab", {}).update(body["fab"])
+        if "checks" in body:
+            p.cfg.setdefault("checks", {}).update(body["checks"])
+        p.save()
+        return jresp(p.summary())
+
+    @routes.delete("/api/projects/{pid}")
+    async def delete_project(request):
+        pid = request.match_info["pid"]
+        rt = app.runtimes.pop(pid, None)
+        if rt:
+            rt.stop()
+        a = app.agents.pop(pid, None)
+        if a:
+            await a.disconnect()
+        where = await asyncio.to_thread(app.store.remove, pid, request.query.get("delete_files") == "1")
+        return jresp({"ok": True, "trash": where})
+
+    @routes.post("/api/projects/{pid}/stage")
+    async def set_stage(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        st = rt.p.set_stage(body["stage"], body["status"], body.get("note", ""))
+        rt.hub.emit("stages", stages=st)
+        return jresp(st)
+
+    # ------------------------------------------------------------------ GitHub
+    @routes.get("/api/github/me")
+    async def github_me(request):
+        from . import github
+        try:
+            return jresp({"login": await asyncio.to_thread(github.whoami)})
+        except github.GitHubError as e:
+            return err(str(e))
+
+    @routes.get("/api/projects/{pid}/github")
+    async def github_status(request):
+        from . import github
+        rt = app.rt(request.match_info["pid"])
+        return jresp(await asyncio.to_thread(github.status, rt.p, request.query.get("fetch") == "1"))
+
+    @routes.post("/api/projects/{pid}/github/{action}")
+    async def github_action(request):
+        from . import github
+        rt = app.rt(request.match_info["pid"])
+        action = request.match_info["action"]
+        body = await request.json() if request.can_read_body else {}
+        rt.mark_self(30)
+        try:
+            if action == "connect":
+                out = await asyncio.to_thread(github.connect, rt.p, (body.get("repo") or "").strip() or None,
+                                              body.get("private", True))
+            elif action == "push":
+                out = await asyncio.to_thread(github.push, rt.p)
+            elif action == "pull":
+                out = await asyncio.to_thread(github.pull, rt.p)
+                if out.get("pulled"):
+                    rt.hub.emit("board.changed", version=-1, source="github")
+                    rt.hub.emit("schematic.changed", source="github")
+            elif action == "settings":
+                rt.p.cfg.setdefault("github", {})["auto_push"] = bool(body.get("auto_push", True))
+                rt.p.save()
+                out = await asyncio.to_thread(github.status, rt.p, False)
+            else:
+                return err("unknown action", 404)
+        except github.GitHubError as e:
+            return err(str(e))
+        rt.hub.emit("github.status", **{k: v for k, v in out.items() if k != "type"})
+        return jresp(out)
+
+    @routes.post("/api/projects/{pid}/toolkit/update")
+    async def update_toolkit(request):
+        rt = app.rt(request.match_info["pid"])
+        v = await asyncio.to_thread(scaffold.refresh, rt.p.root, rt.p.cfg)
+        rt.p.save()
+        return jresp({"toolkit": v})
+
+    # ------------------------------------------------------------------ geometry for the viewers
+    @routes.get("/api/projects/{pid}/board")
+    async def board(request):
+        rt = app.rt(request.match_info["pid"])
+        js = await asyncio.to_thread(rt.board_json)
+        if js is None:
+            return jresp({"empty": True})
+        return jresp(js)
+
+    @routes.get("/api/projects/{pid}/schematic")
+    async def schematic(request):
+        rt = app.rt(request.match_info["pid"])
+        js = await asyncio.to_thread(rt.schematic_json)
+        if js is None:
+            return jresp({"empty": True})
+        return jresp(js)
+
+    @routes.get("/api/projects/{pid}/schematic/svg")
+    async def schematic_svg(request):
+        rt = app.rt(request.match_info["pid"])
+        f = await asyncio.to_thread(rt.svg_for, request.query.get("sheet", "/"))
+        if not f:
+            return err("no sheets plotted", 404)
+        return web.FileResponse(f, headers={"Content-Type": "image/svg+xml", "Cache-Control": "no-cache"})
+
+    @routes.get("/api/projects/{pid}/model.glb")
+    async def model_glb(request):
+        """The board as a 3D model (binary glTF) for the interactive 3D view; parts=0 for the bare board."""
+        rt = app.rt(request.match_info["pid"])
+        try:
+            f = await asyncio.to_thread(rt.glb, request.query.get("parts", "1") != "0")
+        except Exception as e:
+            return err(f"the 3D export failed: {e}", 500)
+        if not f:
+            return err("no board yet", 404)
+        return web.FileResponse(f, headers={"Content-Type": "model/gltf-binary", "Cache-Control": "no-cache"})
+
+    @routes.post("/api/projects/{pid}/add-files")
+    async def add_files(request):
+        """Files from this Mac into the project (dropped on the window): copied into `dir` (uploads/)."""
+        if app.server_mode:
+            return err("on a server, upload the files instead")
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        target = (body.get("dir") or "uploads").strip("/") or "uploads"
+        out = []
+        for src in body.get("paths") or []:
+            src = os.path.expanduser(str(src))
+            if not os.path.exists(src):
+                continue
+            dest = safe_join(rt.p.root, os.path.join(target, os.path.basename(src.rstrip("/"))))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if os.path.isdir(src):
+                await asyncio.to_thread(shutil.copytree, src, dest, dirs_exist_ok=True)
+            else:
+                await asyncio.to_thread(shutil.copy2, src, dest)
+            out.append(os.path.relpath(dest, rt.p.root))
+        return jresp({"saved": out})
+
+    @routes.post("/api/projects/{pid}/selection")
+    async def selection(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        rt.selection["app"] = body.get("items", [])
+        return jresp({"ok": True})
+
+    @routes.get("/api/projects/{pid}/annotations")
+    async def get_ann(request):
+        rt = app.rt(request.match_info["pid"])
+        return jresp(_annotations(rt.p))
+
+    @routes.post("/api/projects/{pid}/annotations")
+    async def set_ann(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        path = os.path.join(rt.p.state_dir(), "annotations.json")
+        items = body.get("items", [])
+        json.dump(items, open(path, "w"), indent=1)
+        rt.hub.emit("annotations", items=items)
+        return jresp(items)
+
+    # ------------------------------------------------------------------ review flags
+    def _review(rt):
+        from .review import Review
+        return Review(rt.p)
+
+    def _review_changed(rt):
+        rt.hub.emit("review.changed", flags=_review(rt).flags())
+
+    @routes.get("/api/projects/{pid}/review")
+    async def review_list(request):
+        rt = app.rt(request.match_info["pid"])
+        return jresp({"flags": _review(rt).flags()})
+
+    @routes.post("/api/projects/{pid}/review")
+    async def review_add(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            f = await asyncio.to_thread(_review(rt).add, body.get("view", "board"), body.get("text", ""), body.get("where"),
+                                        body.get("snapshot"), body.get("source", "user"))
+        except ValueError as e:
+            return err(str(e))
+        _review_changed(rt)
+        return jresp(f)
+
+    @routes.patch("/api/projects/{pid}/review/{fid}")
+    async def review_update(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        f = await asyncio.to_thread(_review(rt).update, request.match_info["fid"],
+                                    **{k: v for k, v in body.items() if k in ("text", "status", "where", "resolution", "snapshot")})
+        _review_changed(rt)
+        return jresp(f)
+
+    @routes.delete("/api/projects/{pid}/review/{fid}")
+    async def review_delete(request):
+        rt = app.rt(request.match_info["pid"])
+        r = _review(rt)
+        if request.match_info["fid"] == "resolved":
+            n = await asyncio.to_thread(r.clear_resolved)
+        else:
+            await asyncio.to_thread(r.delete, request.match_info["fid"])
+            n = 1
+        _review_changed(rt)
+        return jresp({"removed": n})
+
+    @routes.get("/api/projects/{pid}/review/{fid}/snapshot")
+    async def review_snapshot(request):
+        rt = app.rt(request.match_info["pid"])
+        f = _review(rt).snapshot_path(request.match_info["fid"])
+        if not os.path.isfile(f):
+            return err("no snapshot", 404)
+        return web.FileResponse(f, headers={"Cache-Control": "no-cache", "Content-Type": "image/png"})
+
+    @routes.post("/api/projects/{pid}/review/send")
+    async def review_send(request):
+        """Send flags to Claude in one message, with their snapshots: the ids given, or every open one."""
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        r = _review(rt)
+        ids = body.get("ids") or []
+        flags = [f for f in r.flags() if (f["id"] in ids if ids else f["status"] == "open")]
+        if not flags:
+            return err("no open flags to send")
+        a = app.agent(rt.p.id)
+        if a.busy:
+            return err("Claude is still working: stop it first, or send the flags when it has finished")
+        images = [r.snapshot_path(f["id"]) for f in flags if f.get("snapshot") and os.path.isfile(r.snapshot_path(f["id"]))]
+        text = r.message(flags, body.get("note", ""))
+        att = [{"kind": "flag", "id": f["id"], "n": f["n"], "label": f"#{f['n']} {f['text'][:60]}", "view": f["view"]} for f in flags]
+        sid = await a.send(text, body.get("sid"), att, title=None, images=images[:10])
+        r.mark_sent([f["id"] for f in flags])
+        _review_changed(rt)
+        return jresp({"sid": sid, "sent": len(flags)})
+
+    # ------------------------------------------------------------------ checks
+    @routes.get("/api/projects/{pid}/checks")
+    async def get_checks(request):
+        rt = app.rt(request.match_info["pid"])
+        f = os.path.join(rt.p.tw.build, "checks.json")
+        if not os.path.exists(f):
+            from tw.checks import load_all, REGISTRY
+            load_all()
+            return jresp({"never_run": True, "checks": [{"id": c.id, "title": c.title, "group": c.group, "doc": c.doc,
+                                                         "status": "not run", "findings": []} for c in REGISTRY]})
+        d = json.load(open(f))
+        from tw.checks import load_all, REGISTRY
+        load_all()
+        docs = {c.id: c.doc for c in REGISTRY}
+        for c in d.get("checks", []):
+            c["doc"] = docs.get(c["id"], "")
+        have = {c["id"] for c in d.get("checks", [])}
+        disabled = set((rt.p.tw.cfg.get("checks") or {}).get("disabled", []))
+        for c in REGISTRY:                            # checks added since the last run (an app update)
+            if c.id not in have and c.default and c.id not in disabled and not c.id.startswith("project."):
+                d.setdefault("checks", []).append({"id": c.id, "title": c.title, "group": c.group, "doc": c.doc,
+                                                   "status": "not run", "findings": [], "new": True})
+        d["running"] = rt.checks_lock.locked()
+        return jresp(d)
+
+    @routes.post("/api/projects/{pid}/checks/run")
+    async def run_checks(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json() if request.can_read_body else {}
+        if rt.checks_lock.locked():
+            return err("checks are already running")
+        import threading
+        from tw.checks.runner import run_all
+        stop = threading.Event()
+
+        def prog(c, r):
+            rt.mark_self(30)
+            rt.hub.emit("checks.progress", id=c.id, title=c.title, status=r["status"], n=len(r["findings"]))
+
+        async def job():
+            async with rt.checks_lock:
+                rt.checks_stop = stop
+                rt.hub.emit("checks.start", only=body.get("only"))
+                try:
+                    res = await asyncio.to_thread(run_all, rt.p.tw, only=body.get("only") or None,
+                                                  refresh=bool(body.get("refresh")), progress=prog, stop=stop)
+                    rt.hub.emit("checks.done", counts=res["counts"], stopped=bool(res.get("stopped")))
+                except Exception as e:
+                    traceback.print_exc()
+                    rt.hub.emit("checks.done", error=f"{type(e).__name__}: {e}")
+                finally:
+                    rt.mark_self(4)
+                    if rt.checks_stop is stop:
+                        rt.checks_stop = None
+        app.jobs[("checks", rt.p.id)] = asyncio.ensure_future(job())
+        return jresp({"started": True})
+
+    @routes.post("/api/projects/{pid}/checks/stop")
+    async def stop_checks(request):
+        rt = app.rt(request.match_info["pid"])
+        if rt.checks_stop is None:
+            return jresp({"stopped": False})
+        rt.checks_stop.set()
+        return jresp({"stopped": True})
+
+    # ------------------------------------------------------------------ design rules
+    def _netlist_for(rt):
+        try:
+            from tw.checks.context import Context
+            return Context(rt.p.tw).netlist if rt.p.tw.has_sch() else None
+        except Exception:
+            return None
+
+    @routes.get("/api/projects/{pid}/rules")
+    async def rules_get(request):
+        rt = app.rt(request.match_info["pid"])
+        from . import rules as ruleslib
+        if not rt.p.tw.pro:
+            return jresp({"empty": True})
+        d = await asyncio.to_thread(lambda: ruleslib.state(rt.p.tw, rt.board(), _netlist_for(rt)))
+        d["kicad_open"] = bool(rt.live.get("running") and rt.live.get("board_open"))
+        return jresp(d)
+
+    @routes.post("/api/projects/{pid}/rules/check")
+    async def rules_check(request):
+        from tw import dru as twdru
+        body = await request.json()
+        rules, problems = twdru.check(body.get("dru", ""))
+        return jresp({"rules": rules, "problems": problems})
+
+    @routes.post("/api/projects/{pid}/rules/probe")
+    async def rules_probe(request):
+        rt = app.rt(request.match_info["pid"])
+        from tw import dru as twdru
+        body = await request.json()
+        if not rt.p.tw.has_pcb():
+            return err("no board to try the rules on")
+        ok, why = await asyncio.to_thread(twdru.kicad_accepts, rt.p.tw.pcb, body.get("dru", ""))
+        return jresp({"ok": ok, "why": why})
+
+    @routes.put("/api/projects/{pid}/rules")
+    async def rules_put(request):
+        rt = app.rt(request.match_info["pid"])
+        from . import rules as ruleslib
+        body = await request.json()
+
+        def work():
+            if history.has_repo(rt.p.root):
+                history.snapshot(rt.p.root, "Before editing the design rules")
+            rt.mark_self(10)
+            return ruleslib.save(rt.p.tw, body)
+        ok, msgs = await asyncio.to_thread(work)
+        if not ok:
+            return jresp({"ok": False, "errors": msgs, "error": msgs[0] if msgs else "not saved"}, 400)
+        rt.hub.emit("rules.changed")
+        d = await asyncio.to_thread(lambda: ruleslib.state(rt.p.tw, rt.board(), _netlist_for(rt)))
+        d["kicad_open"] = bool(rt.live.get("running") and rt.live.get("board_open"))
+        return jresp({"ok": True, "warnings": msgs, "state": d})
+
+    # ------------------------------------------------------------------ the board's timelapse
+    @routes.get("/api/projects/{pid}/timelapse")
+    async def timelapse_get(request):
+        rt = app.rt(request.match_info["pid"])
+        since = int(request.query.get("since", "0") or 0)
+
+        def work():
+            frames = rt.timelapse.frames(since)
+            hist = 0
+            if rt.p.tw.has_pcb() and history.has_repo(rt.p.root):
+                r = subprocess.run(["git", "-C", rt.p.root, "log", "--format=%H", "--", os.path.relpath(rt.p.tw.pcb, rt.p.root)],
+                                   capture_output=True, text=True, timeout=30)
+                hist = len(r.stdout.split())
+            return {"frames": frames, "count": since + len(frames), "history": hist, "building": bool(getattr(rt, "tl_building", False))}
+        return jresp(await asyncio.to_thread(work))
+
+    @routes.post("/api/projects/{pid}/timelapse/history")
+    async def timelapse_history(request):
+        rt = app.rt(request.match_info["pid"])
+        if getattr(rt, "tl_building", False):
+            return err("already rebuilding the timelapse")
+        if not rt.p.tw.has_pcb():
+            return err("no board yet")
+        rt.tl_building = True
+
+        async def job():
+            try:
+                pcb = os.path.relpath(rt.p.tw.pcb, rt.p.root)
+                n = await asyncio.to_thread(rt.timelapse.from_history, pcb,
+                                            lambda i, k: rt.hub.emit("timelapse.progress", done=i, total=k))
+                b = await asyncio.to_thread(rt.board)
+                if b is not None:
+                    await asyncio.to_thread(rt.record_frame, b, "you")        # the board as it is now, if it moved on
+                rt.hub.emit("timelapse.changed", commits=n)
+            except Exception as e:
+                traceback.print_exc()
+                rt.hub.emit("timelapse.changed", error=str(e))
+            finally:
+                rt.tl_building = False
+        app.jobs[("timelapse", rt.p.id)] = asyncio.ensure_future(job())
+        return jresp({"started": True})
+
+    @routes.post("/api/projects/{pid}/timelapse/video")
+    async def timelapse_video(request):
+        """The player's recording (the body, mp4 or webm), saved as build/timelapse/<project>-<time>.<ext>."""
+        rt = app.rt(request.match_info["pid"])
+        ext = "mp4" if request.query.get("ext") == "mp4" else "webm"
+        d = os.path.join(rt.p.root, "build", "timelapse")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{rt.p.id}-timelapse-{time.strftime('%Y%m%d-%H%M%S')}.{ext}")
+        size = 0
+        with open(path, "wb") as f:
+            async for chunk in request.content.iter_chunked(1 << 16):
+                size += len(chunk)
+                if size > 400 * 1024 * 1024:
+                    f.close()
+                    os.remove(path)
+                    return err("the recording is too large")
+                f.write(chunk)
+        return jresp({"path": os.path.relpath(path, rt.p.root), "abs": path, "bytes": size})
+
+    @routes.delete("/api/projects/{pid}/timelapse")
+    async def timelapse_clear(request):
+        rt = app.rt(request.match_info["pid"])
+        await asyncio.to_thread(rt.timelapse.clear)
+        b = await asyncio.to_thread(rt.board)
+        if b is not None:
+            await asyncio.to_thread(rt.record_frame, b, "start")
+        rt.hub.emit("timelapse.changed")
+        return jresp({"ok": True})
+
+    # ------------------------------------------------------------------ bill of materials
+    @routes.get("/api/projects/{pid}/bom")
+    async def bom_get(request):
+        rt = app.rt(request.match_info["pid"])
+        from . import bom as bomlib
+        d = await asyncio.to_thread(lambda: bomlib.bom_data(rt.p.tw, rt.board()))
+        d["looking_up"] = bool(getattr(rt, "bom_stop", None))
+        return jresp(d)
+
+    @routes.get("/api/projects/{pid}/bom.csv")
+    async def bom_csv(request):
+        rt = app.rt(request.match_info["pid"])
+        from . import bom as bomlib
+        kind = "full" if request.query.get("kind") == "full" else "jlc"
+        d = await asyncio.to_thread(lambda: bomlib.bom_data(rt.p.tw, rt.board()))
+        if d.get("empty"):
+            return err("no schematic yet", 404)
+        name = f"{rt.p.tw.stem or 'board'}-BOM{'-JLC' if kind == 'jlc' else ''}.csv"
+        return web.Response(text=bomlib.csv_text(d, kind), content_type="text/csv",
+                            headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-cache"})
+
+    @routes.post("/api/projects/{pid}/bom/savings")
+    async def bom_savings(request):
+        """Basic-part equivalents for the Extended resistors and capacitors (JLC's fee per Extended part)."""
+        from . import savings
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json() if request.can_read_body else {}
+        boards = max(1, min(1000, int(body.get("boards") or 5)))
+        prog = lambda i, n, what: rt.hub.emit("savings.progress", done=i, total=n, what=what)
+        try:
+            r = await asyncio.to_thread(savings.suggestions, rt.p.tw, rt.board() if rt.p.tw.has_pcb() else None, boards, 90.0, prog)
+        except Exception as e:
+            app.log(traceback.format_exc())
+            return err(f"{type(e).__name__}: {e}")
+        r["message"] = savings.claude_message(r["items"]) if r["items"] else ""
+        return jresp(r)
+
+    @routes.post("/api/projects/{pid}/bom/lookup")
+    async def bom_lookup(request):
+        rt = app.rt(request.match_info["pid"])
+        if getattr(rt, "bom_stop", None):
+            return err("already looking up the parts")
+        import threading
+        from . import bom as bomlib
+        body = await request.json() if request.can_read_body else {}
+        stop = threading.Event()
+        rt.bom_stop = stop
+
+        def prog(done, total, code, res):
+            rt.hub.emit("bom.lookup", done=done, total=total, code=code, result=res)
+
+        async def job():
+            try:
+                d = await asyncio.to_thread(lambda: bomlib.bom_data(rt.p.tw, rt.board()))
+                codes = body.get("codes") or sorted({r["lcsc"] for r in d.get("rows", []) if r["lcsc"] and r["assembled"]})
+                rt.hub.emit("bom.lookup", done=0, total=len(codes))
+                res = await asyncio.to_thread(bomlib.lookup, rt.p.tw, codes, prog, stop)
+                bad = {k: v for k, v in res.items() if v != "ok"}
+                rt.hub.emit("bom.lookup", done=len(codes), total=len(codes), finished=True, failed=len(bad),
+                            stopped=stop.is_set(), note=next(iter(bad.values()), "") if bad else "")
+            except Exception as e:
+                traceback.print_exc()
+                rt.hub.emit("bom.lookup", finished=True, error=f"{type(e).__name__}: {e}")
+            finally:
+                rt.bom_stop = None
+                rt.hub.emit("bom.changed")
+        app.jobs[("bom", rt.p.id)] = asyncio.ensure_future(job())
+        return jresp({"started": True})
+
+    @routes.post("/api/projects/{pid}/bom/stop")
+    async def bom_stop(request):
+        rt = app.rt(request.match_info["pid"])
+        if getattr(rt, "bom_stop", None):
+            rt.bom_stop.set()
+        return jresp({"ok": True})
+
+    @routes.post("/api/projects/{pid}/selftest")
+    async def selftest(request):
+        rt = app.rt(request.match_info["pid"])
+        from tw import kicad as twk
+        rc, out = await asyncio.to_thread(_selftest)
+        rt.hub.emit("notice", level="ok" if rc == 0 else "error", text=out.strip().splitlines()[-1] if out.strip() else "")
+        return jresp({"ok": rc == 0, "output": out})
+
+    # ------------------------------------------------------------------ files, history, outputs
+    @routes.get("/api/projects/{pid}/files")
+    async def files(request):
+        rt = app.rt(request.match_info["pid"])
+        root = rt.p.root
+        base = safe_join(root, request.query.get("path", ""))
+        out = []
+        for name in sorted(os.listdir(base)):
+            if name in HIDDEN or name.endswith(".pyc"):
+                continue
+            full = os.path.join(base, name)
+            st = os.stat(full)
+            out.append({"name": name, "path": os.path.relpath(full, root), "dir": os.path.isdir(full), "size": st.st_size,
+                        "mtime": st.st_mtime})
+        out.sort(key=lambda e: (not e["dir"], e["name"].lower()))
+        return jresp({"path": os.path.relpath(base, root) if base != root else "", "entries": out})
+
+    @routes.get("/api/projects/{pid}/file")
+    async def file(request):
+        rt = app.rt(request.match_info["pid"])
+        path = safe_join(rt.p.root, request.query.get("path", ""))
+        if not os.path.isfile(path):
+            return err("no such file", 404)
+        ext = os.path.splitext(path)[1].lower()
+        if request.query.get("raw") or ext not in TEXT_EXT and not path.endswith(("-lib-table", "CLAUDE.md", "tw")):
+            ct = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            # the file's own name for a download (without it the Mac app saves "file.zip", "file.csv")
+            return web.FileResponse(path, headers={"Content-Type": ct, "Cache-Control": "no-cache",
+                                                   "Content-Disposition": _disposition(os.path.basename(path),
+                                                                                       request.query.get("download") == "1")})
+        size = os.path.getsize(path)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(600_000)
+        return jresp({"path": os.path.relpath(path, rt.p.root), "size": size, "text": text, "truncated": size > 600_000})
+
+    @routes.post("/api/projects/{pid}/reveal")
+    async def reveal(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        app.reveal(safe_join(rt.p.root, body.get("path", "")))
+        return jresp({"ok": True})
+
+    @routes.get("/api/projects/{pid}/history")
+    async def get_history(request):
+        rt = app.rt(request.match_info["pid"])
+        return jresp(await asyncio.to_thread(history.log, rt.p.root, 150))
+
+    @routes.get("/api/projects/{pid}/history/{rev}")
+    async def get_rev(request):
+        rt = app.rt(request.match_info["pid"])
+        return jresp(await asyncio.to_thread(history.changed_files, rt.p.root, request.match_info["rev"]))
+
+    board_pictures = {}                          # (project, git rev) -> the board's picture then (revs never change)
+
+    @routes.get("/api/projects/{pid}/board-at/{rev}")
+    async def board_at(request):
+        """The board as it was at a checkpoint ('now': as it is), in the timelapse's picture form, for
+        Compare versions."""
+        from .timelapse import picture
+        from tw.board import Board
+        rt = app.rt(request.match_info["pid"])
+        rev = request.match_info["rev"]
+        tw = rt.p.tw
+        if not tw.has_pcb():
+            return err("no board yet", 404)
+
+        def work():
+            if rev == "now":
+                b = rt.board()
+                return {"rev": "now", "picture": picture(b), "shapes_board": True}
+            key = (rt.p.id, rev)
+            if key in board_pictures:
+                return board_pictures[key]
+            if not re.fullmatch(r"[0-9a-fA-F]{4,40}", rev):
+                raise ValueError("not a checkpoint")
+            text = history.show_file(rt.p.root, rev, os.path.relpath(tw.pcb, rt.p.root))
+            if not text or not text.lstrip().startswith("(kicad_pcb"):
+                return None
+            out = {"rev": rev, "picture": picture(Board.parse(text))}
+            board_pictures[key] = out
+            if len(board_pictures) > 40:
+                board_pictures.pop(next(iter(board_pictures)))
+            return out
+        try:
+            d = await asyncio.to_thread(work)
+        except ValueError as e:
+            return err(str(e))
+        if d is None:
+            return err("the board did not exist at that checkpoint", 404)
+        return jresp(d)
+
+    @routes.post("/api/projects/{pid}/history/snapshot")
+    async def snapshot(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        h = await asyncio.to_thread(history.snapshot, rt.p.root, body.get("message") or "Checkpoint")
+        rt.hub.emit("history.snapshot", hash=h, message=body.get("message"))
+        return jresp({"hash": h})
+
+    @routes.post("/api/projects/{pid}/history/restore")
+    async def restore(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        rt.mark_self(10)
+        h = await asyncio.to_thread(history.restore, rt.p.root, body["rev"])
+        rt.hub.emit("history.snapshot", hash=h, message=f"Restored {body['rev']}")
+        rt.hub.emit("board.changed", version=-1, source="tracewright")
+        rt.hub.emit("schematic.changed", source="tracewright")
+        return jresp({"hash": h})
+
+    @routes.get("/api/projects/{pid}/outputs")
+    async def outputs(request):
+        rt = app.rt(request.match_info["pid"])
+        b = rt.p.tw.build
+        out = {}
+        for sec in ("release", "fab", "docs", "images"):
+            d = os.path.join(b, sec)
+            if os.path.isdir(d):
+                out[sec] = [{"name": f, "path": os.path.relpath(os.path.join(d, f), rt.p.root), "size": os.path.getsize(os.path.join(d, f)),
+                             "mtime": os.path.getmtime(os.path.join(d, f))}
+                            for f in sorted(os.listdir(d)) if os.path.isfile(os.path.join(d, f))]
+        return jresp(out)
+
+    @routes.post("/api/projects/{pid}/outputs/run")
+    async def run_outputs(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json() if request.can_read_body else {}
+        key = ("outputs", rt.p.id)
+        if key in app.jobs and not app.jobs[key].done():
+            return err("outputs are already being generated")
+        from tw.outputs import Outputs
+
+        async def job():
+            rt.hub.emit("outputs.start")
+            rt.mark_self(600)
+            try:
+                o = Outputs(rt.p.tw)
+                o.say = lambda m: (o.log.append(m), rt.hub.emit("outputs.progress", text=m))
+                z = await asyncio.to_thread(o.all, bool(body.get("renders", True)))
+                rt.hub.emit("outputs.done", release=os.path.relpath(z, rt.p.root), log=o.log)
+            except Exception as e:
+                rt.hub.emit("outputs.done", error=f"{type(e).__name__}: {e}")
+            finally:
+                rt.mark_self(4)
+        app.jobs[key] = asyncio.ensure_future(job())
+        return jresp({"started": True})
+
+    # ------------------------------------------------------------------ ordering (the Order tab)
+    def _order_state(rt, qty):
+        from . import order, bom as bomlib
+        tw = rt.p.tw
+        m = order.mode(tw)
+        b = rt.board() if tw.has_pcb() else None
+        sp = order.specs(b) if b is not None else None
+        data = bomlib.bom_data(tw, b) if tw.has_sch() else {"empty": True}
+        totals = data.get("totals", {}) if not data.get("empty") else {}
+        fresh = order.fab_fresh(tw) if tw.has_pcb() else False
+        files = {}
+        od = os.path.join(tw.build, "order")
+        for t in ("jlc", "pcbway", "parts"):
+            d = os.path.join(od, t)
+            if os.path.isdir(d):
+                files[t] = [{"name": f, "path": os.path.relpath(os.path.join(d, f), rt.p.root), "mtime": os.path.getmtime(os.path.join(d, f))}
+                            for f in sorted(os.listdir(d)) if os.path.isfile(os.path.join(d, f))]
+        return {"mode": m, "modes": order.MODES, "specs": sp, "estimate": order.estimate(sp, totals, m, qty) if sp else None,
+                "readiness": order.readiness(tw, data, rt.p.checks_summary(), m, fresh), "totals": totals, "fresh": fresh,
+                "files": files, "links": order.LINKS, "has_pcb": tw.has_pcb()}
+
+    @routes.get("/api/projects/{pid}/bringup")
+    async def bringup_get(request):
+        from . import bringup
+        rt = app.rt(request.match_info["pid"])
+        return jresp(await asyncio.to_thread(bringup.state, rt.p.root))
+
+    @routes.post("/api/projects/{pid}/bringup")
+    async def bringup_post(request):
+        """A step's result on one board: {board, key, done?, value?, note?}; or {add_board: serial}."""
+        from . import bringup
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        if "add_board" in body:
+            serial = await asyncio.to_thread(bringup.add_board, rt.p.root, body["add_board"])
+            return jresp({"board": serial, **await asyncio.to_thread(bringup.state, rt.p.root)})
+        if body.get("select"):
+            d = bringup.load(rt.p.root)
+            d["current"] = str(body["select"])
+            await asyncio.to_thread(bringup.save, rt.p.root, d)
+            return jresp(await asyncio.to_thread(bringup.state, rt.p.root))
+        r = await asyncio.to_thread(bringup.record, rt.p.root, body.get("board") or "1", body["key"], body.get("done"), body.get("value"), body.get("note"))
+        return jresp(r)
+
+    @routes.get("/api/projects/{pid}/bringup/report")
+    async def bringup_report(request):
+        from . import bringup
+        rt = app.rt(request.match_info["pid"])
+        return web.Response(text=await asyncio.to_thread(bringup.report, rt.p.root), content_type="text/markdown",
+                            headers={"Content-Disposition": _disposition(f"{rt.p.id}-bring-up-results.md", True)})
+
+    @routes.get("/api/projects/{pid}/overview")
+    async def project_overview(request):
+        from . import overview
+        rt = app.rt(request.match_info["pid"])
+        return jresp(await asyncio.to_thread(overview.overview, app, rt))
+
+    @routes.get("/api/projects/{pid}/stackup")
+    async def stackup(request):
+        """The board's layer stack for the calculators: copper per layer (mm), the dielectric under the top
+        layer (height, er), the thickness."""
+        rt = app.rt(request.match_info["pid"])
+
+        def work():
+            b = rt.board() if rt.p.tw.has_pcb() else None
+            if b is None:
+                return {"board": False}
+            cu = {l: b.copper_mm(l) for l in b.copper}
+            top = b.dielectric_between(b.copper[0], b.copper[1]) if len(b.copper) > 1 else None
+            inner = b.dielectric_between(b.copper[1], b.copper[2]) if len(b.copper) > 3 else None
+            return {"board": True, "layers": b.copper, "copper_mm": cu, "thickness": b.thickness, "stackup": b.stackup,
+                    "top_dielectric": {"h": top[0], "er": top[1]} if top else None,
+                    "inner_dielectric": {"h": inner[0], "er": inner[1]} if inner else None,
+                    "rules": {"min_track": min((t.w for t in b.tracks), default=None)}}
+        return jresp(await asyncio.to_thread(work))
+
+    @routes.get("/api/projects/{pid}/order")
+    async def order_get(request):
+        rt = app.rt(request.match_info["pid"])
+        qty = max(1, min(1000, int(request.query.get("qty", "5") or 5)))
+        return jresp(await asyncio.to_thread(_order_state, rt, qty))
+
+    @routes.put("/api/projects/{pid}/order/mode")
+    async def order_mode(request):
+        from . import order
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            order.set_mode(rt.p, body.get("mode"))
+        except ValueError as e:
+            return err(str(e))
+        rt.hub.emit("project.changed", fab=rt.p.cfg.get("fab"))
+        return jresp(await asyncio.to_thread(_order_state, rt, int(body.get("qty") or 5)))
+
+    order_locks = {}
+
+    async def _order_job(rt, fn):
+        """One order package at a time per project; its steps go to the Order tab as order.progress."""
+        lock = order_locks.setdefault(rt.p.id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("an order package is already being made")
+        async with lock:
+            rt.mark_self(300)
+            say = lambda m: rt.hub.emit("order.progress", text=m)
+            try:
+                return await fn(say)
+            finally:
+                rt.mark_self(4)
+
+    @routes.post("/api/projects/{pid}/order/jlc")
+    async def order_jlc(request):
+        """The package JLC's quote page takes, and the order sheet; the app opens the page and the folder."""
+        from . import order, bom as bomlib
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json() if request.can_read_body else {}
+        qty = max(1, int(body.get("qty") or 5))
+        tw = rt.p.tw
+        if not tw.has_pcb():
+            return err("no board yet")
+
+        async def run(say):
+            def work():
+                b = rt.board()
+                sp = order.specs(b)
+                data = bomlib.bom_data(tw, b)
+                m = order.mode(tw)
+                est = order.estimate(sp, data.get("totals", {}), m, qty)
+                return order.jlc_package(tw, sp, est, m, say)
+            return await asyncio.to_thread(work)
+        try:
+            r = await _order_job(rt, run)
+        except Exception as e:
+            app.log(traceback.format_exc())
+            return err(f"{type(e).__name__}: {e}")
+        return jresp({**r, "dir_rel": os.path.relpath(r["dir"], rt.p.root)})
+
+    @routes.post("/api/projects/{pid}/order/pcbway")
+    async def order_pcbway(request):
+        """One click: the package PCBWay's KiCad plugin makes, uploaded the same way; returns PCBWay's
+        quote page for the board (the user's browser opens it)."""
+        from . import order
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_pcb():
+            return err("no board yet")
+
+        async def run(say):
+            pk = await asyncio.to_thread(order.pcbway_zip, rt.p.tw, say)
+            return await order.pcbway_upload(pk, say)
+        try:
+            r = await _order_job(rt, run)
+        except Exception as e:
+            app.log(traceback.format_exc())
+            return err(f"PCBWay upload failed: {type(e).__name__}: {e}", 502)
+        return jresp({**r, "zip_rel": os.path.relpath(r["zip"], rt.p.root)})
+
+    @routes.post("/api/projects/{pid}/order/parts")
+    async def order_parts(request):
+        """Self-assembly: the parts in DigiKey's, Mouser's and LCSC's BOM formats, for N boards plus spares."""
+        from . import order
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json() if request.can_read_body else {}
+        boards = max(1, min(500, int(body.get("boards") or 3)))
+        if not rt.p.tw.has_sch():
+            return err("no schematic yet")
+
+        async def run(say):
+            return await asyncio.to_thread(order.parts_files, rt.p.tw, boards, say)
+        try:
+            r = await _order_job(rt, run)
+        except Exception as e:
+            app.log(traceback.format_exc())
+            return err(f"{type(e).__name__}: {e}")
+        return jresp({**r, "dir_rel": os.path.relpath(r["dir"], rt.p.root)})
+
+    @routes.post("/api/projects/{pid}/render3d")
+    async def render3d(request):
+        rt = app.rt(request.match_info["pid"])
+        from tw.outputs import Outputs
+        o = Outputs(rt.p.tw)
+        files = await asyncio.to_thread(o.renders, "basic")
+        return jresp({"files": [os.path.relpath(f, rt.p.root) for f in files]})
+
+    @routes.post("/api/projects/{pid}/kicad/open")
+    async def kicad_open(request):
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        await asyncio.to_thread(app.open_in_kicad, rt.p, body.get("what", "project"))
+        return jresp({"ok": True})
+
+    @routes.get("/api/projects/{pid}/thumb")
+    async def thumb(request):
+        rt = app.rt(request.match_info["pid"])
+        f = rt.p.thumbnail()
+        if not f:
+            f = await asyncio.to_thread(_make_thumb, rt)
+        if not f:
+            return err("no board yet", 404)
+        return web.FileResponse(f, headers={"Cache-Control": "no-cache"})
+
+    @routes.get("/api/projects/{pid}/media/{name}")
+    async def media(request):
+        rt = app.rt(request.match_info["pid"])
+        f = safe_join(os.path.join(rt.p.root, ".tracewright", "sessions", "media"), request.match_info["name"])
+        return web.FileResponse(f)
+
+    # ------------------------------------------------------------------ chat
+    @routes.get("/api/projects/{pid}/sessions")
+    async def sessions(request):
+        a = app.agent(request.match_info["pid"])
+        cur = a.session.sid if a.session else (a.index()[0]["sid"] if a.index() else None)
+        return jresp({"sessions": a.index(), "current": cur, "busy": a.busy,
+                      "pending": [info for _, info in a.pending.values()]})
+
+    @routes.get("/api/projects/{pid}/sessions/{sid}")
+    async def session(request):
+        a = app.agent(request.match_info["pid"])
+        s = a.get_session(request.match_info["sid"])
+        return jresp({"meta": s.meta, "transcript": s.transcript()})
+
+    @routes.post("/api/projects/{pid}/sessions")
+    async def new_session(request):
+        a = app.agent(request.match_info["pid"])
+        if a.busy:
+            return err("Claude is busy; stop it first")
+        s = await a.new_session()
+        return jresp(s.meta)
+
+    @routes.post("/api/projects/{pid}/sessions/{sid}/use")
+    async def use_session(request):
+        a = app.agent(request.match_info["pid"])
+        if a.busy:
+            return err("Claude is busy; stop it first")
+        s = await a.use_session(request.match_info["sid"])
+        return jresp(s.meta)
+
+    @routes.post("/api/projects/{pid}/chat")
+    async def chat(request):
+        a = app.agent(request.match_info["pid"])
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        if not text:
+            return err("empty message")
+        sid = await a.send(text, body.get("sid"), body.get("attachments"))
+        return jresp({"sid": sid})
+
+    @routes.post("/api/projects/{pid}/chat/steer")
+    async def steer(request):
+        """A note for Claude while it works: read at its next tool call (409 when it has stopped, so
+        the app sends it as a new message instead)."""
+        a = app.agent(request.match_info["pid"])
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        if not text:
+            return err("empty message")
+        if not a.busy:
+            return err("Claude is not working now", 409)
+        return jresp({"id": await a.steer(text)})
+
+    @routes.post("/api/projects/{pid}/chat/interrupt")
+    async def interrupt(request):
+        a = app.agent(request.match_info["pid"])
+        await a.interrupt()
+        return jresp({"ok": True})
+
+    @routes.post("/api/projects/{pid}/chat/answer")
+    async def answer(request):
+        a = app.agent(request.match_info["pid"])
+        body = await request.json()
+        if not a.answer_question(body["id"], body.get("answers") or {}):
+            return err("that question is no longer open", 404)
+        return jresp({"ok": True})
+
+    @routes.post("/api/projects/{pid}/chat/permission")
+    async def permission(request):
+        a = app.agent(request.match_info["pid"])
+        body = await request.json()
+        ok = a.answer_permission(body["id"], body.get("allow"), body.get("always"))
+        return jresp({"ok": ok})
+
+    # ------------------------------------------------------------------ design ideas (home screen)
+    def _ideas_file():
+        return os.path.join(config.data_dir(), "ideas.json")
+
+    @routes.get("/api/ideas")
+    async def ideas_get(request):
+        from . import ideas
+        try:
+            with open(_ideas_file()) as f:
+                recent = json.load(f)
+        except (OSError, ValueError):
+            recent = []
+        return jresp({"questions": ideas.QUESTIONS, "recent": recent[:12]})
+
+    @routes.post("/api/ideas")
+    async def ideas_post(request):
+        """Three board ideas for the questionnaire's answers (seed: an idea to vary)."""
+        from . import ideas
+        body = await request.json()
+        try:
+            out = await asyncio.wait_for(ideas.generate(app.settings, body.get("answers") or {}, body.get("seed")), timeout=150)
+        except asyncio.TimeoutError:
+            return err("Claude took too long to answer; try again", 504)
+        except Exception as e:
+            app.log(traceback.format_exc())
+            msg = f"{type(e).__name__}: {e}"
+            if "auth" in msg.lower() or "login" in msg.lower() or "api key" in msg.lower():
+                msg += " -- sign in with `claude` (Claude Code) or add an Anthropic API key in Settings."
+            return err(msg, 502)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            with open(_ideas_file()) as f:
+                recent = json.load(f)
+        except (OSError, ValueError):
+            recent = []
+        recent = [{**i, "made": stamp} for i in out] + recent
+        with open(_ideas_file(), "w") as f:
+            json.dump(recent[:30], f, indent=1)
+        return jresp({"ideas": out})
+
+    # ------------------------------------------------------------------ lessons
+    @routes.get("/api/lessons")
+    async def get_lessons(request):
+        q = request.query.get("q")
+        ls = knowledge.search(q, limit=500) if q else knowledge.all_lessons()
+        return jresp([{k: v for k, v in l.items() if k != "raw"} for l in ls])
+
+    @routes.post("/api/lessons")
+    async def add_lesson(request):
+        body = await request.json()
+        l = knowledge.add(body["title"], body.get("body", ""), body.get("tags") or [], body.get("source", "added in the app"),
+                          lid=body.get("id") or None)
+        return jresp({k: v for k, v in l.items() if k != "raw"})
+
+    @routes.delete("/api/lessons/{lid}")
+    async def del_lesson(request):
+        return jresp({"ok": knowledge.delete(request.match_info["lid"])})
+
+    # ------------------------------------------------------------------ websocket
+    @routes.get("/api/projects/{pid}/ws")
+    async def ws(request):
+        rt = app.rt(request.match_info["pid"])
+        sock = web.WebSocketResponse(heartbeat=25)
+        await sock.prepare(request)
+        rt.hub.clients.add(sock)
+        rt.viewers += 1
+        since = int(request.query.get("since", "0") or 0)
+        for ev in rt.hub.since(since) if since else []:
+            await sock.send_str(json.dumps(ev, default=str))
+        await sock.send_str(json.dumps({"type": "hello", "seq": rt.hub.seq, "live": rt.live}))
+        try:
+            async for msg in sock:
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        m = json.loads(msg.data)
+                    except ValueError:
+                        continue
+                    if m.get("type") == "selection":
+                        rt.selection["app"] = m.get("items", [])
+                elif msg.type == WSMsgType.ERROR:
+                    break
+        finally:
+            rt.hub.clients.discard(sock)
+            rt.viewers = max(0, rt.viewers - 1)
+        return sock
+
+    # ------------------------------------------------------------------ static UI
+    @routes.get("/")
+    async def index(request):
+        if app.local_key and not app.window_ok(request):
+            return web.Response(text=auth.LOCKED_PAGE, content_type="text/html", status=401, headers={"Cache-Control": "no-store"})
+        with open(os.path.join(WEB, "index.html"), encoding="utf-8") as f:
+            html = f.read().replace("/static/", f"/static/{_build_id()}/")
+        r = web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-cache"})
+        if app.local_key and request.headers.get(auth.KEY_HEADER):       # the Mac app's first request: its cookie
+            r.set_cookie(auth.LOCAL_COOKIE, auth.window_cookie(app.local_key), httponly=True, samesite="Strict", path="/")
+        return r
+
+    @routes.get("/static/{path:.+}")
+    async def static(request):
+        # /static/<build id>/... : the build id changes whenever a UI file does, so updates are never stale
+        path = request.match_info["path"]
+        first, _, rest = path.partition("/")
+        if first.startswith("b-") and rest:
+            path = rest
+        f = safe_join(WEB, path)
+        if not os.path.isfile(f):
+            raise web.HTTPNotFound()
+        ct = mimetypes.guess_type(f)[0] or "application/octet-stream"
+        if f.endswith(".js"):
+            ct = "text/javascript"
+        cache = "public, max-age=31536000, immutable" if first.startswith("b-") else "no-cache"
+        return web.FileResponse(f, headers={"Cache-Control": cache, "Content-Type": ct})
+
+    webapp = web.Application(middlewares=[local_guard, gate, errors], client_max_size=64 * 1024 * 1024)
+    webapp.add_routes(routes)
+    webapp["app"] = app
+
+    async def on_startup(_):
+        app.hubs.loop = asyncio.get_running_loop()
+
+    async def on_shutdown(_):
+        for a in list(app.agents.values()):
+            await a.disconnect()
+        for rt in app.runtimes.values():
+            rt.stop()
+    webapp.on_startup.append(on_startup)
+    webapp.on_shutdown.append(on_shutdown)
+    return webapp
+
+
+def _claude_auth(settings):
+    """How Claude will sign in: an API key, a Claude subscription token (claude setup-token), or the
+    Claude Code login on this machine."""
+    if (settings.get("anthropic_api_key") or "").strip() or os.environ.get("ANTHROPIC_API_KEY"):
+        return "api_key"
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return "subscription_token"
+    if shutil.which("claude") or os.path.exists(os.path.expanduser("~/.claude")):
+        return "claude_code"
+    return None
+
+
+async def _stream(part, dest, limit):
+    size = 0
+    with open(dest, "wb") as f:
+        while True:
+            chunk = await part.read_chunk(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                f.close()
+                os.remove(dest)
+                raise web.HTTPRequestEntityTooLarge(max_size=limit, actual_size=size)
+            f.write(chunk)
+    return size
+
+
+SKIP_ZIP = {".git", "build", ".tracewright", "__pycache__", "node_modules"}
+
+
+def _zip_project(p, with_git=False):
+    tmp = os.path.join(config.data_dir(), "tmp")
+    os.makedirs(tmp, exist_ok=True)
+    out = os.path.join(tmp, f"{p.id}-{int(time.time())}.zip")
+    import zipfile
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for dp, dns, fns in os.walk(p.root):
+            dns[:] = [d for d in dns if (with_git and d == ".git") or (d not in SKIP_ZIP and not d.endswith("-backups"))]
+            for f in fns:
+                if f.endswith((".lck", ".pyc")) or f == "fp-info-cache":
+                    continue
+                full = os.path.join(dp, f)
+                z.write(full, os.path.join(p.id, os.path.relpath(full, p.root)))
+    return out
+
+
+def kickoff_text(mode):
+    """The first message of a new project's conversation."""
+    if mode == "check_in":
+        return ("Here is the brief for this new board (also saved in BRIEF.md). Start the design: read it, ask me only "
+                "what changes the design, then write the requirements.")
+    return ("Here is the brief for this new board (also saved in BRIEF.md). Start with the intake (skill new-design): "
+            "read it, then ask me now every question whose answer changes the design -- with your question tool, up to "
+            "four per call and two or three calls at most, your recommended option first -- so the rest of the run needs "
+            "nothing from me. Then write docs/requirements.md with my answers and each assumption you made, and ask me "
+            "once to confirm it. When I confirm, carry the design through to the end without waiting on me.")
+
+
+def _build_id():
+    """A short id of the UI files' contents (their times and sizes)."""
+    import hashlib
+    hsh = hashlib.sha1()
+    for dp, dn, fn in os.walk(WEB):
+        for f in sorted(fn):
+            st = os.stat(os.path.join(dp, f))
+            hsh.update(f"{f}{st.st_mtime_ns}{st.st_size}".encode())
+    return "b-" + hsh.hexdigest()[:10]
+
+
+def _annotations(p):
+    f = os.path.join(p.root, ".tracewright", "annotations.json")
+    try:
+        return json.load(open(f))
+    except (OSError, ValueError):
+        return []
+
+
+def _selftest():
+    import io, contextlib
+    from tw.checks import selftest
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = selftest.main(verbose=True)
+    return rc, buf.getvalue()
+
+
+def _make_thumb(rt):
+    b = rt.board()
+    if b is None or not b.fp_list:
+        return None
+    from tw import render
+    im = render.board_image(b, max_px=640)
+    f = os.path.join(rt.p.state_dir(), "thumb.png")
+    im.save(f)
+    return f
+
+
+def open_running(open_browser=True):
+    """A Tracewright already runs on this machine: open a new browser window on it (with a one-time
+    ticket). True when there was one to open."""
+    info = auth.read_server_file()
+    if not info or not info.get("key"):
+        return False
+    import urllib.request, webbrowser
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{info['port']}/api/ticket", data=b"{}", method="POST",
+                                     headers={auth.KEY_HEADER: info["key"], "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            url = json.load(r)["url"]
+    except (OSError, ValueError, KeyError):
+        return False
+    print(f"Tracewright is already running (pid {info['pid']}, port {info['port']}).", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+    return True
+
+
+def _port_free(host, port):
+    import socket
+    with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)     # as the server binds: a closed port's TIME_WAIT is no obstacle
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _free_port(host):
+    import socket
+    with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as s:
+        s.bind((host, 0))
+        return s.getsockname()[1]
+
+
+def run(host="127.0.0.1", port=None, open_browser=True, app_mode=False):
+    """Serve Tracewright. On this machine (loopback) the server takes a launch key (TW_LOCAL_KEY from
+    the Mac app, or a new one), records itself in server.json and answers only windows holding the
+    key. app_mode: started by the Mac app -- no browser, any free port if the usual one is taken,
+    and it stops by itself once the app has gone and Claude is idle."""
+    s = config.settings()
+    local = host in auth.LOOPBACK
+    if not local and not auth.password_set():
+        raise SystemExit("Tracewright listens beyond this machine only with a password: set TW_PASSWORD (or "
+                         "`tracewright password` / Settings > Server) first.")
+    if local and not app_mode and open_running(open_browser and s.get("open_browser", True)):
+        return
+    want = port or int(s.get("port") or 8764)
+    if local and not _port_free(host, want):
+        if port and not app_mode:
+            raise SystemExit(f"Port {want} is in use by another program.")
+        want = _free_port(host)
+    port = want
+    webapp = make_app()
+    app = webapp["app"]
+    app.require_auth = auth.password_set() or not local
+    app.port = port
+    url = f"http://127.0.0.1:{port}/" if local else f"http://{host}:{port}/"
+    if local:
+        app.local_key = os.environ.pop("TW_LOCAL_KEY", "") or auth.new_key()
+
+        async def record(_):
+            auth.write_server_file({"pid": os.getpid(), "port": port, "key": app.local_key, "url": url,
+                                    "version": __version__, "started": time.time(), "app": app_mode})
+
+        async def forget(_):
+            auth.remove_server_file(os.getpid())
+        webapp.on_startup.append(record)
+        webapp.on_cleanup.append(forget)
+        if app_mode:
+            parent = int(os.environ.get("TW_PARENT_PID") or os.getppid())
+            webapp.on_startup.append(lambda _: _watch_parent(app, parent))
+    if open_browser and s.get("open_browser", True) and local and not app_mode:
+        import threading, webbrowser
+        threading.Timer(1.2, lambda: webbrowser.open(f"{url}auth?t={app.ticket()}")).start()
+    print(f"Tracewright {__version__} on {url}  (data: {config.data_dir()}, projects: {config.workspace()})", flush=True)
+    logging.basicConfig(level=logging.WARNING)
+    web.run_app(webapp, host=host, port=port, print=None, access_log=None)
+
+
+async def _watch_parent(app, parent):
+    """Started by the Mac app: when the app has gone (this process was handed to launchd) and Claude
+    is idle, stop -- a crashed app leaves no server behind, and a run in progress is never cut off."""
+    import signal
+
+    async def watch():
+        while True:
+            await asyncio.sleep(5)
+            if os.getppid() == parent:
+                continue
+            busy = any(a.busy for a in app.agents.values()) or any(
+                not j.done() for k, j in app.jobs.items() if k[0] in ("checks", "outputs"))
+            if not busy:
+                app.log("the Tracewright app has gone and Claude is idle: stopping the server")
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+    asyncio.ensure_future(watch())

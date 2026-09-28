@@ -1,0 +1,11 @@
+(version 1)
+# GCT USB4105 land pattern: the shell pegs sit 0.194 mm from the GND pads (vendor drawing),
+# inside the connector's own footprint
+(rule "USB4105 pegs"
+  (condition "A.Parent == 'J1' && B.Parent == 'J1'")
+  (constraint hole_clearance (min 0.19mm)))
+# Tracewright: tracks escaping fine-pitch pads may run at 0.15 mm clearance inside
+# the "TW neck <ref>" rule areas around those footprints (the router necks down there).
+(rule "tw fine-pitch escape"
+  (condition "A.intersectsArea('TW neck*')")
+  (constraint clearance (min 0.15mm)))

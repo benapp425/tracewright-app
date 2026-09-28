@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+/.venv/
+/venv/
+/build/
+/dist/
+
+# macOS
+.DS_Store
+._*
+
+# editors
+.idea/
+.vscode/
+*.swp
+
+# local state (never commit accounts, sessions or keys)
+/accounts.json
+/accounts.json.tmp
+/session.key
+/server.json
+/accounts.json.lock

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tracewright"
+version = "0.2.0"
+description = "An AI pair designer for KiCad PCBs: projects, live board and schematic, design checks, and Claude working with you in KiCad"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Tracewright" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+dependencies = [
+  "claude-agent-sdk>=0.2.100",
+  "kicad-python>=0.8.0",
+  "aiohttp>=3.9",
+  "numpy>=1.22",
+  "pillow>=10.1",
+  "pypdf>=4.0",
+  "truststore>=0.9",
+]
+
+[project.scripts]
+tracewright = "tracewright.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["tracewright*"]
+
+[tool.setuptools.package-data]
+tracewright = [
+  "web/**/*", "knowledge/**/*", "templates/**/*", "CHANGELOG.md",
+  "toolkit/tw/**/*.py", "toolkit/tw/**/*.c", "toolkit/tw/fixtures/**/*",
+]

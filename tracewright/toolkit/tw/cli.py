@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Tracewright toolkit command line. In a project folder: ./tw <command> (or python3 tools/tw/cli.py).
+
+  status                     what the project contains, board summary, last check verdict
+  check [ids...]             run the design checks (build/checks.json, checks_report.md, readiness.md)
+        --list  --refresh  --offline  --json
+  selftest                   plant a fault for every check and make sure it is caught
+  erc | drc                  KiCad's checks alone (JSON in build/)
+  netlist                    export build/<name>.net
+  svg                        plot the schematic sheets to build/sch_svg/
+  render [--sheet S] [--board] [--region x0,y0,x1,y1] [-o out.png]
+                             PNG of a schematic sheet or the board, for a quick look
+  outputs [--no-renders]     fab + docs outputs and the release zip
+  parts search TEXT... | parts code C123...     JLC / LCSC lookups (cached in sourcing/cache)
+  cpl [--write]              CPL against JLC's footprints; --write stores the corrections
+  sync                       update the board from the schematic (keeps placement and routing)
+  place FILE.json            apply a placement [{ref, x, y, rot, side}] to the board
+  route [--nets N...] [--engine grid|freerouting] [--clear]
+  fill                       refill copper zones
+  silk [--dry-run]           move silk reference designators off pads, other silk and the edge
+  pcb OPS.json               apply a list of board operations (see tw/pcb/ops.py)
+"""
+import os, sys, json, argparse
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+
+from tw import env, kicad, __version__            # noqa: E402
+
+
+def cmd_status(a):
+    p = env.project()
+    k = env.kicad()
+    print(f"project   {p.name}  ({p.root})")
+    print(f"kicad     {k['version'] or 'not found'}  cli={k['cli']}")
+    print(f"schematic {os.path.relpath(p.sch, p.root) if p.has_sch() else '-'}")
+    print(f"board     {os.path.relpath(p.pcb, p.root) if p.has_pcb() else '-'}")
+    if p.has_pcb():
+        from tw.board import Board
+        s = Board.load(p.pcb).summary()
+        print("          " + ", ".join(f"{k}={v}" for k, v in s.items() if k != "layers"))
+    f = os.path.join(p.build, "checks.json")
+    if os.path.exists(f):
+        from tw.checks.runner import verdict
+        with open(f) as fh:
+            res = json.load(fh)
+        print(f"checks    {verdict(res)} ({res['counts']['error']} errors, {res['counts']['warning']} warnings) at {res['generated']}")
+
+
+def cmd_check(a):
+    from tw.checks import load_all, REGISTRY
+    from tw.checks.runner import run_all, summary_text, load_project_checks
+    p = env.project()
+    if a.list:
+        load_all()
+        load_project_checks(p.root)
+        for c in REGISTRY:
+            print(f"{c.id:<24} {c.group:<14} {c.title}")
+        return 0
+    prog = None
+    if not a.json:
+        def prog(c, r):
+            if r["status"] == "running":
+                return
+            extra = f"  ({r.get('reason')})" if r["status"] == "skipped" and r.get("reason") else ""
+            print(f"  {'n/a' if r.get('na') else r['status']:<7} {c.id:<24} {len(r['findings']):>3}  "
+                  f"{r.get('seconds', 0):5.1f}s{extra}", flush=True)
+    res = run_all(p, only=a.ids or None, refresh=a.refresh, offline=a.offline or None, progress=prog)
+    if a.json:
+        print(json.dumps(res))
+    else:
+        print(summary_text(res))
+    return 1 if res["counts"]["error"] or any(c["status"] == "error" for c in res["checks"]) else 0
+
+
+def cmd_selftest(a):
+    from tw.checks import selftest
+    return selftest.main(verbose=a.verbose, only=a.ids or None)
+
+
+def cmd_erc(a):
+    p = env.project()
+    d = kicad.erc(p.sch, os.path.join(p.build, "erc.json"))
+    n = sum(len(s.get("violations", [])) for s in d.get("sheets", []))
+    print(f"ERC: {n} violations -> build/erc.json")
+    return 1 if n else 0
+
+
+def cmd_drc(a):
+    p = env.project()
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"), parity=p.has_sch())
+    print(f"DRC: {len(d.get('violations', []))} violations, {len(d.get('unconnected_items', []))} unrouted, "
+          f"{len(d.get('schematic_parity', []))} parity -> build/drc.json")
+    return 1 if d.get("violations") or d.get("unconnected_items") else 0
+
+
+def cmd_netlist(a):
+    p = env.project()
+    print(kicad.netlist(p.sch, os.path.join(p.build, f"{p.stem}.net")))
+
+
+def cmd_svg(a):
+    p = env.project()
+    files = kicad.sch_svg(p.sch, os.path.join(p.build, "sch_svg"), drawing_sheet=False, theme="_builtin_default")
+    for f in files:
+        print(os.path.relpath(f, p.root))
+
+
+def cmd_render(a):
+    from tw import render
+    p = env.project()
+    region = tuple(float(v) for v in a.region.split(",")) if a.region else None
+    if a.board or not a.sheet and p.has_pcb() and not p.has_sch():
+        out = render.board_png(p, a.output or p.out("render", "board.png"), region=region, layers=a.layers,
+                               px_per_mm=a.scale or None)
+    else:
+        out = render.sheet_png(p, a.sheet or "/", a.output or p.out("render", "sheet.png"), region=region,
+                               px_per_mm=a.scale or None)
+    print(out)
+
+
+def cmd_outputs(a):
+    from tw.outputs import Outputs
+    Outputs().all(renders=not a.no_renders)
+
+
+def cmd_parts(a):
+    from tw.jlc import Parts
+    p = env.project()
+    parts = Parts(p.root)
+    if a.mode == "search":
+        for t in a.terms:
+            r = parts.search(t, max(a.n, 10), a.refresh)
+            print(f"## JLC search '{t}'  (queried {r['_utc']})")
+            for it in r["items"][:a.n]:
+                print(f"{it.get('lcsc') or '':>10}  {str(it.get('mpn'))[:28]:28}  {str(it.get('brand'))[:16]:16}  "
+                      f"{str(it.get('package'))[:14]:14}  jlc={it.get('jlc_stock')!s:>7}  {str(it.get('lib')):8}  "
+                      f"${it.get('price_1')!s:7}  {(it.get('describe') or '')[:60]}")
+    else:
+        for t in a.terms:
+            r = parts.detail(t, a.refresh)
+            print(f"{r['lcsc']}  {r['mpn']}  {r['brand']}  {r['package']}  lcsc_stock={r['lcsc_stock']}  ${r['price_1']}  "
+                  f"(queried {r['_utc']})")
+            for k, v in list((r.get("params") or {}).items())[:12]:
+                print(f"      {k}: {v}")
+
+
+def cmd_cpl(a):
+    from tw.outputs import Outputs
+    from tw.jlc import Parts, fit_placements, write_corrections
+    from tw.board import Board
+    p = env.project()
+    o = Outputs(p)
+    parts = o.parts(o.netlist())
+    rows, _ = o.cpl_rows(parts, corrections=not a.write)
+    b = Board.load(p.pcb)
+    res, fitted, _ = fit_placements(Parts(p.root), b, {r["Designator"]: r for r in rows},
+                                    {x["ref"]: x["lcsc"] for x in parts}, p.setting("fab.cpl_pad_map", {}), a.refresh)
+    bad = [r for r in res if r[-1] != "ok"]
+    for r in bad:
+        print("  " + " | ".join(r))
+    print(f"{len(res) - len(bad)} of {len(res)} placements agree with JLC's footprints")
+    if a.write:
+        out = write_corrections(fitted, b, p.path("sourcing", "jlc-placement.json"))
+        print(f"corrections for {len(out)} LCSC codes -> sourcing/jlc-placement.json (re-run ./tw outputs, then ./tw cpl)")
+    return 1 if bad and not a.write else 0
+
+
+def cmd_pcb(a):
+    from tw.pcb import client
+    with open(a.file) as f:
+        ops = json.load(f)
+    res = client.apply(env.project(), ops if isinstance(ops, list) else ops.get("ops", []))
+    print(json.dumps(res, indent=1))
+
+
+def cmd_place(a):
+    from tw.pcb import client
+    with open(a.file) as f:
+        moves = json.load(f)
+    res = client.apply(env.project(), [dict(op="move", **m) for m in moves])
+    print(json.dumps(res, indent=1))
+
+
+def cmd_sync(a):
+    from tw.pcb import client
+    res = client.sync(env.project())
+    print(json.dumps(res, indent=1))
+
+
+def cmd_fill(a):
+    from tw.pcb import client
+    print(json.dumps(client.apply(env.project(), [{"op": "fill"}]), indent=1))
+
+
+def cmd_silk(a):
+    from tw.pcb import client
+    from tw.board import Board
+    from tw import silk
+    p = env.project()
+    ops, rep = silk.tidy(Board.load(p.pcb))
+    print(f"references: {len(rep['kept'])} clear, {len(rep['moved'])} moved, {len(rep['stuck'])} with no clear spot"
+          + (f" ({', '.join(rep['stuck'])})" if rep["stuck"] else ""))
+    if ops and not a.dry_run:
+        r = client.apply(p, ops)
+        print("applied" if r.get("ok") else f"failed: {r}")
+
+
+def cmd_route(a):
+    from tw.route import driver
+    res = driver.route(env.project(), nets=a.nets or None, engine=a.engine, clear=a.clear, apply=not a.dry_run)
+    print(json.dumps(res.get("summary", res), indent=1))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="tw", description=f"Tracewright toolkit {__version__}")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("status")
+    c = sub.add_parser("check")
+    c.add_argument("ids", nargs="*")
+    c.add_argument("--list", action="store_true")
+    c.add_argument("--refresh", action="store_true")
+    c.add_argument("--offline", action="store_true")
+    c.add_argument("--json", action="store_true")
+    s = sub.add_parser("selftest")
+    s.add_argument("ids", nargs="*")
+    s.add_argument("-v", "--verbose", action="store_true")
+    sub.add_parser("erc")
+    sub.add_parser("drc")
+    sub.add_parser("netlist")
+    sub.add_parser("svg")
+    r = sub.add_parser("render")
+    r.add_argument("--sheet")
+    r.add_argument("--board", action="store_true")
+    r.add_argument("--region")
+    r.add_argument("--layers")
+    r.add_argument("--scale", type=float)
+    r.add_argument("-o", "--output")
+    o = sub.add_parser("outputs")
+    o.add_argument("--no-renders", action="store_true")
+    pp = sub.add_parser("parts")
+    pp.add_argument("mode", choices=["search", "code"])
+    pp.add_argument("terms", nargs="+")
+    pp.add_argument("-n", type=int, default=12)
+    pp.add_argument("--refresh", action="store_true")
+    cp = sub.add_parser("cpl")
+    cp.add_argument("--write", action="store_true")
+    cp.add_argument("--refresh", action="store_true")
+    pc = sub.add_parser("pcb")
+    pc.add_argument("file")
+    pl = sub.add_parser("place")
+    pl.add_argument("file")
+    sub.add_parser("sync")
+    sub.add_parser("fill")
+    sk = sub.add_parser("silk")
+    sk.add_argument("--dry-run", action="store_true")
+    rt = sub.add_parser("route")
+    rt.add_argument("--nets", nargs="*")
+    rt.add_argument("--engine", default="grid", choices=["grid", "freerouting"])
+    rt.add_argument("--clear", action="store_true")
+    rt.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args(argv)
+    if not a.cmd:
+        ap.print_help()
+        return 0
+    fn = globals()["cmd_" + a.cmd.replace("-", "_")]
+    try:
+        return fn(a) or 0
+    except kicad.KiCadError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

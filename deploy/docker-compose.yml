@@ -1,0 +1,33 @@
+# Tracewright + Caddy (automatic HTTPS for your domain). See ../DEPLOY.md.
+#   cp .env.example .env    (fill it in)
+#   docker compose up -d --build
+# Private use over Tailscale instead of a public domain: `docker compose up -d --build tracewright`,
+# then `tailscale serve --bg 8764` on the server.
+services:
+  tracewright:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - tracewright-data:/data
+    ports:
+      - "127.0.0.1:8764:8764"        # this machine only; the world comes in through Caddy (or Tailscale)
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [tracewright]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - TW_DOMAIN=${TW_DOMAIN:?set TW_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  tracewright-data: {}
+  caddy-data: {}
+  caddy-config: {}

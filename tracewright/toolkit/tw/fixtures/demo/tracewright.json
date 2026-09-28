@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "tw-demo-fixture",
+  "name": "Demo USB-C ATtiny (fixture)",
+  "kind": "fixture",
+  "kicad_project": "hardware/demo/demo.kicad_pro",
+  "fab": {
+    "house": "jlcpcb",
+    "layers": 2,
+    "assembly": true
+  },
+  "checks": {}
+}

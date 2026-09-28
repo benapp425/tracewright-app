@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "Demo_USB-C_ATtiny")(type "KiCad")(uri "${KIPRJMOD}/lib/Demo_USB-C_ATtiny.pretty")(options "")(descr "Demo USB-C ATtiny project footprints"))
+)
