@@ -12,6 +12,8 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
   dated stock queries), review, bring-up plan.
 - `design/` -- scripts that generate or change the design (schematic generators, placement tables);
   `design/checks/` -- project-specific checks, each with a planted-fault test.
-- `tools/tw/` -- this project's copy of the toolkit; run it with `./tw` (see `.claude/tracewright.md`).
+- `tools/tw/` -- this project's copy of the toolkit; run it with `./tw` (see `.claude/tracewright.md`). The app
+  replaces it when it updates: work around a shortfall in your own script under `design/` and record a lesson,
+  rather than editing it here (edits here are set aside, not kept, at the next update).
 - `build/` -- generated reports, plots and fab files (not in git; regenerate with `./tw check`, `./tw outputs`).
 - `.claude/knowledge/` -- lessons learned on earlier boards. `.claude/skills/` -- how-tos for each stage.

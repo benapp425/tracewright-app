@@ -1953,7 +1953,18 @@ def schematic_laid_out_by_rule():
     g2.pull(U3, "1", "R10k", "+3V3", net="RESET")
     g2.net(U3, "7", "SCL")
     g2.nc(U3, "6")
+    # a FET's gate with its series resistor and pull-down: one line, the pull hanging from a junction
+    cat["AO3400A"] = Part(stock("Transistor_FET", "AO3400A"), "Package_TO_SOT_SMD:SOT-23", "AO3400A", "AO3400A", "AOS", "C20917")
+    g3 = pg.group("PYRO SWITCH")
+    q = g3.part("AO3400A", "Q", ref="Q101")
+    g3.series(q, "1", "R68", "FIRE", ref="R150", before="GATE")
+    g3.pull(q, "1", "R10k", "GND", net="GATE", ref="R151")
+    g3.power(q, "2", "GND")
+    g3.net(q, "3", "PYRO_OUT")
     pg.layout()
+    assert not any("R151" in c or "R150" in c for c in pg.crowded), pg.crowded
+    gops = [op for op in g3.ops if op[0] in ("junction", "llabel", "label")]
+    assert [op[0] for op in gops].count("junction") == 1 and sum(op[0] == "llabel" and op[1] == "GATE" for op in gops) == 1, gops
     d2.write(hw2)
     open(os.path.join(hw2, "p.kicad_pro"), "w").write("{}")
     r = finish(env.Project(root2))
@@ -1961,6 +1972,8 @@ def schematic_laid_out_by_rule():
     nl2 = Netlist.load(os.path.join(env.Project(root2).build, "p.net"))
     assert nl2.net_of(y, "1") == nl2.net_of("U101", "2") and nl2.net_of(caps[1], "1") == nl2.net_of("U101", "3")
     assert nl2.net_of(caps[0], "2") == "GND"
+    assert nl2.net_of("R151", "1") == nl2.net_of("Q101", "1") == nl2.net_of("R150", "1") and nl2.net_of("R151", "2") == "GND"
+    assert nl2.net_of("R150", "2") != nl2.net_of("Q101", "1")
 
 
 @test()
@@ -2179,6 +2192,60 @@ def unattended_run_waits_for_the_usage_limit_and_carries_on():
 
 
 @test()
+def toolkit_update_sets_local_edits_aside():
+    """Claude's edits to a project's tools/tw survive an app update as copies (and Claude hears of
+    them once); an untouched copy leaves nothing behind."""
+    from tracewright import scaffold, prompts
+    root = tempfile.mkdtemp(prefix="twtk-")
+    try:
+        scaffold.install_toolkit(root)
+        assert scaffold.set_aside_local_edits(root) is None                  # nothing changed yet
+        f = os.path.join(root, "tools", "tw", "sch", "auto.py")
+        with open(f, "a") as fh:
+            fh.write("\n# a local fix\n")
+        with open(os.path.join(root, "tools", "tw", "mine.py"), "w") as fh:
+            fh.write("X = 1\n")
+        cfg = {"name": "t"}
+        saved = scaffold.history.snapshot, scaffold.install_agent_files
+        scaffold.history.snapshot = lambda *a, **k: None                    # no shadow repo in a temp folder
+        scaffold.install_agent_files = lambda *a, **k: None
+        try:
+            scaffold.refresh(root, cfg)
+        finally:
+            scaffold.history.snapshot, scaffold.install_agent_files = saved
+        tl = cfg.get("toolkit_local")
+        assert tl and sorted(tl["files"]) == ["mine.py", os.path.join("sch", "auto.py")], tl
+        kept = os.path.join(root, tl["dir"])
+        assert open(os.path.join(kept, "sch", "auto.py")).read().endswith("# a local fix\n")
+        assert "# a local fix" not in open(f).read()                          # the app's copy is back
+        assert scaffold.set_aside_local_edits(root) is None                  # and recorded as installed
+
+        class P:
+            def __init__(self):
+                self.cfg, self.saved = cfg, 0
+            def start_phase(self):
+                return None
+            def unattended(self):
+                return False
+            def run_mode(self):
+                return "check_in"
+            def save(self):
+                self.saved += 1
+
+        class RT:
+            def __init__(self):
+                self.p, self.selection, self.live = P(), {}, {}
+            def take_user_changes(self):
+                return []
+        rt = RT()
+        first = prompts.turn_context(rt)
+        assert "tools/tw" in first and tl["dir"] in first and rt.p.saved == 1, first
+        assert tl["dir"] not in prompts.turn_context(rt)                      # told once
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@test()
 def bring_up_checklist_reads_the_plan_and_judges_readings():
     from tracewright import bringup
     md = """# Bring-up
@@ -2281,9 +2348,11 @@ def overview_update_changelog_and_board_at_a_checkpoint():
             d = await (await c.get(f"/api/projects/{prj.id}/overview")).json()
             assert d["board"]["parts"] == 21 and d["board"]["layers"] == 2 and d["next"], d.get("board")
             ch = await (await c.get("/api/changelog")).json()
-            assert ch["releases"][0]["version"] == "0.2.0" and "Accounts" in ch["releases"][0]["body"]
+            rel = {r["version"]: r for r in ch["releases"]}
+            assert ch["releases"][0]["version"] == tracewright.__version__ and ch["releases"][0]["body"].strip(), ch["releases"][0]
+            assert "Accounts" in rel["0.2.0"]["body"]
             u = await (await c.get("/api/update")).json()
-            assert u["current"] == "0.2.0"
+            assert u["current"] == tracewright.__version__
             log = await (await c.get(f"/api/projects/{prj.id}/history")).json()
             rev = log[-1]["hash"]
             r = await c.get(f"/api/projects/{prj.id}/board-at/{rev}")

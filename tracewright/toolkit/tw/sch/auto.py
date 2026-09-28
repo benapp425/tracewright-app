@@ -328,7 +328,16 @@ class Group:
         """Draw what was asked for, in order. Every pin still waiting keeps its way out (a short stub's
         worth, reserved) so an earlier pattern cannot wall it in."""
         todo, self.pending = self.pending, []
-        todo = sorted(todo, key=self._order)
+        series = {(id(rq["inst"]), rq["pin"]): rq for rq in todo if rq["kind"] == "series"}
+        merged = []
+        for rq in todo:                                   # a gate resistor and its pull-down: one drawing
+            sq = series.get((id(rq["inst"]), rq["pin"])) if rq["kind"] == "pull" else None
+            if sq is not None and "pull" not in sq and rq.get("net") in (None, sq.get("before")) or \
+                    (sq is not None and "pull" not in sq and sq.get("before") is None):
+                sq["pull"] = rq
+                continue
+            merged.append(rq)
+        todo = sorted(merged, key=self._order)
         keep = {}
         for rq in todo:
             if rq["kind"] == "nc":
@@ -368,7 +377,7 @@ class Group:
         if d[1] == 0 and _is_connector(inst.ref):                  # at a connector pin the symbol points out
             side_rot = (270 if d == LEFT else 90) if is_ground(rail) else (90 if d == LEFT else 270)
         tries = []
-        for L in ((2 * P, 3 * P, 4 * P, 5 * P, 6 * P) if flag else (0.0, P, 2 * P, 3 * P, 4 * P, 5 * P, 6 * P)):
+        for L in ((2 * P, 3 * P, 4 * P, 5 * P, 6 * P, 7 * P, 8 * P) if flag else (0.0, P, 2 * P, 3 * P, 4 * P, 5 * P, 6 * P)):
             if d == want:
                 tries.append(([p, _add(p, d, L)] if L else [p], 0))
             elif d[1] == 0:
@@ -381,18 +390,19 @@ class Group:
                     tries.append(([p, a, _add(a, side, 2 * P + L)], 0))
         for pts, rot in tries:
             end = pts[-1]
-            items = self._power_items(rail, end, rot) + (self._wire_items(pts, inst.ref) if len(pts) > 1 else [])
-            fpt = None
-            if flag and len(pts) > 1:                              # the flag on the stub, clear of the part
+            base = self._power_items(rail, end, rot) + (self._wire_items(pts, inst.ref) if len(pts) > 1 else [])
+            spots = [None]
+            if flag and len(pts) > 1:                              # the flag on the stub, clear of the part and the rail
                 L = abs(end[0] - p[0]) + abs(end[1] - p[1])
-                fpt = _add(p, d, max(P, round((L - 2 * P) / P) * P))
-                items += self._power_items("PWR_FLAG", fpt)
-            if self._clear(items, anchor=inst.ref):
-                ops = ([("wire", pts)] if len(pts) > 1 else []) + [("power", rail, end, rot)]
-                if fpt:
-                    ops.append(("flag", fpt))
-                self._commit(ops, items)
-                return
+                spots = [_add(p, d, k * P) for k in range(max(1, int(round(L / P)) - 2), 0, -1)]
+            for fpt in spots:
+                items = base + (self._power_items("PWR_FLAG", fpt) if fpt else [])
+                if self._clear(items, anchor=inst.ref):
+                    ops = ([("wire", pts)] if len(pts) > 1 else []) + [("power", rail, end, rot)]
+                    if fpt:
+                        ops.append(("flag", fpt))
+                    self._commit(ops, items)
+                    return
         self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin]}, record=False)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {rail} as a label (no room for its symbol) {getattr(self, 'why', '')}")
 
@@ -590,6 +600,15 @@ class Group:
         return False
 
     def _draw_series(self, rq):
+        pq = rq.get("pull")
+        if pq is not None:
+            if self._draw_series_pull(rq, pq):
+                return
+            rest = dict(rq)
+            rest.pop("pull")
+            self._draw_series(rest)
+            self._draw_pull(pq)
+            return
         inst, pin, key, net, ref, before = rq["inst"], rq["pin"], rq["key"], rq["net"], rq["ref"], rq["before"]
         p, d = inst.pin(pin), inst.pin_dir(pin)
         near = before or f"{inst.ref}_{pin}"
@@ -620,6 +639,55 @@ class Group:
         self._draw_net({"inst": inst, "pin": pin, "name": near, "pins": [pin]}, record=False)
         self._aside_series(key, ref, near, net)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {ref} drawn beside the part {getattr(self, 'why', '')}")
+
+    def _draw_series_pull(self, rq, pq):
+        """A part in line with the pin and a pull on the same line, the way a gate is drawn: the pin, a
+        junction with the pull-down (or pull-up) hanging from it, then the series part and its net."""
+        inst, pin, key, net, ref = rq["inst"], rq["pin"], rq["key"], rq["net"], rq["ref"]
+        before = rq["before"] or pq.get("net")
+        pkey, pref, to = pq["key"], pq["ref"], pq["to"]
+        p, d = inst.pin(pin), inst.pin_dir(pin)
+        down = is_ground(to)
+        near = before or f"{inst.ref}_{pin}"
+        first = math.ceil(((len(before) * TEXT_W + 2 * P) if before else 2 * P) / P) * P
+        for reach in [first + k * P for k in range(0, 10)]:
+            t = _add(p, d, reach)
+            for lead in (2 * P, 3 * P, 4 * P):
+                a = _add(t, d, lead)
+                r = self._two(key, ref, a, _dir_name(d))
+                b = r.pin("2")
+                end = _add(b, d, P)
+                sides = [None] if d[1] == 0 else [RIGHT, LEFT]
+                for side in sides:
+                    if d[1] == 0:                           # a horizontal line: the pull hangs below (or stands above)
+                        q = self._two(pkey, pref, t, "down") if down else self._two(pkey, pref, (t[0], snap(t[1] - 7.62)), "down")
+                        joint, railp = ("1", "2") if down else ("2", "1")
+                        extra = []
+                    else:                                   # a vertical line: the pull goes out sideways
+                        q = self._two(pkey, pref, _add(t, side, P), _dir_name(side))
+                        joint, railp = "1", "2"
+                        extra = [[t, q.pin("1")]]
+                    rp = q.pin(railp)
+                    ops = [("wire", [p, a]), ("junction", t), ("part", r), ("wire", [b, end]), ("label", net, end, d),
+                           ("part", q), ("power", to, rp, 0)] + [("wire", w) for w in extra]
+                    items = self._wire_items([p, a], inst.ref) + self._part_items(r) + self._wire_items([b, end], ref)
+                    items.append(("label", _label_box(net, end, d), None))
+                    items += self._part_items(q) + self._power_items(to, rp)
+                    for w in extra:
+                        items += self._wire_items(w, pref)
+                    if before:
+                        lp = _add(p, d, 1.27)
+                        ops.append(("llabel", before, lp, d))
+                        items.append(("label", _label_box(before, lp, d, flag=False), None))
+                    if self._clear(items, anchor=inst.ref):
+                        self._commit(ops, items)
+                        self._connect(near, inst.ref, pin)
+                        self._connect(near, ref, "1")
+                        self._connect(net, ref, "2")
+                        self._connect(near, pref, joint)
+                        self._connect(to, pref, railp)
+                        return True
+        return False
 
     def _draw_indicator(self, rq):
         inst, pin, (rref, dref), gnd = rq["inst"], rq["pin"], rq["refs"], rq["gnd"]
@@ -854,8 +922,10 @@ class Page:
         return g
 
     def layout(self, margin=15.24, gap=10.16):
-        """Place the groups on the sheet left to right, row by row, each in its titled block (wide
-        enough for its title); the sheet grows to A3, then A2, when they do not fit."""
+        """Place the groups on the sheet in reading order, each in its titled block (wide enough for its
+        title): every block goes to the highest, then leftmost, spot where it fits (beside the blocks
+        above, or in the room under a short one), clear of the title block in the corner; the sheet
+        grows to A3, then A2, only when they do not fit."""
         for g in self.groups:
             g.finish()
         pads = (6.35, 10.16, 6.35, 6.35)             # left, top (the title), right, bottom
@@ -866,20 +936,23 @@ class Page:
             dims.append((x0, y0, w, y1 - y0 + pads[1] + pads[3], x1 - x0))
         order = [self.sheet.paper] + [p for p in ("A4", "A3", "A2") if p != self.sheet.paper and
                                       self.SIZES[p][0] >= self.SIZES.get(self.sheet.paper, (0, 0))[0]]
+        spots = None
         for paper in order:
             W, H = self.SIZES.get(paper, self.SIZES["A4"])
-            right, bottom = W - margin, H - margin - 38         # the title block's band
-            spots, x, y, row_h, ok = [], margin, margin, 0, True
-            for (_, _, w, h, _) in dims:
-                if x + w > right and x > margin:
-                    x, y, row_h = margin, y + row_h + gap, 0
-                spots.append((x, y))
-                ok = ok and x + w <= right and y + h <= bottom
-                x += w + gap
-                row_h = max(row_h, h)
-            if ok:
+            spots = self._pack(dims, W, H, margin, gap)
+            if spots is not None:
                 self.sheet.paper = paper
                 break
+        if spots is None:                               # too much for A2 as well: rows, running off the bottom
+            W, H = self.SIZES["A2"]
+            spots, x, y, row_h = [], margin, margin, 0
+            for (_, _, w, h, _) in dims:
+                if x + w > W - margin and x > margin:
+                    x, y, row_h = margin, y + row_h + gap, 0
+                spots.append((x, y))
+                x += w + gap
+                row_h = max(row_h, h)
+            self.sheet.paper = "A2"
         self.placed = []
         for g, (gx0, gy0, w, h, cw), (x, y) in zip(self.groups, dims, spots):
             ox = x + pads[0] - gx0 + (w - pads[0] - pads[2] - cw) / 2      # content centred in a block widened for its title
@@ -887,6 +960,36 @@ class Page:
             ox, oy = round(ox / P) * P, round(oy / P) * P
             self.placed.append((g, (ox, oy), (snap(x), snap(y), snap(x + w), snap(y + h))))
         return self
+
+    @staticmethod
+    def _pack(dims, W, H, margin, gap, title=(115.0, 38.0)):
+        """Top-left positions for blocks (w, h) in order on a W x H sheet, or None when they do not fit."""
+        right, bottom = W - margin, H - margin
+        tb = (right - title[0], bottom - title[1], right, bottom)        # KiCad's title block, bottom right
+        placed = []
+
+        def free(x, y, w, h):
+            if x < margin - 1e-6 or y < margin - 1e-6 or x + w > right + 1e-6 or y + h > bottom + 1e-6:
+                return False
+            if x < tb[2] and x + w > tb[0] and y < tb[3] and y + h > tb[1]:
+                return False
+            return all(x + w + gap <= bx0 + 1e-6 or bx1 + gap <= x + 1e-6 or y + h + gap <= by0 + 1e-6 or by1 + gap <= y + 1e-6
+                       for bx0, by0, bx1, by1 in placed)
+        out = []
+        for (_, _, w, h, _) in dims:
+            cands = {(margin, margin)}
+            for bx0, by0, bx1, by1 in placed:
+                cands |= {(bx1 + gap, by0), (bx0, by1 + gap), (margin, by1 + gap), (bx1 + gap, margin)}
+            best = None
+            for x, y in sorted(cands, key=lambda c: (round(c[1], 3), round(c[0], 3))):
+                if free(x, y, w, h):
+                    best = (x, y)
+                    break
+            if best is None:
+                return None
+            out.append(best)
+            placed.append((best[0], best[1], best[0] + w, best[1] + h))
+        return out
 
     def emit(self, global_nets):
         """Draw the laid-out groups onto the sheet (called by Design.write, once the whole design is known)."""

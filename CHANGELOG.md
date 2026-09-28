@@ -3,6 +3,28 @@
 All notable changes to Tracewright. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-28
+
+Routing and schematics that look like a person made them, and more ways to check a design.
+
+### Added
+- **Guided start.** Describe your board in the chat while a live canvas fills in the requirements, block diagram, connectors and parts. Press Start when it looks right.
+- **Schematic settings for each project.** How sheets connect (sheet pins or global labels), how supplies and decoupling are drawn, how nets and pairs are named, reference numbers, values, paper size and notes.
+- **Flat or hierarchical.** Switch a schematic between sheet pins and global labels. Nothing is saved unless KiCad's netlist is unchanged.
+- **Part inspector.** Click a part to see its pins, nets, footprint and stock. Open it for photos, parameters and findings.
+- **Net types.** The Copper panel tags power rails with their voltage, and marks differential pairs, clocks and fast signals. Filter by type.
+- **16 new checks.** Schematic integrity, text on sheets, naming conventions, power and signal layout, and routing quality.
+- **Continues after the usage limit.** If an autonomous run hits your Claude usage limit, it waits for the reset and then continues.
+
+### Changed
+- **Router.** Differential pairs run side by side. Nets with extra vias or detours get a second pass, and nets that fail get another try. On a large board: every net routed, 9% fewer vias, 2% less track.
+- **Schematics.** Drawn by rule: parts grouped by function, decoupling at the pins, gate resistors with their pull-downs, notes kept clear of parts, and sheets packed onto the smallest paper that fits.
+- **Toolkit updates.** Changes you or Claude made to a project's copy of the toolkit are saved before an update replaces them.
+
+### Fixed
+- **Stop.** Stop works in the first moments of a turn.
+- **Answers.** Your answers in the chat no longer end with "(Recommended)".
+
 ## [0.2.0] - 2026-09-27
 
 A cleaner, calmer Tracewright, with accounts, guided setup and new tools for testing and ordering boards.

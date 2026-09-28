@@ -116,6 +116,16 @@ def turn_context(runtime, extra=None):
     if sel_k:
         lines.append("Selected in KiCad: " + ", ".join(_sel(s) for s in sel_k[:20]))
     p = runtime.p
+    tl = p.cfg.get("toolkit_local") or {}
+    if tl and not tl.get("told"):                     # once: the app's update replaced Claude's edits in tools/tw
+        lines.append(f"The app updated this project's tools/tw, replacing your edits to {', '.join(tl.get('files', [])[:6])}; "
+                     f"copies are in {tl.get('dir')}/. Re-apply only what is still needed (in your scripts under design/ "
+                     "where you can) and record a lesson so the toolkit itself gets the fix.")
+        tl["told"] = True
+        try:
+            p.save()
+        except Exception:
+            pass
     phase = p.start_phase()
     if phase == "intake":
         lines.append("Guided start, intake: the user sees this chat beside a live canvas. Ask what changes the design "

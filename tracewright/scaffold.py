@@ -1,5 +1,5 @@
 """Lay out a project folder: KiCad skeleton, toolkit, agent instructions, skills, knowledge, docs."""
-import os, filecmp, re, sys, json, shutil, uuid, datetime, glob, hashlib, functools
+import os, filecmp, re, sys, json, shutil, uuid, datetime, glob, hashlib, functools, time
 from . import history, knowledge
 from tw import env as twenv, kicad, dfm, __version__ as TW_VERSION
 
@@ -221,6 +221,49 @@ def clean_conflicts(root):
     return gone
 
 
+def _toolkit_files(top):
+    """{relative path: sha1} of a toolkit copy (what the app installs; caches and binaries left out)."""
+    import hashlib
+    out = {}
+    for dp, dn, fn in os.walk(top):
+        dn[:] = sorted(d for d in dn if d not in ("__pycache__", "fixtures_out"))
+        for f in sorted(fn):
+            if f.endswith((".pyc", ".so")) or f == ".DS_Store":
+                continue
+            full = os.path.join(dp, f)
+            with open(full, "rb") as fh:
+                out[os.path.relpath(full, top)] = hashlib.sha1(fh.read()).hexdigest()
+    return out
+
+
+def set_aside_local_edits(root):
+    """Files in the project's tools/tw changed (or added) since the app installed it, copied to
+    .tracewright/toolkit-local/<time>/ before an update replaces them. Returns (folder, files) or None.
+    Projects installed before the manifest existed cannot tell an edit from the old version: None."""
+    st = os.path.join(root, ".tracewright")
+    dest = os.path.join(root, "tools", "tw")
+    try:
+        with open(os.path.join(st, "toolkit.files.json")) as f:
+            was = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not os.path.isdir(dest) or os.path.islink(dest):
+        return None
+    now = _toolkit_files(dest)
+    changed = sorted(k for k, v in now.items() if was.get(k) != v)
+    if not changed:
+        return None
+    keep = os.path.join(st, "toolkit-local", time.strftime("%Y%m%d-%H%M%S"))
+    for rel in changed:
+        os.makedirs(os.path.dirname(os.path.join(keep, rel)), exist_ok=True)
+        shutil.copy2(os.path.join(dest, rel), os.path.join(keep, rel))
+    with open(os.path.join(keep, "README.md"), "w") as f:
+        f.write("Edits made in this project's tools/tw, set aside when the app updated the toolkit on "
+                f"{time.strftime('%Y-%m-%d %H:%M')}. The update replaced them; compare with tools/tw and re-apply "
+                "only what is still needed.\n\n" + "".join(f"- {r}\n" for r in changed))
+    return os.path.relpath(keep, root), changed
+
+
 def install_toolkit(root):
     dest = os.path.join(root, "tools", "tw")
     if os.path.islink(dest):
@@ -241,6 +284,8 @@ def install_toolkit(root):
         os.remove(archf)
     with open(os.path.join(st, "toolkit.sha"), "w") as f:
         f.write(toolkit_fingerprint())
+    with open(os.path.join(st, "toolkit.files.json"), "w") as f:      # to tell a local edit from the app's copy later
+        json.dump(_toolkit_files(dest), f, indent=0, sort_keys=True)
     return TW_VERSION
 
 
@@ -418,7 +463,10 @@ def existing_project(root, cfg, shadow):
 def refresh(root, cfg):
     """Update a project's toolkit and agent files to this app's version (after a checkpoint)."""
     history.snapshot(root, "Before updating the toolkit")
+    kept = set_aside_local_edits(root)
     install_toolkit(root)
     install_agent_files(root, cfg, overwrite_claude=False)
     cfg["toolkit"] = TW_VERSION
+    if kept:                                        # Claude hears of it at its next turn (prompts.turn_context)
+        cfg["toolkit_local"] = {"dir": kept[0], "files": kept[1], "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "told": False}
     return TW_VERSION
