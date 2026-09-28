@@ -395,7 +395,8 @@ def _supplies(d):
             node = defs[lname]
             out[s.value] = {"lib_id": s.lib_id, "lib_name": str(value(s.node, "lib_name", "") or ""), "def_name": lname,
                             "def": doc.text[node.span[0]:node.span[1]], "pin": pins[0]["number"],
-                            "v": (fx - s.x, fy - s.y), "r": (rx - s.x, ry - s.y)}
+                            "v": (fx - s.x, fy - s.y), "r": (rx - s.x, ry - s.y),
+                            "box": (s.bbox[0] - s.x, s.bbox[1] - s.y, s.bbox[2] - s.x, s.bbox[3] - s.y)}
     return out
 
 
@@ -409,15 +410,34 @@ def _project_name(d):
     return os.path.splitext(os.path.basename(d.sch))[0]
 
 
-def _power_symbol(t, name, pt, ref, path, project):
+def _supply_spot(t, name, pt, obstacles):
+    """Where a supply symbol's value text can go clear of the page, or None when the symbol does not fit."""
+    x, y = pt[0] / UNIT, pt[1] / UNIT
+    bx = t["box"]
+    body = (round((x + bx[0]) * UNIT), round((y + bx[1]) * UNIT), round((x + bx[2]) * UNIT), round((y + bx[3]) * UNIT))
+    if any(_overlaps(body, o[2]) for o in obstacles):
+        return None
+    w = _text_w(name) / UNIT
+    vx, vy = t["v"]
+    for dx, dy, just in ((vx, vy, None), (bx[2] + 0.5, (bx[1] + bx[3]) / 2, "left"), (bx[0] - 0.5, (bx[1] + bx[3]) / 2, "right")):
+        x0 = x + dx - (w / 2 if just is None else 0 if just == "left" else w)
+        box = (round(x0 * UNIT), round((y + dy - 0.9) * UNIT), round((x0 + w) * UNIT), round((y + dy + 0.9) * UNIT))
+        if not any(_overlaps(box, o[2]) for o in obstacles):
+            return (dx, dy, just, [body, box])
+    return None
+
+
+def _power_symbol(t, name, pt, ref, path, project, spot=None):
     x, y = pt[0] / UNIT, pt[1] / UNIT
     f = lambda v: f"{v:.4f}".rstrip("0").rstrip(".")
     lib_name = f" (lib_name {_q(t['lib_name'])})" if t["lib_name"] else ""
     hid = "(effects (font (size 1.27 1.27)) (hide yes))"
+    vx, vy = (spot[0], spot[1]) if spot else t["v"]
+    vj = f" (justify {spot[2]})" if spot and spot[2] else ""
     return (f"(symbol (lib_id {_q(t['lib_id'])}){lib_name} (at {f(x)} {f(y)} 0) (unit 1) (exclude_from_sim no) (in_bom yes) "
             f"(on_board yes) (dnp no) (uuid {_q(_uid())}) "
             f"(property \"Reference\" {_q(ref)} (at {f(x + t['r'][0])} {f(y + t['r'][1])} 0) {hid}) "
-            f"(property \"Value\" {_q(name)} (at {f(x + t['v'][0])} {f(y + t['v'][1])} 0) (effects (font (size 1.27 1.27)))) "
+            f"(property \"Value\" {_q(name)} (at {f(x + vx)} {f(y + vy)} 0) (effects (font (size 1.27 1.27)){vj})) "
             f"(property \"Footprint\" \"\" (at {f(x)} {f(y)} 0) {hid}) (property \"Datasheet\" \"\" (at {f(x)} {f(y)} 0) {hid}) "
             f"(property \"Description\" \"\" (at {f(x)} {f(y)} 0) {hid}) (pin {_q(t['pin'])} (uuid {_q(_uid())})) "
             f"(instances (project {_q(project)} (path {_q(path)} (reference {_q(ref)}) (unit 1)))))")
@@ -494,15 +514,19 @@ def _plan_flat(d, nl):
         doc = d.docs[sh.file]
         ends = {p for _, a, b in doc.wires for p in (a, b)} | {pt for *_, pt, _ in _pins(sh)}
         have_defs = {str(n[1]) for n in findall(find(doc.tree, "lib_symbols") or [], "symbol")}
+        page = _obstacles(doc, sh)
         for i, lb in enumerate(doc.labels):
             if lb["kind"] != "hierarchical_label":
                 continue
             if d.linked(sh.path, i):
                 name = gname[D.find((sh.path, "l", i))]
                 t = supplies.get(name)
-                if t and lb["pt"] in ends and find(doc.tree, "lib_symbols") is not None:
+                mine = _label_box("hierarchical_label", lb["text"], lb["pt"], lb["rot"], lb["size"])
+                spot = _supply_spot(t, name, lb["pt"], [o for o in page if o[2] != mine]) if t else None
+                if t and spot and lb["pt"] in ends and find(doc.tree, "lib_symbols") is not None:
                     npwr += 1
-                    doc.edits.append((lb["node"], _power_symbol(t, name, lb["pt"], f"#PWR{npwr:03d}", sh.path, project)))
+                    doc.edits.append((lb["node"], _power_symbol(t, name, lb["pt"], f"#PWR{npwr:03d}", sh.path, project, spot)))
+                    page += [("symbol", name, b) for b in spot[3]]
                     if t["def_name"] not in have_defs:
                         libs = find(doc.tree, "lib_symbols")
                         doc.edits.append(((libs.span[1] - 1, libs.span[1] - 1), "\t" + t["def"] + "\n\t"))
