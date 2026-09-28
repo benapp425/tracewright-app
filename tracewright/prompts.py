@@ -110,7 +110,20 @@ def turn_context(runtime, extra=None):
     if sel_k:
         lines.append("Selected in KiCad: " + ", ".join(_sel(s) for s in sel_k[:20]))
     p = runtime.p
-    if p.unattended():
+    phase = p.start_phase()
+    if phase == "intake":
+        lines.append("Guided start, intake: the user sees this chat beside a live canvas. Ask what changes the design "
+                     "(question tool: up to four per call, recommended option first), and as the picture forms draw it "
+                     "with the canvas tool: requirements first, then the block diagram, the connectors with their "
+                     "pinouts and board edges, and the key parts with LCSC codes (look them up with parts). Do not draw "
+                     "the schematic or touch the board yet. When the requirements are settled, fill in docs/requirements.md "
+                     "(read it first: it has the headings), then call ready_to_start with a two-sentence summary and "
+                     "the plan, and stop.")
+    elif phase == "ready":
+        lines.append("Guided start, ready: the Start card is showing and the user has not pressed Start. If they ask "
+                     "for a change, update the canvas and requirements and call ready_to_start again; do not begin the "
+                     "design until they press Start.")
+    elif p.unattended():
         lines.append("Run mode: the user is not waiting on this run (autonomous, intake done). Do not stop to ask: take "
                      "your recommended option, record it under 'Assumptions to review' in docs/decisions.md, and carry "
                      "on. Stop only for something that would make the board unsafe or impossible to build, and say so "

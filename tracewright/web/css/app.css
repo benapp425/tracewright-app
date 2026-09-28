@@ -1766,3 +1766,92 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .about-tag { font-size: 13px; color: var(--text-2); margin-top: 8px; }
 .about-links { display: flex; gap: 16px; margin-top: 12px; }
 .about-legal { font-size: 11.5px; color: var(--text-4); margin-top: 14px; }
+
+/* ------------------------------------------------------------------ guided start */
+/* the chat alone, centered; the canvas slides in beside it once Claude draws; Start opens the workspace */
+.guided:not(.guided-peek) .splitter, .guided:not(.guided-peek) .mainpane > .tabs, .guided:not(.guided-peek) .mainpane > .main-body { display: none; }
+.guided:not(.guided-peek) .topbar .pill, .guided:not(.guided-peek) .topbar .kicadbtn { display: none; }
+.guided-peek .gdpane { display: none; }
+.guided:not(.guided-peek) .chatpane { width: 100% !important; max-width: none; border-right: 0; transition: width .45s var(--ease); }
+.guided:not(.guided-peek):not(.canvas-on) .mainpane { display: none; }
+.guided:not(.guided-peek):not(.canvas-on) .chatpane .msgs,
+.guided:not(.guided-peek):not(.canvas-on) .chatpane .composer,
+.guided:not(.guided-peek):not(.canvas-on) .chatpane .qdock,
+.guided:not(.guided-peek):not(.canvas-on) .chatpane .agenda { padding-left: max(18px, calc((100% - 760px) / 2)); padding-right: max(18px, calc((100% - 760px) / 2)); }
+.guided.canvas-on:not(.guided-peek) .chatpane { width: 42% !important; min-width: 380px; border-right: 1px solid var(--line); }
+.guided.canvas-on:not(.guided-peek) .mainpane { display: flex; animation: gd-in .5s var(--ease); }
+.guided-out .chatpane, .guided-out .gdpane { opacity: .4; transition: opacity .3s; }
+@keyframes gd-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+.gdpane { flex: 1; min-height: 0; overflow-y: auto; }
+.gd { max-width: 860px; margin: 0 auto; padding: 20px 22px 40px; display: flex; flex-direction: column; gap: 14px; }
+.gd-card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+.gd-card.new { animation: gd-pop .45s var(--ease) both; }
+@keyframes gd-pop { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: none; } }
+.gd-h { display: flex; align-items: center; gap: 8px; }
+.gd-h b { font-size: 13.5px; font-weight: 650; }
+.gd-hi { width: 26px; height: 26px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; background: var(--accent-soft); color: var(--accent); }
+.gd-hi.ok { background: var(--ok-soft); color: var(--ok); }
+.gd-sub { margin-left: auto; font-size: 12px; color: var(--text-3); }
+.gd-start { border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); box-shadow: 0 0 0 3px var(--ok-soft); }
+.gd-sum { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--text); }
+.gd-plan { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--text-2); }
+.gd-go { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.gd-note { font-size: 12px; color: var(--text-3); }
+.gd-req { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.gd-rq { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--line); min-width: 0; }
+.gd-rq span { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); }
+.gd-rq b { font-size: 13px; font-weight: 550; color: var(--text); overflow-wrap: anywhere; }
+.gd-diagram svg { display: block; margin: 0 auto; }
+.gd-diagram .db rect { fill: var(--surface-2); stroke: var(--line-3); stroke-width: 1; }
+.gd-diagram .db circle { fill: var(--text-3); }
+.gd-diagram .db.power circle { fill: var(--warn); } .gd-diagram .db.mcu circle { fill: var(--accent); }
+.gd-diagram .db.sensor circle { fill: var(--ok); } .gd-diagram .db.io circle, .gd-diagram .db.display circle { fill: var(--info); }
+.gd-diagram .db.rf circle { fill: #b48cf2; } .gd-diagram .db.connector circle { fill: var(--text-3); }
+.gd-diagram .db.mcu rect { stroke: var(--accent-line); }
+.gd-diagram .dt { font: 600 12.5px var(--font); fill: var(--text); }
+.gd-diagram .dn { font: 11px var(--font); fill: var(--text-3); }
+.gd-diagram .dl { fill: none; stroke: var(--line-3); stroke-width: 1.5; stroke-linejoin: round; }
+.gd-diagram .dl.power { stroke: var(--warn); stroke-width: 2; }
+.gd-diagram .dl.bus { stroke: var(--info); stroke-width: 1.8; }
+.gd-diagram .dl-j { fill: var(--line-3); } .gd-diagram .dl-j.power { fill: var(--warn); } .gd-diagram .dl-j.bus { fill: var(--info); }
+.gd-diagram .dl-l rect { fill: var(--surface); stroke: var(--line-2); }
+.gd-diagram .dl-l.power rect { stroke: color-mix(in srgb, var(--warn) 55%, var(--line-2)); }
+.gd-diagram .dl-l.bus rect { stroke: color-mix(in srgb, var(--info) 55%, var(--line-2)); }
+.gd-diagram .dl-l text { font: 10.5px var(--mono); fill: var(--text-2); text-anchor: middle; }
+.gd-diagram .dl-l.tag rect { fill: var(--warn-soft); stroke: none; } .gd-diagram .dl-l.tag text { fill: var(--warn); }
+.gd-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-3); }
+.gd-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.gd-legend i { width: 16px; height: 0; border-top: 2px solid var(--line-3); }
+.gd-legend i.power { border-color: var(--warn); } .gd-legend i.bus { border-color: var(--info); }
+.gd-sketch svg { display: block; margin: 0 auto; }
+.gd-sketch .bs-board { fill: color-mix(in srgb, #2f7d4a 30%, var(--surface-2)); stroke: #3f9b5d; stroke-width: 1.5; }
+.gd-sketch .bs-c { fill: var(--surface-3); stroke: var(--text-3); }
+.gd-sketch .bs-l { font: 600 11px var(--font); fill: var(--text-2); }
+.gd-sketch .bs-dim { font: 11px var(--mono); fill: var(--text-3); text-anchor: middle; }
+.gd-conns { display: flex; flex-direction: column; gap: 6px; }
+.gd-conn { border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.gd-conn summary { display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer; list-style: none; font-size: 12.5px; }
+.gd-conn summary::-webkit-details-marker { display: none; }
+.gd-conn summary span { color: var(--text-3); }
+.gd-edge { font-size: 11px; padding: 1px 7px; border-radius: 9px; background: var(--surface-3); }
+.gd-np { margin-left: auto; }
+.gd-pins { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 14px; padding: 4px 12px 10px; }
+.gd-pin { display: flex; gap: 8px; font-size: 12px; }
+.gd-pin span { width: 26px; color: var(--text-3); font-family: var(--mono); text-align: right; }
+.gd-pin b { font-weight: 550; }
+.gd-parts { display: flex; flex-direction: column; }
+.gd-part { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto 64px; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.gd-part:first-child { border-top: 0; }
+.gd-pn { display: flex; flex-direction: column; min-width: 0; }
+.gd-pn b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gd-pn span { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gd-code { font: 11.5px var(--mono); color: var(--text-2); }
+.gd-lib { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 9px; }
+.gd-lib.basic { background: var(--ok-soft); color: var(--ok); } .gd-lib.ext { background: var(--warn-soft); color: var(--warn); }
+.gd-stock { font-size: 11.5px; } .gd-stock.ok { color: var(--ok); } .gd-stock.warn { color: var(--warn); } .gd-stock.err { color: var(--err); }
+.gd-look { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-3); }
+.gd-look .spinner { width: 10px; height: 10px; border-width: 1.5px; }
+.gd-tag { font-size: 11px; color: var(--text-3); }
+.gd-price { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.gd-total { display: flex; justify-content: space-between; align-items: baseline; padding-top: 10px; border-top: 1px solid var(--line-2); font-size: 12.5px; color: var(--text-2); }
+.gd-total b { font-size: 14px; color: var(--text); }

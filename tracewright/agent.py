@@ -77,6 +77,7 @@ class AgentManager:
         self.steers = []           # messages sent while Claude works, not yet read: {id, text, sent}
         self.steered = False       # a note went to the CLI during this turn (a stop then also ends its queue)
         self.stopping = False
+        self.stop_asked = False        # Stop pressed while a turn was still starting
         self._snap_lock = asyncio.Lock()
         self.allowed = set(self._load_allowed())
         self._lock = asyncio.Lock()
@@ -348,7 +349,14 @@ class AgentManager:
             return self.client
         await self.disconnect()
         client = ClaudeSDKClient(options=self._options(sess.meta.get("sdk_session")))
-        await client.connect()
+        try:
+            await client.connect()
+        except BaseException:                                  # failed or stopped half way: no stray CLI process
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            raise
         self.client, self.client_key = client, key
         self.reader = asyncio.ensure_future(self._read(client, sess))
         return client
@@ -372,9 +380,10 @@ class AgentManager:
         self.tasks = {}
 
     # ------------------------------------------------------------------ a turn
-    async def send(self, text, sid=None, attachments=None, title=None, images=None):
+    async def send(self, text, sid=None, attachments=None, title=None, images=None, hidden=None):
         """Start a turn. images: PNG files sent with the message (review snapshots), which Claude
-        sees directly."""
+        sees directly. hidden: instructions Claude gets with the message that the chat does not show
+        (the kickoff's intake instructions: the user sees their own brief)."""
         if self.busy:
             raise RuntimeError("Claude is still working on the last message (interrupt it first)")
         self._drop_steers()
@@ -388,7 +397,8 @@ class AgentManager:
         elif sess.meta.get("title") in (None, "", "New conversation"):
             sess.meta["title"] = text.strip().splitlines()[0][:70] if text.strip() else "Conversation"
         self._save_meta(sess.meta)
-        self.task = asyncio.ensure_future(self._turn(sess, text, attachments or [], images or []))
+        self.stop_asked = False
+        self.task = asyncio.ensure_future(self._turn(sess, text, attachments or [], images or [], hidden))
         return sess.sid
 
     async def steer(self, text):
@@ -447,7 +457,7 @@ class AgentManager:
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}})
         yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
 
-    async def _turn(self, sess, text, attachments, images=()):
+    async def _turn(self, sess, text, attachments, images=(), hidden=None):
         hub = self.hub
         tid = uuid.uuid4().hex[:8]
         started = time.time()
@@ -460,10 +470,16 @@ class AgentManager:
         try:
             if self.app.settings.get("snapshot_each_turn"):
                 await self._snapshot(f"Before: {text.strip()[:60]}")
+            if self.stop_asked:
+                raise _Stopped()
             client = await self.connect()
             starting = False
+            if self.stop_asked:                           # stopped while connecting: the message never goes out
+                raise _Stopped()
             extra = [f"Attached by the user: {a.get('label') or a}" for a in attachments
                      if not (isinstance(a, dict) and a.get("kind") == "flag")] if attachments else None
+            if hidden:
+                extra = (extra or []) + [hidden]
             prompt = prompts.turn_context(self.rt, extra) + text
             t = {"tid": tid, "sess": sess, "done": asyncio.get_running_loop().create_future(), "auto": False,
                  "blocks": {}, "started": started}
@@ -475,6 +491,8 @@ class AgentManager:
         except asyncio.CancelledError:
             hub.emit("agent.error", sid=sess.sid, turn=tid, message="stopped")
             raise
+        except _Stopped:
+            hub.emit("agent.error", sid=sess.sid, turn=tid, message="stopped")
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             self.app.log(traceback.format_exc())
@@ -700,7 +718,11 @@ class AgentManager:
         return name
 
     async def interrupt(self):
-        if self.client and self.busy:
+        if self.busy and not self.turn:
+            # Still starting (the checkpoint before the message, or connecting to Claude): the turn ends
+            # there, before its message reaches Claude. Cancelling it mid-connect could strand the CLI.
+            self.stop_asked = True
+        elif self.client and self.busy:
             self.stopping = True
             try:
                 await self.client.interrupt()
@@ -722,6 +744,10 @@ class AgentManager:
                 self.answer_question(rid, {})
             else:
                 self.answer_permission(rid, False)
+
+
+class _Stopped(Exception):
+    """A turn stopped before its message reached Claude."""
 
 
 def _strip_heredocs(cmd):

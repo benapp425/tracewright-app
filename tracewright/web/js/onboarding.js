@@ -12,7 +12,7 @@ const STEPS = ["welcome", "setup", "look", "work", "start"];
 export class Onboarding {
   constructor(root, user, done) {
     this.root = root; this.user = user; this.done = done; this.at = 0;
-    this.prefs = { run_mode: "autonomous", model: null };
+    this.prefs = { run_mode: "autonomous", workflow: "guided", model: null };
     root.appendChild(this.el = h("div.onb", { "data-drag": "" }));
     this.render();
     this.onKey = (e) => { if (e.key === "Enter" && e.target.tagName !== "INPUT" && e.target.tagName !== "BUTTON") this.next(); };
@@ -97,6 +97,12 @@ export class Onboarding {
       ["check_in", "messages-square", "Step by step", "Claude waits for your approval after each stage."],
     ].map(([v, ic, t, d]) => h("button.onb-mode" + (this.prefs.run_mode === v ? ".on" : ""), { onclick: () => pick(v) },
       h("span.onb-mi", icon(ic, 18)), h("div", h("b", t), h("span", d)), h("span.onb-radio")))));
+    const flow = (v) => { this.prefs.workflow = v; this.render(); };
+    b.append(h("div.onb-label", "New projects start"), h("div.onb-modes.onb-flow", [
+      ["guided", "sparkles", "Guided", "Chat first. A live canvas shows the requirements, block diagram, connectors and parts; press Start when it looks right."],
+      ["classic", "layout-grid", "Classic", "The full workspace from the first message."],
+    ].map(([v, ic, t, d]) => h("button.onb-mode" + (this.prefs.workflow === v ? ".on" : ""), { onclick: () => flow(v) },
+      h("span.onb-mi", icon(ic, 18)), h("div", h("b", t), h("span", d)), h("span.onb-radio")))));
   }
 
   start(b) {
@@ -113,7 +119,7 @@ export class Onboarding {
 
   async finish(what) {
     try {
-      const u = await api("/api/auth/me", { method: "PATCH", body: { onboarded: true, prefs: { run_mode: this.prefs.run_mode, seen_version: (state.info || {}).version } } });
+      const u = await api("/api/auth/me", { method: "PATCH", body: { onboarded: true, prefs: { run_mode: this.prefs.run_mode, workflow: this.prefs.workflow, seen_version: (state.info || {}).version } } });
       state.auth.user = u;
     } catch (e) { /* not fatal: it shows again next time */ }
     this.el.classList.add("out");

@@ -16,6 +16,7 @@ import { OverviewPanel } from "./overview.js";
 import { Review, ReviewPanel } from "./review.js";
 import { TimelapsePlayer } from "./timelapse.js";
 import { MissionControl } from "./mission.js";
+import { GuidedCanvas } from "./guided.js";
 
 const enc = encodeURIComponent;
 export const TABS = [
@@ -43,6 +44,7 @@ export class Workspace {
   }
 
   destroy() {
+    this.root.classList.remove("guided", "canvas-on", "guided-peek");
     this.ev.close();
     this.unreg.forEach((f) => f());
     for (const v of Object.values(this.views)) v && v.destroy && v.destroy();
@@ -64,11 +66,15 @@ export class Workspace {
     this.stageEl = h("button.stagechip", { onclick: (e) => this.stagesPop(e.currentTarget) });
     this.liveEl = h("span.kdot");
     this.checkEl = h("button.pill", { onclick: () => this.show("checks"), "data-tip": "Checks", "data-kbd": "mod+6" });
+    const guided = !!this.p.start_phase;
+    this.startBtn = guided ? btn("play", "Start design", { onclick: () => this.startDesign() }, "sm primary startbtn") : null;
+    this.peekBtn = guided ? btn("layout-grid", "Workspace", { onclick: () => this.peek(), "data-tip": "Look at the full workspace" }, "sm ghost peekbtn") : null;
     const bar = topbar([
       h("div.crumbs-top", h("span.cs", icon("chevron-right", 14)),
         h("button.cbtn", { onclick: (e) => this.projectMenu(e.currentTarget), "data-tip": this.p.root }, this.nameEl, icon("chevron-down", 13))),
       this.stageEl,
     ], [
+      this.startBtn, this.peekBtn,
       this.checkEl,
       state.info.server_mode ? btn("download", "Download", { onclick: () => this.download() }, "sm")
         : this.kicadBtn = h("button.btn.sm.kicadbtn", { onclick: (e) => this.kicadMenu(e.currentTarget) }, this.liveEl, h("span", "KiCad"), icon("chevron-down", 12)),
@@ -97,6 +103,7 @@ export class Workspace {
     this.review.on("changed", () => { this.renderTabs(); this.viewIf("board", (v) => v.flagsChanged && v.flagsChanged()); });
     this.show(this.tab);
     if (localStorage.getItem("tw.review.open") === "1") this.toggleReview(true);
+    if (guided) this.enterGuided();
     this.wire();
     this.commands();
     this.watchMission();
@@ -147,8 +154,57 @@ export class Workspace {
   }
 
   // ------------------------------------------------------------------ live events
+  // ------------------------------------------------------------------ the guided start
+  // Chat first: the chat alone, then the canvas beside it as Claude draws; Start opens the workspace.
+  enterGuided() {
+    this.guided = new GuidedCanvas(this);
+    this.guidedPane = h("div.gdpane", this.guided.el);
+    this.main.appendChild(this.guidedPane);
+    this.root.classList.add("guided");
+    if (this.startBtn) this.startBtn.style.display = "none";
+  }
+
+  guidedChanged(has, phase) {
+    this.root.classList.toggle("canvas-on", !!has);
+    if (this.startBtn) this.startBtn.style.display = phase === "ready" ? "" : "none";
+  }
+
+  async startDesign() {
+    const b = this.startBtn;
+    if (b) { b.disabled = true; b.classList.add("busy"); }
+    try { await api(`/api/projects/${enc(this.pid)}/start`, { body: {} }); }
+    catch (e) { toast(e.message, "error"); if (b) { b.disabled = false; b.classList.remove("busy"); } }
+  }
+
+  // a look at the full workspace during the intake (the canvas comes back with the same button)
+  peek() {
+    const on = this.root.classList.toggle("guided-peek");
+    if (this.peekBtn) clear(this.peekBtn).append(icon(on ? "sparkles" : "layout-grid", 14), h("span", on ? "Canvas" : "Workspace"));
+    if (on) this.show(this.tab);
+  }
+
+  exitGuided() {
+    if (!this.guided) return;
+    this.root.classList.add("guided-out");
+    setTimeout(() => {
+      this.root.classList.remove("guided", "canvas-on", "guided-peek", "guided-out");
+      this.guidedPane && this.guidedPane.remove();
+      this.guided = null;
+      for (const b of [this.startBtn, this.peekBtn]) b && b.remove();
+      this.startBtn = this.peekBtn = null;
+      this.p.start_phase = null;
+      this.show("overview");
+      toast("Design started", "ok", 2200);
+    }, 380);
+  }
+
   wire() {
     const ev = this.ev;
+    ev.on("canvas.update", (e) => this.guided && this.guided.set(e.canvas || {}));
+    ev.on("project.start", (e) => {
+      if (e.phase === "done") this.exitGuided();
+      else if (this.guided) this.guided.set({ phase: e.phase });
+    });
     ev.on("stages", (e) => this.renderStages(e.stages));
     ev.on("project.changed", (e) => { if (e.summary) { this.p = { ...this.p, ...e.summary }; this.renderStages(this.p.stages); this.nameEl.textContent = this.p.name; } });
     ev.on("live.status", (e) => this.renderLive(e));

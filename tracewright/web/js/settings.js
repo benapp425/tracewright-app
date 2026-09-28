@@ -165,7 +165,19 @@ export class SettingsPage {
       after.onchange = () => native.lockSet({ minutes: Number(after.value) });
     }
     const ws = this.inp("workspace");
+    const prefs = (state.auth && state.auth.user && state.auth.user.prefs) || {};
+    let flow = prefs.workflow || localStorage.getItem("tw.workflow") || "guided";
+    const flowSeg = h("div.seg", [["guided", "Guided"], ["classic", "Classic"]].map(([v, t]) => h("button" + (flow === v ? ".on" : ""), { onclick: async (e) => {
+      flow = v;
+      for (const b of e.currentTarget.parentNode.children) b.classList.toggle("on", b === e.currentTarget);
+      localStorage.setItem("tw.workflow", v);
+      if (state.auth && state.auth.user) {
+        try { state.auth.user = await api("/api/auth/me", { method: "PATCH", body: { prefs: { workflow: v } } }); } catch (er) { /* kept locally */ }
+      }
+      toast(v === "guided" ? "New projects start guided" : "New projects open the workspace", "ok", 1800);
+    } }, t)));
     this.group("Projects", null, [
+      this.row("New projects start", "Guided: chat first, with a live canvas and a Start button. Classic: the full workspace.", flowSeg),
       this.row("Projects folder", null, h("div.row", ws, isNative ? btn("folder", null, { "data-tip": "Choose…", onclick: async () => {
         const p = await native.pick({ kind: "folder", title: "Choose the projects folder" }); if (p) { ws.value = p; this.mark("workspace"); }
       } }, "sm") : null)),

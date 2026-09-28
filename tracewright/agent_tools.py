@@ -1,7 +1,7 @@
 """The agent's design tools (an in-process MCP server). Each tool acts on the project, tells the UI
 what happened through the project's event hub, and returns a short text (or an image) to the agent.
 Board edits go live into KiCad when it has the board open (tw.pcb.client), else into the file."""
-import os, io, json, base64, asyncio, time, traceback, math
+import os, io, json, base64, asyncio, time, traceback, math, threading
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from tw import env as twenv, geom
@@ -526,6 +526,58 @@ def tool_list(rt, app):
         done = sum(i["status"] in ("done", "skipped") for i in items)
         now = next((i["text"] for i in items if i["status"] == "active"), None)
         return _text(f"agenda: {done}/{len(items)} done" + (f"; now: {now}" if now else ""))
+
+    # ------------------------------------------------------------------ the guided start's canvas
+    def _canvas_changed(cv):
+        from . import canvas as cvs
+        hub.emit("canvas.update", canvas=cvs.enrich(p.root, cv))
+        codes = [c for c in cvs.missing_codes(p.root, cv) if c not in (cv.get("pending") or [])]
+        if codes:                                 # look the new parts up, then draw them again with stock and price
+            cvs.set_pending(p.root, codes, True)
+
+            def look():
+                try:
+                    from . import bom as bomlib
+                    bomlib.lookup(p.tw, codes, budget=60.0)
+                finally:
+                    cvs.set_pending(p.root, codes, False)
+                    hub.emit("canvas.update", canvas=cvs.enrich(p.root, cvs.load(p.root)))
+            threading.Thread(target=look, daemon=True).start()
+
+    @reg("canvas", "The live canvas beside the chat during a guided start: what you have worked out so far, drawn for "
+         "the user as you go. Replace one section at a time. requirements: {items: [{label, value}]} -- the key "
+         "specs (power in, rails and currents, interfaces, size, quantity, how it is built). diagram: {blocks: [{id, "
+         "label, kind: power|mcu|sensor|connector|io|rf|memory|display|motor|audio|other, note}], links: [{from, to, "
+         "label, kind: power|signal|bus}]} -- the block diagram. connectors: {items: [{name, type, ref, edge: "
+         "left|right|top|bottom, pins: [{n, signal}]}], board: {w, h}} -- every connector with its pinout and the "
+         "board edge it sits on. parts: {items: [{role, mpn, lcsc, package, qty, why}]} -- the key parts (with LCSC "
+         "codes; the app shows their stock and price).",
+         {"type": "object", "properties": {"section": {"type": "string", "enum": ["requirements", "diagram", "connectors", "parts"]},
+                                           "data": {"type": "object"}}, "required": ["section", "data"]})
+    async def canvas_tool(args):
+        from . import canvas as cvs
+        cv = await run(cvs.update, p.root, args["section"], args.get("data") or {})
+        _canvas_changed(cv)
+        sec = cv.get(args["section"]) or {}
+        n = len(sec.get("items") or sec.get("blocks") or [])
+        return _text(f"canvas {args['section']} updated ({n} item{'s' if n != 1 else ''})")
+
+    @reg("ready_to_start", "Guided start: the intake is done. Call it once the requirements are settled and written to "
+         "docs/requirements.md and the canvas is filled in: summary (two sentences: what you will build) and steps (the "
+         "plan, 4-8 steps in the user's terms). The user then sees a Start button; stop and wait -- the design begins "
+         "when they press it.",
+         {"type": "object", "properties": {"summary": {"type": "string"}, "steps": {"type": "array", "items": {"type": "string"}}},
+          "required": ["summary", "steps"]})
+    async def ready_to_start(args):
+        from . import canvas as cvs
+        if not cvs.start_of(p.cfg):
+            return _text("this project has no guided start: carry on in the chat", error=True)
+        cv = await run(cvs.update, p.root, "plan", {"summary": args.get("summary"), "steps": args.get("steps")})
+        await run(p.set_start_phase, "ready")
+        _canvas_changed(cv)
+        hub.emit("project.start", phase="ready")
+        return _text("The Start card is showing. Stop here and wait: the user starts the design with the Start button "
+                     "(or keeps talking to change the plan -- then call ready_to_start again).")
 
     @reg("lessons", "The knowledge base of lessons from real boards. action: search (query) | get (id) | add (title, body, "
          "tags: record a trap you just hit so every future project knows) | list.",

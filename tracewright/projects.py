@@ -101,7 +101,11 @@ class Project:
 
     def intake_done(self):
         """The requirements are agreed: stage brief is done, or the work has moved past it (an imported
-        design gets its stages from its files)."""
+        design gets its stages from its files). A guided start is in the intake until the user presses
+        Start."""
+        from . import canvas
+        if canvas.phase(self.cfg):
+            return False
         st = self.cfg.get("stages", {})
         if st.get("brief", {}).get("status") in ("done", "skipped"):
             return True
@@ -164,7 +168,22 @@ class Project:
                 "stages": self.stages(), "checks": self.checks_summary(), "thumbnail": bool(self.thumbnail()),
                 "description": self.cfg.get("description", ""), "archived": self.cfg.get("archived", False),
                 "toolkit": self.cfg.get("toolkit"), "fab": self.cfg.get("fab", {}), "run_mode": self.run_mode(),
-                "unattended": self.unattended()}
+                "unattended": self.unattended(), "start_phase": self.start_phase()}
+
+    def start_phase(self):
+        """'intake' | 'ready' while a guided start waits for the user's Start; None otherwise."""
+        from . import canvas
+        return canvas.phase(self.cfg)
+
+    def set_start_phase(self, phase):
+        """Move a guided start on: 'ready' (the intake is done, the Start card shows) or 'done'."""
+        from . import canvas
+        if not canvas.start_of(self.cfg) or phase not in ("intake", "ready", "done"):
+            return False
+        with self._lock:
+            self.cfg["start"] = {**self.cfg["start"], "phase": phase, "updated": now()}
+        self.save()
+        return True
 
 
 def infer_stages(root, kicad_project, drc_out=None):
@@ -297,6 +316,8 @@ class ProjectStore:
                        "layers": int(options.get("layers", 2)), "assembly": bool(options.get("assembly", True))},
                "checks": {}, "stages": {"brief": {"status": "active", "note": "", "updated": now()}},
                "run_mode": options.get("run_mode") if options.get("run_mode") in RUN_MODES else "autonomous"}
+        if options.get("workflow") == "guided":
+            cfg["start"] = {"mode": "guided", "phase": "intake", "since": now()}
         scaffold.new_project(root, cfg, brief)
         return self.get_by_root(root)
 

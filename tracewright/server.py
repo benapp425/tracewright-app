@@ -619,14 +619,45 @@ def make_app():
         body = await request.json()
         name = (body.get("name") or "").strip() or "Untitled board"
         brief = body.get("brief", "")
+        guided = body.get("workflow") == "guided" and body.get("start") and brief.strip()
         p = await asyncio.to_thread(app.store.create, name, brief, {"layers": body.get("layers", 2),
                                                                     "fab_house": body.get("fab_house", "jlcpcb"),
                                                                     "assembly": body.get("assembly", True),
-                                                                    "run_mode": body.get("run_mode")})
+                                                                    "run_mode": body.get("run_mode"),
+                                                                    "workflow": "guided" if guided else "classic"})
         if body.get("start") and brief.strip():
             a = app.agent(p.id)
             await a.new_session()
-            await a.send(kickoff_text(p.run_mode()) + "\n\n" + brief, title=f"Kickoff: {name}")
+            how = guided_kickoff_text() if guided else kickoff_text(p.run_mode())
+            await a.send(brief.strip(), title="Design brief", hidden=how)
+        return jresp(p.summary())
+
+    @routes.get("/api/projects/{pid}/canvas")
+    async def get_canvas(request):
+        from . import canvas
+        p = app.store.get(request.match_info["pid"])
+        cv = await asyncio.to_thread(lambda: canvas.enrich(p.root, canvas.load(p.root)))
+        return jresp({**cv, "phase": p.start_phase(), "run_mode": p.run_mode()})
+
+    @routes.post("/api/projects/{pid}/start")
+    async def start_design(request):
+        """The guided start's Start button: the intake is over, the design begins."""
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        p = rt.p                                  # the runtime's own project: Claude's next turn reads it
+        p.reload()
+        if not p.start_phase():
+            return err("this project has already started", 409)
+        await asyncio.to_thread(p.set_start_phase, "done")
+        await asyncio.to_thread(p.set_stage, "brief", "done", "requirements agreed at the guided start")
+        rt.hub.emit("project.start", phase="done")
+        rt.hub.emit("stages", stages=p.stages())
+        a = app.agent(pid)
+        text = start_text(p.run_mode())
+        if a.busy:
+            await a.steer(text)
+        else:
+            await a.send("Start the design.", hidden=text)
         return jresp(p.summary())
 
     @routes.post("/api/projects/import")
@@ -1854,16 +1885,37 @@ def _zip_project(p, with_git=False):
     return out
 
 
+def guided_kickoff_text():
+    """The first message of a guided start (the canvas beside the chat shows what Claude works out)."""
+    return ("The message is the user's brief for this new board (also saved in BRIEF.md). This is a guided start: the user "
+            "sees the chat beside a live canvas. Run the intake (skill new-design): read the brief, fill in the canvas's requirements from "
+            "what it says, then ask me now every question whose answer changes the design -- with your question tool, up "
+            "to four per call, your recommended option first. As the answers come in, draw the block diagram, the "
+            "connectors with their pinouts and board edges, and the key parts with LCSC codes. When the requirements "
+            "are settled, write docs/requirements.md and call ready_to_start; then wait for the user to press Start.")
+
+
+def start_text(mode):
+    """What Claude hears when the user presses Start."""
+    if mode == "check_in":
+        return ("I pressed Start. Begin the design from the agreed requirements, stage by stage, and check in with me at "
+                "the end of each stage.")
+    return ("I pressed Start. Carry the design through from the agreed requirements to a checked board that is ready to "
+            "order, without waiting on me: record each assumption in docs/decisions.md, keep the agenda up to date, and "
+            "tell me what needs the built board.")
+
+
 def kickoff_text(mode):
     """The first message of a new project's conversation."""
     if mode == "check_in":
-        return ("Here is the brief for this new board (also saved in BRIEF.md). Start the design: read it, ask me only "
-                "what changes the design, then write the requirements.")
-    return ("Here is the brief for this new board (also saved in BRIEF.md). Start with the intake (skill new-design): "
-            "read it, then ask me now every question whose answer changes the design -- with your question tool, up to "
-            "four per call and two or three calls at most, your recommended option first -- so the rest of the run needs "
-            "nothing from me. Then write docs/requirements.md with my answers and each assumption you made, and ask me "
-            "once to confirm it. When I confirm, carry the design through to the end without waiting on me.")
+        return ("The message is the user's brief for this new board (also saved in BRIEF.md). Start the design: read it, "
+                "ask the user only what changes the design, then write the requirements.")
+    return ("The message is the user's brief for this new board (also saved in BRIEF.md). Start with the intake (skill "
+            "new-design): read it, then ask the user now every question whose answer changes the design -- with your "
+            "question tool, up to four per call and two or three calls at most, your recommended option first -- so the "
+            "rest of the run needs nothing from them. Then write docs/requirements.md with their answers and each "
+            "assumption you made, and ask them once to confirm it. When they confirm, carry the design through to the "
+            "end without waiting on them.")
 
 
 def _build_id():

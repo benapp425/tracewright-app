@@ -60,6 +60,9 @@ export function stepText(name, inp) {
     case "lessons": return [inp.action === "add" ? `Recorded a lesson: ${inp.title || ""}` : `Checked the lessons${inp.query ? ": " + inp.query : ""}`];
     case "snapshot": return ["Saved a checkpoint", inp.message];
     case "kicad": return [`KiCad: ${inp.action || "status"}`];
+    case "canvas": return [{ requirements: "Updated the requirements", diagram: "Drew the block diagram", connectors: "Laid out the connectors",
+      parts: "Updated the parts list" }[inp.section] || "Updated the canvas"];
+    case "ready_to_start": return ["Ready to start"];
     case "outputs": return ["Generated fab outputs"];
     case "review": return [inp.action === "resolve" ? `Resolved review flag ${inp.id || ""}` : inp.action === "add" ? "Added a review flag" : "Read review flags"];
     case "Bash": { const d = inp.description || fromCut(inp, "description"), raw = inp.command || fromCut(inp, "command"), c = shortCmd(raw);
@@ -204,7 +207,7 @@ export class Chat {
     if (p.kind === "imported" || p.kind === "in_place") {
       acts.push(["search", "Review design", "Review this design (skill import-review): summarise it, run every check, and tell me what is verified, what looks wrong, and what needs the built board. Don't change anything yet."]);
       acts.push(["package", "Prepare for JLC", "Get this design ready to order from JLCPCB with assembly: check the BOM has LCSC codes with stock, fit the CPL to JLC's footprints, check the fab rules, and tell me what's left."]);
-    } else if (!p.has_sch) {
+    } else if (!p.has_sch || ((p.stages || []).find((s) => s.id === "brief") || {}).status === "active") {
       acts.push(["sparkles", "Start the design", "Start the design from the brief: ask me only what changes the design, then write docs/requirements.md."]);
       acts.push(["layers", "Propose an architecture", "Propose an architecture for this board: block diagram, power tree with currents, and the key parts (with JLC stock). Keep it simple."]);
     } else if (!p.has_pcb) {

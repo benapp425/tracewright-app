@@ -175,6 +175,7 @@ export class ProjectsPage {
     const brief = h("textarea", { placeholder: "What it does, power, interfaces, key parts, size and quantity", style: { minHeight: "170px" }, value: pre.brief || "" });
     const prefs = (state.auth && state.auth.user && state.auth.user.prefs) || {};
     let layers = pre.layers || 2, fab = (state.info.settings && state.info.settings.fab_house) || "jlcpcb", mode = prefs.run_mode || "autonomous";
+    let flow = prefs.workflow || localStorage.getItem("tw.workflow") || "guided";
     const seg = (vals, get, set) => {
       const el = h("div.seg");
       const draw = () => { clear(el); for (const [v, label] of vals) el.appendChild(h("button" + (get() === v ? ".on" : ""), { type: "button", onclick: () => { set(v); draw(); } }, label)); };
@@ -192,12 +193,18 @@ export class ProjectsPage {
           h("input", { type: "radio", checked: mode === v, name: "mode" }), h("div.grow", h("div.ct.row", icon(ic, 14), t), h("div.cd", d))));
     };
     drawModes();
+    const flowHint = h("span");
+    const flowSeg = seg([["guided", "Guided"], ["classic", "Classic"]], () => flow, (v) => { flow = v; paintFlow(); });
+    const paintFlow = () => { flowHint.textContent = flow === "guided" ? "Chat first, with a live canvas and a Start button" : "Opens the full workspace";
+      flowSeg.style.opacity = start.checked ? "" : ".45"; flowSeg.style.pointerEvents = start.checked ? "" : "none"; };
+    start.addEventListener("change", paintFlow);
+    paintFlow();
     const create = async () => {
       if (!brief.value.trim() && !name.value.trim()) { toast("Add a name or a description", "warn"); return; }
       okb.disabled = true; okb.lastChild.textContent = "Creating…";
       try {
         const s = await api("/api/projects", { body: { name: name.value || firstLine(brief.value), brief: brief.value, layers, fab_house: fab,
-          assembly: assembly.checked, start: start.checked, run_mode: mode } });
+          assembly: assembly.checked, start: start.checked, run_mode: mode, workflow: flow } });
         m.close();
         go("p/" + enc(s.id));
       } catch (e) { toast(e.message, "error"); okb.disabled = false; okb.lastChild.textContent = "Create project"; }
@@ -212,7 +219,8 @@ export class ProjectsPage {
           h("span.small.muted", { style: { marginLeft: "6px" } }, "Fab"), seg([["jlcpcb", "JLCPCB"], ["pcbway", "PCBWay"], ["oshpark", "OSH Park"]], () => fab, (v) => fab = v),
           h("label.row.small", { style: { marginLeft: "6px", cursor: "pointer" } }, asw, "Assembly")),
         h("div.field", h("label", "Workflow"), modes),
-        h("label.row", { style: { cursor: "pointer", margin: "4px 0 6px" } }, ssw, h("span", "Start designing now"))],
+        h("div.row", { style: { margin: "4px 0 6px", gap: "12px" } }, h("label.row", { style: { cursor: "pointer" } }, ssw, h("span", "Start designing now")),
+          flowSeg, h("span.small.muted", { style: { minWidth: 0 } }, flowHint))],
       actions: [h("span.small.faint.grow.row", kbd("mod+enter"), "to create"), h("button.btn", { onclick: () => m.close() }, "Cancel"), okb] });
     m.box.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); create(); } });
   }

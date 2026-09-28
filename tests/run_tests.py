@@ -1703,6 +1703,148 @@ def accounts_on_a_shared_server_owner_linking_and_reset():
 
 
 @test()
+def guided_start_canvas_ready_and_start():
+    """A guided start stays in the intake (never unattended) while Claude fills the canvas through its tools;
+    ready_to_start shows the Start card; Start ends the intake, marks the brief done and hands Claude the
+    go-ahead (as a note when it is still working); a second Start is refused."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools, canvas, prompts
+    p = ProjectStore().create("Guided demo", "A USB-C sensor node", {"workflow": "guided"})
+    assert p.start_phase() == "intake" and not p.intake_done() and not p.unattended() and p.run_mode() == "autonomous"
+    classic = ProjectStore().create("Classic demo", "x", {})
+    assert classic.start_phase() is None
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        rt = app.rt(p.id)
+        events = []
+        real_emit = rt.hub.emit
+        rt.hub.emit = lambda type_, **kw: (events.append((type_, kw)), real_emit(type_, **kw))
+        tools = {t.name: t for t in agent_tools.tool_list(rt, app)}
+        assert "Guided start, intake" in prompts.turn_context(rt)
+        r = await tools["canvas"].handler({"section": "diagram", "data": {
+            "blocks": [{"id": "usb", "label": "USB-C", "kind": "connector"}, {"id": "ldo", "label": "3.3 V LDO", "kind": "power"},
+                       {"id": "mcu", "label": "RP2040", "kind": "mcu"}, {"id": "x", "label": "Mystery", "kind": "nonsense"}],
+            "links": [{"from": "usb", "to": "ldo", "label": "5 V", "kind": "power"}, {"from": "ldo", "to": "ghost"}]}})
+        assert "2 item" not in r["content"][0]["text"] and "4 items" in r["content"][0]["text"], r
+        cv = canvas.load(p.root)
+        assert [b["kind"] for b in cv["diagram"]["blocks"]] == ["connector", "power", "mcu", "other"]
+        assert len(cv["diagram"]["links"]) == 1                              # the link to a missing block is dropped
+        await tools["canvas"].handler({"section": "parts", "data": {"items": [{"role": "Regulator", "mpn": "AMS1117-3.3",
+                                                                              "lcsc": "c6186", "package": "SOT-223"}]}})
+        assert canvas.load(p.root)["parts"]["items"][0]["lcsc"] == "C6186"
+        assert any(t == "canvas.update" for t, _ in events)
+        bad = await tools["canvas"].handler({"section": "sketches", "data": {}})
+        assert bad.get("is_error")
+        r = await tools["ready_to_start"].handler({"summary": "A small sensor node.", "steps": ["Parts", "Schematic", "Board"]})
+        assert rt.p.start_phase() == "ready" and ("project.start", {"phase": "ready"}) in events
+        assert "Guided start, ready" in prompts.turn_context(rt)
+
+        sent = []
+
+        class FakeAgent:
+            busy = True
+            async def steer(self, text): sent.append(("steer", text))
+            async def send(self, text, **kw): sent.append(("send", text))
+        app.agent = lambda pid: FakeAgent()
+        async with TestClient(TestServer(webapp)) as c:
+            d = await (await c.get(f"/api/projects/{p.id}/canvas")).json()
+            assert d["phase"] == "ready" and d["plan"]["steps"] == ["Parts", "Schematic", "Board"] and d["parts"]["items"][0]["found"] in (True, False)
+            r = await c.post(f"/api/projects/{p.id}/start", json={})
+            assert r.status == 200, await r.text()
+            assert sent and sent[0][0] == "steer" and "I pressed Start" in sent[0][1]
+            assert rt.p.start_phase() is None and rt.p.intake_done() and rt.p.unattended()
+            assert ("project.start", {"phase": "done"}) in events
+            assert (await c.post(f"/api/projects/{p.id}/start", json={})).status == 409
+        rt.stop()
+    asyncio.run(go())
+
+
+@test(needs=("node",))
+def block_diagram_geometry():
+    """The guided start's block diagram, laid out at three widths: no wire crosses a block or another wire's
+    label, no two wires overlap, labels do not collide (tests/diagram_check.mjs, in Node)."""
+    import subprocess
+    r = subprocess.run(["node", os.path.join(ROOT, "tests", "diagram_check.mjs")], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
+
+
+@test()
+def stop_while_a_turn_is_still_starting():
+    """Stop pressed in the first moment of a turn (the checkpoint, or Claude still connecting) ends the turn
+    before its message goes out; it used to be ignored, and the turn then ran to the end."""
+    from tracewright.server import App
+    from tracewright.projects import ProjectStore
+    from tracewright.agent import AgentManager
+    pid = ProjectStore().import_copy(FIXTURE, "Stop demo").id
+
+    class SlowCLI:
+        def __init__(self):
+            self.sent, self.q = [], asyncio.Queue()
+        async def receive_messages(self):
+            while (m := await self.q.get()) is not None:
+                yield m
+        async def query(self, prompt):
+            self.sent.append(prompt)
+        async def interrupt(self):
+            pass
+        async def disconnect(self):
+            self.q.put_nowait(None)
+
+    async def go():
+        app = App()
+        rt = app.rt(pid)
+        events = []
+        rt.hub.emit = lambda type_, **kw: events.append((type_, kw))
+        a = AgentManager(app, rt)
+        cli = SlowCLI()
+
+        async def connect():                              # Claude takes a moment to start
+            await asyncio.sleep(0.3)
+            a.session = a.session or a.get_session()
+            a.client, a.client_key = cli, "k"
+            a.reader = asyncio.ensure_future(a._read(cli, a.session))
+            return a.client
+        a.connect = connect
+        try:
+            await a.send("start the design")
+            await asyncio.sleep(0.05)
+            assert a.busy and a.turn is None
+            await a.interrupt()                           # while it is still connecting
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if not a.busy:
+                    break
+            assert not a.busy and cli.sent == [], cli.sent
+            turn = next(kw["turn"] for t, kw in events if t == "agent.user")
+            assert ("agent.error", {"sid": a.session.sid, "turn": turn, "message": "stopped"}) in events, events
+            # Stop before the turn's first step runs at all.
+            await a.send("again")
+            await a.interrupt()
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if not a.busy:
+                    break
+            assert not a.busy and cli.sent == [], cli.sent
+            # A turn that is not stopped still goes out.
+            await a.send("route it")
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if cli.sent:
+                    break
+            assert cli.sent and cli.sent[-1].endswith("route it"), cli.sent
+        finally:
+            if a.task and not a.task.done():
+                a.task.cancel()
+            await a.disconnect()
+            rt.stop()
+    asyncio.run(go())
+
+
+@test()
 def bring_up_checklist_reads_the_plan_and_judges_readings():
     from tracewright import bringup
     md = """# Bring-up
@@ -1822,7 +1964,7 @@ def overview_update_changelog_and_board_at_a_checkpoint():
 def main():
     only = sys.argv[sys.argv.index("-k") + 1] if "-k" in sys.argv else None
     fast = "--fast" in sys.argv
-    have = {"kicad": HAVE_KICAD, "kpy": HAVE_KPY}
+    have = {"kicad": HAVE_KICAD, "kpy": HAVE_KPY, "node": bool(shutil.which("node"))}
     ok = fail = skip = 0
     t_all = time.time()
     for fn, needs in TESTS:
