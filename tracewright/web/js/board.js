@@ -13,6 +13,18 @@ const COL = {
 const rgba = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 const ease = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 
+// A net's kind in words, for tooltips and the spotlight card.
+export function netKindText(t, short = (n) => n) {
+  if (!t) return "";
+  if (t.kind === "ground") return "Ground";
+  if (t.kind === "power") return t.voltage != null ? `Supply, ${t.voltage} V` : "Supply";
+  if (t.kind === "pair") return `Differential pair${t.iface ? ` (${({ usb: "USB", hdmi: "HDMI", mipi: "MIPI", eth: "Ethernet", lvds: "LVDS", pcie: "PCIe", sata: "SATA", clk: "clock", hs: "high speed" })[t.iface] || t.iface})` : ""}${t.pair ? ` with ${short(t.pair)}` : ""}`;
+  if (t.kind === "clock") return "Clock";
+  if (t.kind === "fast") return "Fast interface line";
+  if (t.kind === "unconnected") return "Not connected";
+  return "Signal";
+}
+
 export class BoardView {
   constructor(el, ws) {
     this.el = el; this.ws = ws; this.pid = ws.pid;
@@ -152,6 +164,11 @@ export class BoardView {
 
   async loadExtras() {
     try { const a = await api(`/api/projects/${encodeURIComponent(this.pid)}/annotations`); this.notes = a || []; } catch {}
+    try {                                                   // what kind each net is: tags and filters in the Copper panel
+      const n = await api(`/api/projects/${encodeURIComponent(this.pid)}/nets`);
+      this.netKinds = n.nets || {};
+      if (this.panel === "copper") this.renderLayers();
+    } catch {}
     try {
       const c = await api(`/api/projects/${encodeURIComponent(this.pid)}/checks`);
       this.findings = [];
@@ -836,6 +853,7 @@ export class BoardView {
       box.appendChild(h("div.spotcard",
         h("div.row", h("i.sw", { style: { background: col(this.spot) } }), h("b.grow.ellipsis", short(this.spot)),
           h("button.tbtn", { style: { height: "22px", minWidth: "22px", padding: 0 }, "data-tip": "Clear the spotlight", onclick: () => this.setSpot(null) }, icon("x", 12))),
+        this.netKindOf(this.spot) ? h("div.tiny.nkind", netKindText(this.netKindOf(this.spot), short)) : null,
         h("div.tiny", { style: { color: "var(--hud-muted)", margin: "3px 0 6px" } }, `${s.pads} pads on ${s.parts.size} parts · ${s.vias} vias`),
         rows.length ? rows : h("div.tiny", { style: { color: "var(--hud-muted)" } }, "No tracks or pours yet"),
         h("div.row", { style: { marginTop: "8px", gap: "4px" } },
@@ -860,21 +878,44 @@ export class BoardView {
     box.appendChild(h("div.lsec", "Nets"));
     const q = h("input", { placeholder: "Filter nets", value: this.netQ, spellcheck: false, oninput: () => { this.netQ = q.value; drawNets(); } });
     box.appendChild(h("div.lsearch", icon("search", 12), q));
+    const exact = this.netKinds || {};
+    const byShort = {};                                   // the board may still carry the schematic's older names
+    for (const [n, v] of Object.entries(exact)) if (!(short(n) in byShort)) byShort[short(n)] = v;
+    const kinds = new Proxy({}, { get: (_, n) => exact[n] || byShort[short(n)], has: (_, n) => !!(exact[n] || byShort[short(n)]) });
+    const kindOf = (n) => (kinds[n] || {}).kind || "signal";
+    const KIND_F = [["all", "All"], ["power", "Power"], ["pair", "Pairs"], ["clock", "Clocks"], ["signal", "Signals"]];
+    const filt = h("div.lchips.nkinds", KIND_F.map(([k, t]) => h("button.lchip" + ((this.netKind || "all") === k ? ".on" : ""),
+      { onclick: () => { this.netKind = k; this.renderLayers(); }, "data-tip": k === "power" ? "Supplies and ground" : k === "pair" ? "Differential pairs" :
+        k === "clock" ? "Clocks and fast lines" : k === "signal" ? "Everything else" : "Every net" }, t)));
+    if (Object.keys(exact).length) box.appendChild(filt);
     const list = h("div");
     box.appendChild(list);
     const counts = {};
     for (const f of this.fps) for (const p of f.pads) if (p.net) counts[p.net] = (counts[p.net] || 0) + 1;
     const nets = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
+    const keep = (n) => {
+      const k = kindOf(n), want = this.netKind || "all";
+      return want === "all" || k === want || (want === "power" && k === "ground") || (want === "clock" && k === "fast");
+    };
+    const tag = (n) => { const t = kinds[n]; return t && t.tag ? h("span.ntag." + t.kind, { "data-tip": netKindText(t, short) }, t.tag) : null; };
     const drawNets = () => {
       clear(list);
       const f = this.netQ.trim().toLowerCase();
-      const shown = nets.filter((n) => !f || short(n).toLowerCase().includes(f));
+      const shown = nets.filter((n) => (!f || short(n).toLowerCase().includes(f)) && keep(n));
       for (const n of shown.slice(0, 80)) list.appendChild(h("div.lnrow" + (this.spot === n ? ".on" : ""), { onclick: () => this.setSpot(this.spot === n ? null : n, true) },
-        h("i.sw", { style: { background: col(n) } }), h("span.grow.ellipsis", short(n)), h("span.lk", `${counts[n]} pad${counts[n] === 1 ? "" : "s"}`)));
+        h("i.sw", { style: { background: col(n) } }), h("span.grow.ellipsis", short(n)), tag(n), h("span.lk", `${counts[n]} pad${counts[n] === 1 ? "" : "s"}`)));
       if (shown.length > 80) list.appendChild(h("div.lempty", `${shown.length - 80} more. Filter to narrow the list.`));
       if (!shown.length) list.appendChild(h("div.lempty", "No net matches"));
     };
     drawNets();
+  }
+
+  netKindOf(net) {
+    const k = this.netKinds || {};
+    if (k[net]) return k[net];
+    const s = (net || "").split("/").pop();
+    for (const [n, v] of Object.entries(k)) if (n.split("/").pop() === s) return v;
+    return null;
   }
 
   netBox(net) {

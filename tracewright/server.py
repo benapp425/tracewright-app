@@ -777,6 +777,12 @@ def make_app():
             p.cfg.setdefault("fab", {}).update(body["fab"])
         if "checks" in body:
             p.cfg.setdefault("checks", {}).update(body["checks"])
+        if "schematic" in body:                             # conventions (the style itself is set by redrawing)
+            from tw.sch import conventions
+            conv = conventions.validate(body["schematic"])
+            if "style" in conv and rt.p.tw.has_sch():
+                conv.pop("style")
+            p.cfg.setdefault("schematic", {}).update(conv)
         p.save()
         return jresp(p.summary())
 
@@ -884,6 +890,16 @@ def make_app():
         d = await asyncio.to_thread(schstyle.detect, rt.p.tw.sch) if rt.p.tw.has_sch() else None
         return jresp({"style": rt.p.schematic_style(), "detected": d})
 
+    @routes.get("/api/projects/{pid}/schematic/conventions")
+    async def schematic_conventions(request):
+        """The project's schematic conventions, the choices for each, and which ones the user set."""
+        rt = app.rt(request.match_info["pid"])
+        from tw.sch import conventions
+        opts = [{"key": k, "label": o["label"], "default": o["default"],
+                 "choices": [{"value": v, "label": t, "about": a} for v, t, a in o["choices"]]} for k, o in conventions.OPTIONS.items()]
+        return jresp({"options": opts, "values": conventions.get(rt.p.cfg), "chosen": sorted(conventions.chosen(rt.p.cfg)),
+                      "has_sch": rt.p.tw.has_sch()})
+
     @routes.post("/api/projects/{pid}/schematic/style")
     async def schematic_style_set(request):
         """Redraw the sheets hierarchical or flat. The redrawn sheets are checked against KiCad's netlist
@@ -922,6 +938,55 @@ def make_app():
             rt.hub.emit("schematic.changed", source="tracewright", files=r["changed"])
         rt.hub.emit("project.changed", summary=rt.p.summary())
         return jresp(r)
+
+    @routes.get("/api/projects/{pid}/nets")
+    async def nets_list(request):
+        """Every net with its kind (ground, power with its voltage, pair with its partner, clock, fast,
+        signal) and a short tag, by the checks' own rules."""
+        rt = app.rt(request.match_info["pid"])
+        from tw import nettypes
+
+        def work():
+            nl = _netlist_for(rt)
+            if nl is not None:
+                return nettypes.from_netlist(nl, rt.p.cfg)
+            b = rt.board() if rt.p.tw.has_pcb() else None
+            return nettypes.from_board(b, rt.p.cfg) if b is not None else {}
+        kinds = await asyncio.to_thread(work)
+        return jresp({"nets": kinds})
+
+    @routes.get("/api/projects/{pid}/parts/{ref}")
+    async def part_info(request):
+        """One part, everything known about it (the inspector). fetch=1 looks it up at LCSC when the cache
+        has no description, parameters or photos yet."""
+        rt = app.rt(request.match_info["pid"])
+        from . import partinfo
+        ref = request.match_info["ref"]
+        fetch = request.query.get("fetch") == "1"
+        info = await asyncio.to_thread(lambda: partinfo.part_info(rt.p, rt.board() if rt.p.tw.has_pcb() else None, ref, fetch))
+        if info is None:
+            return err(f"no part {ref}", 404)
+        return jresp(info)
+
+    @routes.get("/api/projects/{pid}/parts/{ref}/photo")
+    async def part_photo(request):
+        """LCSC's product photo of the part, kept in the project's sourcing cache after the first look."""
+        rt = app.rt(request.match_info["pid"])
+        from . import partinfo
+        code = re.sub(r"[^A-Za-z0-9]", "", request.query.get("lcsc", ""))
+        try:
+            i = int(request.query.get("i", "0"))
+        except ValueError:
+            i = 0
+        if not code:
+            return err("no LCSC code", 400)
+        try:
+            f = await asyncio.to_thread(partinfo.photo, rt.p, code, i)
+        except Exception as e:
+            return err(f"the photo could not be fetched: {e}", 502)
+        if not f:
+            return err("no photo", 404)
+        return web.FileResponse(f, headers={"Cache-Control": "max-age=86400"})
 
     @routes.get("/api/projects/{pid}/model.glb")
     async def model_glb(request):

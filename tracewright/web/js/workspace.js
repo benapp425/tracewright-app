@@ -17,6 +17,7 @@ import { Review, ReviewPanel } from "./review.js";
 import { TimelapsePlayer } from "./timelapse.js";
 import { MissionControl } from "./mission.js";
 import { GuidedCanvas } from "./guided.js";
+import { Inspector } from "./inspector.js";
 
 const enc = encodeURIComponent;
 export const TABS = [
@@ -95,6 +96,8 @@ export class Workspace {
     this.reviewPanel = new ReviewPanel(this);
     this.mainBody = h("div.main-body", this.body);
     this.main.append(this.tabsEl, this.mainBody);
+    this.inspector = new Inspector(this);                     // one part picked anywhere: what it is and connects
+    this.inspector.mount(this.mainBody);
     this.renderStages(this.p.stages);
     this.renderLive(this.p.live);
     this.renderChecks(this.p.checks);
@@ -216,11 +219,11 @@ export class Workspace {
     });
     ev.on("board.moves", (e) => this.viewIf("board", (v) => v.animateMoves(e.moves)));
     ev.on("board.live", (e) => this.viewIf("board", (v) => v.liveMoves(e.moves)));
-    ev.on("board.changed", (e) => { this.viewIf("board", (v) => v.reload(e)); this.viewIf("3d", (v) => v.stale()); });
+    ev.on("board.changed", (e) => { this.viewIf("board", (v) => v.reload(e)); this.viewIf("3d", (v) => v.stale()); this.inspector.invalidate(); });
     ev.on("route.progress", (e) => this.viewIf("board", (v) => v.routeEvent(e)));
     ev.on("annotations", (e) => this.viewIf("board", (v) => v.setAnnotations(e.items)));
     ev.on("live.selection", (e) => { this.viewIf("board", (v) => v.kicadSelection(e.items)); this.chat.setKicadSelection(e.items); });
-    ev.on("schematic.changed", () => this.viewIf("schematic", (v) => v.reload()));
+    ev.on("schematic.changed", () => { this.viewIf("schematic", (v) => v.reload()); this.inspector.invalidate(); });
     ev.on("checks.start", () => this.renderChecks(null, true));
     ev.on("checks.done", (e) => {
       if (e.error) { toast("Checks failed: " + e.error, "error"); this.renderChecks(this.p.checks); return; }
@@ -569,6 +572,9 @@ export class Workspace {
     if (this.probing) return;
     const refs = [...new Set((items || []).filter((i) => i.ref).map((i) => i.ref))];
     if (!refs.length && (items || []).some((i) => i.net)) return;          // a net picked on the board: parts stay as they are
+    if (source !== "inspector" && localStorage.getItem("tw.inspector") !== "off") {
+      if (refs.length === 1) this.inspector.show(refs[0]); else this.inspector.hide();
+    }
     this.probed = { refs, source };                                         // for the views opened later
     this.probing = true;
     try { for (const [k, v] of Object.entries(this.views)) if (k !== source && v && v.probe) v.probe(refs, source); }

@@ -1,6 +1,6 @@
 // The live schematic: KiCad's own plot of each sheet (SVG), with clickable symbols over it, find,
 // and the review flags.
-import { h, clear, api, toast, menu, confirmDialog } from "./util.js";
+import { h, clear, api, toast, menu, confirmDialog, modal } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
 
@@ -195,7 +195,39 @@ export class SchematicView {
       "-",
       { custom: h("div.menu-note", d.reused && d.reused.length ? `${d.reused.join(", ")} is used more than once, so it stays hierarchical.`
         : "Every pin stays on its net: the redrawn sheets are checked against KiCad's netlist before anything changes.") },
+      "-",
+      { label: "Schematic settings…", icon: "sliders-horizontal", run: () => this.settings() },
     ], { align: "end" });
+  }
+
+  // The project's schematic conventions: how this board's sheets are drawn and named.
+  async settings() {
+    let d;
+    try { d = await api(`/api/projects/${encodeURIComponent(this.pid)}/schematic/conventions`); } catch (e) { toast(e.message, "error"); return; }
+    const vals = { ...d.values };
+    const rows = d.options.map((o) => {
+      const about = h("div.cv-about");
+      const seg = h("div.seg.cv-seg", o.choices.map((c) => h("button" + (vals[o.key] === c.value ? ".on" : ""), {
+        onclick: (e) => {
+          if (o.key === "style" && d.has_sch) return;
+          vals[o.key] = c.value;
+          [...seg.children].forEach((b) => b.classList.toggle("on", b === e.currentTarget));
+          about.textContent = c.about;
+        } }, c.label)));
+      about.textContent = (o.choices.find((c) => c.value === vals[o.key]) || o.choices[0]).about;
+      const redraw = o.key === "style" && d.has_sch ? h("button.btn.sm", { onclick: () => { m.close(); this.styleMenu(this.styleBtn); } }, "Redraw…") : null;
+      return h("div.cv-row", h("div.cv-label", o.label, d.chosen.includes(o.key) ? null : h("span.cv-def", "default")), h("div.cv-ctl", seg, redraw), about);
+    });
+    const m = modal({ title: "Schematic settings", sub: "How this board's sheets are drawn and named. Claude and the checks follow them.",
+      icon: "sliders-horizontal", cls: "wide", body: [h("div.cv", rows)], actions: [
+        h("button.btn", { onclick: () => m.close() }, "Cancel"),
+        h("button.btn.primary", { onclick: async () => {
+          const changed = Object.fromEntries(Object.entries(vals).filter(([k, v]) => v !== d.values[k] || d.chosen.includes(k)));
+          try {
+            await api(`/api/projects/${encodeURIComponent(this.pid)}`, { method: "PATCH", body: { schematic: changed } });
+            m.close(); toast("Schematic settings saved", "ok", 2600);
+          } catch (e) { toast(e.message, "error"); }
+        } }, "Save")] });
   }
 
   async setStyle(target) {

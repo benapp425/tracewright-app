@@ -1963,6 +1963,53 @@ def schematic_laid_out_by_rule():
     assert nl2.net_of(caps[0], "2") == "GND"
 
 
+@test()
+def net_kinds_part_inspector_and_schematic_conventions():
+    """Every net gets a kind by the checks' rules (ground, a supply with its voltage, a differential pair
+    with its partner, a clock, a signal); the inspector's part info has the pins with their nets and
+    kinds, the footprint's pads, and nothing from the network unless asked; a project keeps its own
+    schematic conventions and Claude is told them."""
+    from tw import nettypes
+    k = nettypes.classify(["GND", "+3V3", "VBUS", "ACT_12V", "USB_D_P", "USB_D_N", "SPI_SCK", "I2C_SDA", "VCC", "VIN_SENSE",
+                           "MIPI_CSI_D0_P", "MIPI_CSI_D0_N", "A_PUMP_COIL"])
+    assert k["GND"]["kind"] == "ground" and k["+3V3"] == {"kind": "power", "tag": "3.3 V", "voltage": 3.3}
+    assert k["VBUS"]["voltage"] == 5 and k["ACT_12V"]["kind"] == "power" and k["VCC"]["kind"] == "power"
+    assert k["USB_D_P"]["kind"] == "pair" and k["USB_D_P"]["pair"] == "USB_D_N" and k["USB_D_P"]["tag"] == "USB"
+    assert k["MIPI_CSI_D0_N"]["tag"] == "MIPI" and k["SPI_SCK"]["kind"] == "clock"
+    assert k["I2C_SDA"]["kind"] == k["VIN_SENSE"]["kind"] == k["A_PUMP_COIL"]["kind"] == "signal"
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import prompts
+    proj = ProjectStore().import_copy(FIXTURE, "Inspector demo")
+
+    async def go():
+        webapp = make_app()
+        async with TestClient(TestServer(webapp)) as c:
+            n = (await (await c.get(f"/api/projects/{proj.id}/nets")).json())["nets"]
+            by = {nettypes.short(x): v for x, v in n.items()}
+            assert by["GND"]["kind"] == "ground" and by["+3V3"]["kind"] == "power" and by["USB_D_P"]["kind"] == "pair", by
+            info = await (await c.get(f"/api/projects/{proj.id}/parts/U2")).json()
+            assert info["value"].startswith("ATtiny85") and len(info["pins"]) == 8, info
+            vcc = next(p for p in info["pins"] if p["pin"] == "8")
+            assert vcc["net"] == "+3V3" and vcc["kind"] == "power" and vcc["tag"] == "3.3 V"
+            assert any(p["kind"] == "unconnected" and not p["net"] for p in info["pins"])
+            assert info["board"]["pads"] and info["board"]["side"] == "F"
+            assert "KiLib_Generator" not in info["fields"]
+            assert (await c.get(f"/api/projects/{proj.id}/parts/NOPE")).status == 404
+            cv = await (await c.get(f"/api/projects/{proj.id}/schematic/conventions")).json()
+            assert cv["values"]["active_low"] == "_N" and not cv["chosen"] and any(o["key"] == "decoupling" for o in cv["options"])
+            r = await c.patch(f"/api/projects/{proj.id}", json={"schematic": {"active_low": "#", "decoupling": "row", "bogus": 1,
+                                                                             "style": "flat"}})
+            s = (await r.json())["schematic"]
+            assert s["active_low"] == "#" and s["decoupling"] == "row" and s["style"] == "hierarchical" and "bogus" not in s, s
+            rt = webapp["app"].rt(proj.id)
+            text = prompts.system_append(rt.p.reload())
+            assert "active-low nets like RESET#" in text and "decoupling in a row" in text, text[-600:]
+        webapp["app"].rt(proj.id).stop()
+    asyncio.run(go())
+
+
 @test(needs=("node",))
 def block_diagram_geometry():
     """The guided start's block diagram, laid out at three widths: no wire crosses a block or another wire's

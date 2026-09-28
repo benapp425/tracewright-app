@@ -88,14 +88,12 @@ def system_append(project):
     parts.append("- The Order tab takes the board to the fab: JLC's quote page with the package ready, a one-click "
                  "PCBWay upload, and (self-built) the parts as DigiKey / Mouser / LCSC BOM files. The user switches "
                  "the sourcing there; do not order anything yourself.")
-    st = project.schematic_style()
-    parts.append("- Schematic style: " + ({"hierarchical": "hierarchical (the user's choice): sheets joined by sheet pins and "
-                                                          "hierarchical labels; supplies by power symbols",
-                                           "flat": "flat (the user's choice): pages joined by global labels of the same name; "
-                                                   "supplies by power symbols"}.get(st) or
-                                          "not chosen: draw new sheets hierarchical") +
-                 ". `./tw style` shows how the sheets are joined and redraws them the other way (checked against KiCad's "
-                 "netlist); tw.sch.finish() keeps a generated schematic in the chosen style.")
+    from tw.sch import conventions
+    chosen = conventions.chosen(cfg)
+    parts.append("- Schematic conventions (" + ("the user's choices: " + ", ".join(sorted(chosen)) if chosen else "defaults") + "): "
+                 + conventions.describe(cfg) + ". Follow them in every sheet and net name; tw.sch.auto and finish() apply the "
+                 "drawing ones. `./tw style` shows how the sheets are joined and redraws them the other way (checked against "
+                 "KiCad's netlist).")
     parts.append("- Stages: " + ", ".join(f"{s['title']} {s['status']}" for s in project.stages()))
     lessons = knowledge.all_lessons()
     if lessons:

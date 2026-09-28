@@ -161,6 +161,7 @@ class Parts:
             "package": r.get("encapStandard"), "lcsc_stock": r.get("stockNumber"),
             "price_1": prices[0].get("usdPrice") if prices else None, "discontinued": r.get("isDiscontinued"),
             "datasheet": r.get("pdfUrl"), "description": r.get("productIntroEn"),
+            "images": [u for u in (r.get("productImages") or []) if isinstance(u, str)][:6],
             "params": {p.get("paramNameEn"): p.get("paramValueEn") for p in (r.get("paramVOList") or [])}})
 
     def easyeda(self, code, refresh=False):

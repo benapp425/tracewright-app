@@ -116,6 +116,11 @@ def _board(p):
     return Board.load(p.pcb)
 
 
+def mem_conventions(ctx):
+    # the project writes values like 4k7; the demo's Rd resistors are written 5.1k
+    ctx.cfg = {**(ctx.cfg or {}), "schematic": {"values": "iec"}}
+
+
 def mem_placement(ctx):
     fp = ctx.board.footprints["U1"]
     _shift(fp, 200.0 - fp.x, 0)
@@ -502,6 +507,7 @@ CASES = [
     ("sch.style", "a ground symbol turned upside down", ("file", plant_style), "points up"),
     ("sch.text", "a part count written inside a sheet symbol", ("file", plant_text_in_sheet), "inside the sheet symbol"),
     ("sch.text", "a note explaining how labels work", ("file", plant_text_narration), "how schematics work"),
+    ("sch.conventions", "IEC values chosen, a resistor written 5.1k", ("mem", mem_conventions), "writes values"),
     ("sch.nets", "J2 pin 3 on 'I2C_SDA1' instead of I2C_SDA", ("mem", mem_sch_nets), "I2C_SDA1"),
     ("bom.fields", "R1's LCSC code without its C", ("mem", mem_bom_fields), "LCSC"),
     ("bom.board", "R3 is 22k on the board", ("mem", mem_bom_board), "R3"),

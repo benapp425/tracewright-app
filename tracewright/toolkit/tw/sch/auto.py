@@ -358,6 +358,9 @@ class Group:
 
     def _draw_power(self, rq):
         inst, pin, rail, flag = rq["inst"], rq["pin"], rq["rail"], rq["flag"]
+        if self.page.conv.get("supplies") == "labels" and not is_ground(rail):
+            self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin], "rail": True})
+            return
         self._connect(rail, inst.ref, pin)
         p, d = inst.pin(pin), inst.pin_dir(pin)
         want = DOWN if is_ground(rail) else UP
@@ -403,7 +406,7 @@ class Group:
         for L in (P, 2 * P, 3 * P, 4 * P, 6 * P, 8 * P):
             if len(pins) == 1:
                 end = _add(pts[0], d, L)
-                ops = [("wire", [pts[0], end]), ("label", name, end, d)]
+                ops = [("wire", [pts[0], end]), ("label", name, end, d) + (("global",) if rq.get("rail") else ())]
                 items = self._wire_items([pts[0], end], inst.ref) + [("label", _label_box(name, end, d), None)]
             else:                                                  # stubs to a common line, joined, one label beyond
                 reach = max(q[0] * d[0] + q[1] * d[1] for q in pts) + L
@@ -436,6 +439,10 @@ class Group:
             self._connect(rail, r, "1")
             self._connect("GND", r, "2")
         p, d = inst.pin(pin), inst.pin_dir(pin)
+        if self.page.conv.get("decoupling") == "row":             # the project draws them together, beside the part
+            self._draw_power({"inst": inst, "pin": pin, "rail": rail, "flag": False})
+            self._aside_caps(caps, refs, rail)
+            return
         for pitch in (7.62, 10.16, 12.7, 15.24):
             if d[0] == 0:
                 cands = ((reach, side) for reach in range(2, 13) for side in (LEFT, RIGHT))
@@ -790,14 +797,30 @@ class Group:
         self.page.crowded.append(f"note near {near}: crowded")
 
 
+def _project_conventions():
+    """The schematic conventions of the project the script runs in (tracewright.json), or the defaults."""
+    from . import conventions
+    try:
+        from .. import env
+        cfg = env.project().cfg
+    except Exception:
+        cfg = {}
+    c = conventions.get(cfg)
+    c["_chosen_paper"] = "paper" in conventions.chosen(cfg)
+    return c
+
+
 class Page:
     """One sheet laid out by rule: groups of parts and patterns, placed in reading order."""
 
     SIZES = {"A4": (297, 210), "A3": (420, 297), "A2": (594, 420)}
 
-    def __init__(self, design, sheet, base=100, catalog=None):
+    def __init__(self, design, sheet, base=100, catalog=None, conventions=None):
         self.d, self.sheet, self.base = design, sheet, base
         self.cat = catalog or {}
+        self.conv = conventions if conventions is not None else _project_conventions()
+        if self.conv.get("paper") and self.conv.get("_chosen_paper"):
+            sheet.paper = self.conv["paper"]
         self.groups = []
         self.nets = {}                   # net -> {(ref, pin)}: what the drawing must connect
         self.crowded = []
@@ -808,6 +831,10 @@ class Page:
         design.pages.append(self)
 
     def ref(self, prefix):
+        if self.conv.get("designators") == "sequential":           # R1, R2, ... across the whole design
+            seq = self.d.__dict__.setdefault("_seq", {})
+            seq[prefix] = seq.get(prefix, 0) + 1
+            return f"{prefix}{seq[prefix]}"
         self._n[prefix] = self._n.get(prefix, 0) + 1
         return f"{prefix}{self.base + self._n[prefix]}"
 
@@ -881,8 +908,8 @@ class Page:
                     sh.power(stock("power", "PWR_FLAG"), mv(op[1]))
                     sh.junction(mv(op[1]))
                 elif kind == "label":
-                    _, name, pt, d = op
-                    if name in global_nets:
+                    name, pt, d = op[1], op[2], op[3]
+                    if name in global_nets or op[4:5] == ("global",):
                         q = mv(pt)
                         sh.items.append(["global_label", kisch.Q(name), ["shape", "bidirectional"], ["at", q[0], q[1], _rot_of(d)],
                                          ["fields_autoplaced", "yes"],

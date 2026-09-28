@@ -169,13 +169,17 @@ class Project:
                 "description": self.cfg.get("description", ""), "archived": self.cfg.get("archived", False),
                 "toolkit": self.cfg.get("toolkit"), "fab": self.cfg.get("fab", {}), "run_mode": self.run_mode(),
                 "unattended": self.unattended(), "start_phase": self.start_phase(),
-                "schematic_style": self.schematic_style()}
+                "schematic_style": self.schematic_style(), "schematic": self.schematic_conventions()}
 
     def schematic_style(self):
         """How the sheets are to be joined: 'hierarchical' (sheet pins), 'flat' (global labels), or None
         (not chosen: new designs are drawn hierarchical, existing ones stay as they are)."""
         st = (self.cfg.get("schematic") or {}).get("style")
         return st if st in ("hierarchical", "flat") else None
+
+    def schematic_conventions(self):
+        from tw.sch import conventions
+        return {**conventions.get(self.cfg), "chosen": sorted(conventions.chosen(self.cfg))}
 
     def set_schematic_style(self, style):
         with self._lock:

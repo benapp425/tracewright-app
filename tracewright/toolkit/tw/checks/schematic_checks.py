@@ -1,7 +1,7 @@
 """Schematic checks that KiCad's ERC does not make: readability of the plotted sheets, wires that
 silently merge nets, and net names that are probably typos."""
 import re, collections
-from . import check, Finding
+from . import check, Finding, NotApplicable
 
 # KiCad's default schematic theme as plotted (kicad-cli --theme _builtin_default)
 WIRE, NC, BODY = "#009600", "#000084", "#840000"
@@ -378,6 +378,55 @@ def sch_text(ctx):
                 out.append(Finding("sch.text", "warning", f"{s_.ref} is a box standing in for PWR_FLAG", {**where, "ref": s_.ref},
                                    hint="Use KiCad's power:PWR_FLAG: a small flag on the supply wire it marks.",
                                    key=f"text:flag:{s_.ref}"))
+    return out
+
+
+ACTIVE_LOW = {                                    # how each convention writes an active-low name, and how the others do
+    "_N": re.compile(r"^[A-Z0-9]+(_[A-Z0-9]+)*_N$"), "N_prefix": re.compile(r"^n[A-Z][A-Z0-9_]*$|^N(RST|RESET|EN|CS|OE|WE|IRQ|INT)\w*$"),
+    "#": re.compile(r"#$"), "overbar": re.compile(r"~\{"),
+}
+IEC_VAL = re.compile(r"^\d+[RKMkmunpµ]\d+", re.U)            # 4k7, 2R2, 4u7
+DEC_VAL = re.compile(r"^\d+\.\d+\s*[kKMmunpµ]?", re.U)       # 4.7k, 2.2uF
+
+
+@check("sch.conventions", "Names and values follow the project's conventions", "Schematic", needs=("sch",))
+def sch_conventions(ctx):
+    """Only the conventions the project chose (Schematic settings): active-low nets written one way
+    (RESET_N, NRESET, RESET# or an overbar), values in one notation (4k7 or 4.7k)."""
+    from ..sch import conventions
+    chosen = conventions.chosen(ctx.cfg)
+    if not (set(chosen) & {"active_low", "values"}):
+        raise NotApplicable("no naming conventions chosen for this project (Schematic settings)")
+    out = []
+    names = {str(l["text"]) for sh in ctx.hier.sheets for l in sh.sf.labels}
+    if "active_low" in chosen:
+        from .signal import find_pairs
+        paired = {n for pr in find_pairs(list(names)) for n in pr}
+        want = chosen["active_low"]
+        for n in sorted(names):
+            if n in paired:
+                continue
+            if re.search(r"(USB|D|DM|TX|RX|TD|RD|CLK|LANE\d*|DATA\d*|CSI\w*|DSI\w*|HDMI\w*|ETH\w*|MDI\d*|LVDS\w*)_N$", n, re.I):
+                continue                                      # the negative half of a pair, not an active-low line
+            for style, rx in ACTIVE_LOW.items():
+                if style != want and rx.search(n):
+                    label = {"_N": "RESET_N", "N_prefix": "NRESET", "#": "RESET#", "overbar": "an overbar"}
+                    out.append(Finding("sch.conventions", "info", f"{n} is written like {label[style]}; this project writes "
+                                       f"active-low nets like {label[want]}", {"net": n},
+                                       hint="Rename the label to the project's convention (Schematic settings).",
+                                       key=f"conv:low:{n}"))
+                    break
+    if "values" in chosen:
+        want = chosen["values"]
+        for sh, s_ in ctx.hier.all_symbols():
+            if not re.match(r"^(R|C|L|FB)\d", s_.ref or ""):
+                continue
+            v = (s_.value or "").strip()
+            bad = (want == "iec" and DEC_VAL.match(v)) or (want == "decimal" and IEC_VAL.match(v))
+            if bad:
+                out.append(Finding("sch.conventions", "info", f"{s_.ref} value {v}: the project writes values "
+                                   f"{'like 4k7, 100n' if want == 'iec' else 'like 4.7k, 100nF'}", {"sheet": sh.name_path, "ref": s_.ref},
+                                   hint="One notation throughout (Schematic settings).", key=f"conv:val:{s_.ref}"))
     return out
 
 
