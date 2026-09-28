@@ -1898,6 +1898,71 @@ def before_wires(p):
     return open(os.path.join(FIXTURE, "hardware", "demo", "demo.kicad_sch")).read().count("(wire")
 
 
+@test(needs=("kicad",))
+def schematic_laid_out_by_rule():
+    """The demo's power and MCU sheets described as groups and patterns (no coordinates) and laid out by
+    tw.sch.auto: KiCad's netlist has exactly the connections asked for, every pattern found a clear
+    spot, nothing overlaps on the plotted sheets, and the notes and style checks pass."""
+    from tw.sch import Design, finish
+    from tw.sch.auto import Page
+    from tw.examples.demo_board import catalog
+    from tw.checks import load_all, REGISTRY
+    from tw.checks.context import Context
+    root_dir = os.path.join(TMP, "auto")
+    hw = os.path.join(root_dir, "hardware", "demo")
+    os.makedirs(hw)
+    json.dump({"name": "Auto", "kicad_project": "hardware/demo/demo.kicad_pro"}, open(os.path.join(root_dir, "tracewright.json"), "w"))
+    from tw.examples.auto_demo import schematic as auto_demo
+    cat = catalog()
+    auto_demo(hw)
+    open(os.path.join(hw, "demo.kicad_pro"), "w").write("{}")
+    proj = env.Project(root_dir)
+    r = finish(proj)
+    assert r.get("connections") == "as asked", r.get("connections")
+    assert not r.get("crowded"), r.get("crowded")
+    from tw.netlist import Netlist
+    nl = Netlist.load(os.path.join(proj.build, "demo.net"))
+    assert nl.net_of("R1", "1") == "CC1" and nl.net_of("R7", "2") == nl.net_of("J1", "A7") and nl.net_of("C2", "1") == "+3V3"
+    load_all()
+    reg_ = {c.id: c for c in REGISTRY} if isinstance(REGISTRY, list) else REGISTRY
+    ctx = Context(proj)
+    for cid in ("sch.render", "sch.text"):
+        fs = [f for f in reg_[cid].fn(ctx) if f.severity in ("error", "warning")]
+        assert not fs, (cid, [f.message for f in fs][:5])
+    st = [f for f in reg_["sch.style"].fn(ctx) if f.severity in ("error", "warning") and "title block" not in f.message]
+    assert not st, [f.message for f in st][:5]
+    # a crystal with its load capacitors, an LED on a pin, a pull-up on the bottom pin: all clear, all as asked
+    from tw.sch import Part, stock
+    cat["Y16M"] = Part(stock("Device", "Crystal"), "Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm", "16MHz", "X322516MLB4SI", "YXC", "C13738")
+    cat["C18p"] = Part(stock("Device", "C"), "Capacitor_SMD:C_0402_1005Metric", "18p", "0402CG180J500NT", "FH", "C1549")
+    root2 = os.path.join(TMP, "auto2")
+    hw2 = os.path.join(root2, "hardware", "p")
+    os.makedirs(hw2)
+    json.dump({"name": "P", "kicad_project": "hardware/p/p.kicad_pro"}, open(os.path.join(root2, "tracewright.json"), "w"))
+    d2 = Design("p", title="Patterns", company="t")
+    r2 = d2.root("Cover", paper="A4")
+    sh2 = d2.sheet("MCU", "mcu.kicad_sch", "MCU", paper="A4")
+    r2.subsheet(sh2, (38.1, 40.64), (50.8, 25.4), [])
+    pg = Page(d2, sh2, base=100, catalog=cat)
+    g2 = pg.group("PROCESSOR")
+    U3 = g2.part("MCU", "U", ref="U101")
+    g2.decouple(U3, "8", ["C100n"], "+3V3")
+    g2.power(U3, "4", "GND")
+    y, caps = g2.crystal(U3, "2", "3", "Y16M", ["C18p", "C18p"])
+    g2.indicator(U3, "5", "R1k", "LED_R")
+    g2.pull(U3, "1", "R10k", "+3V3", net="RESET")
+    g2.net(U3, "7", "SCL")
+    g2.nc(U3, "6")
+    pg.layout()
+    d2.write(hw2)
+    open(os.path.join(hw2, "p.kicad_pro"), "w").write("{}")
+    r = finish(env.Project(root2))
+    assert r.get("connections") == "as asked" and not r.get("crowded"), (r.get("connections"), r.get("crowded"))
+    nl2 = Netlist.load(os.path.join(env.Project(root2).build, "p.net"))
+    assert nl2.net_of(y, "1") == nl2.net_of("U101", "2") and nl2.net_of(caps[1], "1") == nl2.net_of("U101", "3")
+    assert nl2.net_of(caps[0], "2") == "GND"
+
+
 @test(needs=("node",))
 def block_diagram_geometry():
     """The guided start's block diagram, laid out at three widths: no wire crosses a block or another wire's

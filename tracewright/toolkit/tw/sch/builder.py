@@ -17,7 +17,7 @@ and ground down.
     ...
     d.write("hardware/node")                          # sheets + symbol library + library tables
 """
-import os, math
+import os, math, json
 from . import kisch
 from .kisch import snap
 
@@ -332,8 +332,19 @@ class Design:
         return Builder(sheet, base, catalog)
 
     def write(self, hw_dir, stem=None):
-        """Write every sheet, the project symbol library and the library tables into hw_dir."""
+        """Write every sheet, the project symbol library and the library tables into hw_dir. Pages laid
+        out by rule (tw.sch.auto) are drawn first, their labels resolved across sheets, and what they
+        were asked to connect saved for finish() to check against KiCad's netlist."""
         os.makedirs(os.path.join(hw_dir, "lib"), exist_ok=True)
+        pages = [pg for pg in getattr(self, "pages", []) if not getattr(pg, "emitted", False)]
+        if pages:
+            from . import auto
+            glob = auto.resolve(self)
+            for pg in pages:
+                pg.emit(glob)
+                pg.emitted = True
+            with open(os.path.join(hw_dir, ".tracewright-nets.json"), "w") as f:
+                json.dump({"nets": auto.intended(self), "crowded": [c for pg in self.pages for c in pg.crowded]}, f, indent=1)
         for sh in self.p.sheets:
             sh.write(hw_dir)
         self.p.write_symbol_lib(os.path.join(hw_dir, "lib", f"{self.libname}.kicad_sym"))

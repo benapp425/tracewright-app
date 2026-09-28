@@ -5,7 +5,7 @@ Generate: write design/schematic.py with Design / Builder / Part (see builder.py
 schematic style (hierarchical or flat, style.py), runs ERC and exports the netlist. The agent re-runs the script after every change; once the user edits the schematic by
 hand, edit in place instead (or fold their change into the script first).
 """
-import os
+import os, json
 from .kisch import Project, Sheet, LibSymbol, make_ic, load_stock, snap, uid, rot_vec
 from .builder import Design, Builder, Part, stock, power, KIND, NOTE, TITLE
 from . import style
@@ -24,7 +24,16 @@ def finish(project, erc=True):
     if want in style.STYLES:
         r = style.convert(project.sch, want)
         out["style"] = {"ok": r["ok"], "message": r["message"]}
-    kicad.netlist(project.sch, os.path.join(project.build, f"{project.stem}.net"))
+    net = os.path.join(project.build, f"{project.stem}.net")
+    kicad.netlist(project.sch, net)
+    want = os.path.join(project.hw, ".tracewright-nets.json")
+    if os.path.exists(want):                        # a page laid out by rule: does KiCad see what was asked for?
+        from . import auto
+        from ..netlist import Netlist
+        d = json.load(open(want))
+        out["connections"] = auto.check_netlist(Netlist.load(net), d.get("nets") or {}) or "as asked"
+        if d.get("crowded"):
+            out["crowded"] = d["crowded"]
     if erc:
         d = kicad.erc(project.sch, os.path.join(project.build, "erc.json"))
         v = [x for s in d.get("sheets", []) for x in s.get("violations", [])]

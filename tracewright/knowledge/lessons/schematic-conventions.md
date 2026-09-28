@@ -87,8 +87,8 @@ The `sch.style` check enforces what can be checked from the files: custom colour
 (notes), four-way junctions, upside-down ground and supply symbols, text under 1 mm, missing title
 block fields, designator letters that do not match the part, and signals crossing sheets the way the
 project's style does not. `sch.text` reads the notes, and `sch.render` finds text over wires, pins
-and other text on the plotted sheets. The worked example is
-`tools/tw/examples/demo_board.py`.
+and other text on the plotted sheets. `tw.sch.auto` draws these conventions by rule (groups and pin patterns, collision-free, checked against
+KiCad's netlist); worked examples: `tools/tw/examples/auto_demo.py` (by rule) and `demo_board.py` (by hand).
 
 Sources: Zuken "4 rules for better PCB schematics"; HMC "How to draw circuits"; Sierra Circuits
 "Schematic design rules"; Schemalyzer "30 rules for clear, professional circuits"; Flux "PCB schematic

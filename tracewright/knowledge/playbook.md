@@ -100,8 +100,9 @@ Draw it the way professional sheets are drawn (lesson `schematic-conventions`; `
   Datasheet. DNP parts are marked DNP, not deleted. Title block filled on every sheet.
 - **Supplies**: power symbols for rails, KiCad's power:PWR_FLAG where a rail enters (never a box
   standing in for it), one name per rail.
-- **Generated schematics** (design/*.py with tw.sch) are the fastest way to a large, consistent
-  schematic, and let you re-lay a whole sheet. Once the user edits the schematic by hand, edit the
+- **Generated schematics** (design/*.py with tw.sch.auto: groups and pin patterns, no coordinates) are the
+  fastest way to a large, consistent schematic, drawn without overlaps, and let you re-lay a whole sheet;
+  `finish()` checks KiCad's netlist against what the script asked for. Once the user edits the schematic by hand, edit the
   file (or KiCad, live) rather than regenerating over their work.
 
 ## Parts and footprints
