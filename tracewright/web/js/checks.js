@@ -63,7 +63,7 @@ export class ChecksPanel {
       h("div.verdict", h("div.vic" + (vcls ? "." + vcls : ""), busy ? h("span.spinner.lg") : icon(vcls === "ok" ? "shield-check" : vcls === "err" ? "circle-x" : vcls === "warn" ? "triangle-alert" : "list-checks", 22)),
         h("div.vtext", h("div.vt", busy ? "Running checks…" : verdict),
           h("div.vs", busy ? (cur ? cur.title : "Starting…")
-            : d.never_run ? "36 design, fab and assembly checks"
+            : d.never_run ? `${(d.checks || []).length} design, fab and assembly checks`
             : `${counts.error} errors · ${counts.warning} warnings · ${counts.info} notes · ${fmtTime(d.generated)}${d.seconds ? ` · ${d.seconds} s` : ""}${d.stopped ? " · stopped early" : ""}`))),
       h("div.grow"),
       h("div.vbtns",

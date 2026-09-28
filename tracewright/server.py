@@ -2,7 +2,7 @@
 import os, re, sys, json, time, asyncio, mimetypes, subprocess, traceback, logging, shutil, glob
 from aiohttp import web, WSMsgType
 
-from . import __version__, REPO_URL, config, history, knowledge, scaffold, auth, accounts
+from . import __version__, REPO_URL, config, history, knowledge, scaffold, auth, accounts, overview
 from .projects import ProjectStore, STAGES, RUN_MODES
 from .bus import Hubs
 from .runtime import ProjectRuntime
@@ -303,7 +303,7 @@ def make_app():
                       "signups": accounts.signups_open(app.settings, app.shared()),
                       "claim": app.accounts_on() and not _first_account_ok(request),
                       "google": bool(accounts.google_config(app.settings)), "server_mode": app.server_mode,
-                      "version": __version__})
+                      "version": __version__, "check_count": overview.check_count()})
 
     @routes.post("/api/auth/register")
     async def auth_register(request):
@@ -503,6 +503,7 @@ def make_app():
                       "live_api": twlive.HAVE_KIPY and not app.server_mode, "platform": sys.platform,
                       "problems": await asyncio.to_thread(config.native_problems),
                       "server_mode": app.server_mode, "auth": app.require_auth, "claude_auth": _claude_auth(app.settings),
+                      "check_count": overview.check_count(),
                       "repo": REPO_URL})
 
     @routes.get("/api/update")

@@ -358,6 +358,123 @@ def mem_antenna(ctx):
     b.footprints["U9"] = fp
 
 
+# ----------------------------------------------------------------------------- verification v2
+def mem_pinout(ctx):
+    nl = ctx.netlist                                   # U1's symbol drawn for an LDO with VIN on pin 1
+    nl.pin_info[("U1", "1")] = {"name": "VI", "type": "power_in"}
+    nl.pin_info[("U1", "3")] = {"name": "GND", "type": "power_in"}
+
+
+def mem_pinout_pad(ctx):
+    nl = ctx.netlist                                   # an exposed-pad pin with no pad in the SOIC-8 footprint
+    full = _net_full(nl, "GND")
+    nl.pin[("U2", "9")] = full
+    nl.nets.setdefault(full, []).append(("U2", "9"))
+    nl.pin_info[("U2", "9")] = {"name": "EP", "type": "passive"}
+
+
+def mem_package(ctx):
+    ctx.board.footprints["U2"].lib_id = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"     # the narrow SOIC under a wide part
+
+
+def mem_domains(ctx):
+    nl = ctx.netlist                                   # a 5 V shift register driving the 3.3 V MCU's SDA
+    _add_part(nl, "U9", "74HC595", {"16": ("VCC", "power_in", "+5V"), "8": ("GND", "power_in", "GND"),
+                                    "15": ("QA", "output", "I2C_SDA")})
+
+
+def mem_regulators(ctx):
+    nl = ctx.netlist
+    ctx._cache["netlist"] = nl.mutated({("C2", "1"): "unconnected-(C2-Pad1)"})     # the LDO's 22 uF output capacitor gone
+
+
+def mem_ldo_heat(ctx):
+    ctx.p.cfg.setdefault("checks", {})["currents"] = {"+3V3": 1.2}               # 5 V -> 3.3 V at 1.2 A in a SOT-223
+
+
+def mem_drop(ctx):
+    ctx.p.cfg.setdefault("checks", {})["power_paths"] = [{"net": "+3V3", "from": "U1.2", "to": "U2.8", "amps": 8}]
+
+
+def mem_switcher(ctx):
+    nl, b = ctx.netlist, ctx.board
+    _add_part(nl, "U9", "TPS54202", {"1": ("GND", "power_in", "GND"), "2": ("SW", "power_out", "PLANT_SW9"),
+                                     "3": ("VIN", "power_in", "+5V"), "4": ("FB", "input", "PLANT_FB9")})
+    _add_part(nl, "L9", "4.7uH", {"1": ("", "passive", "PLANT_SW9"), "2": ("", "passive", "+3V3")},
+              "Inductor_SMD:L_Taiyo-Yuden_NR-40xx")
+    _add_part(nl, "C9", "10u 25V", {"1": ("", "passive", "+5V"), "2": ("", "passive", "GND")}, "Capacitor_SMD:C_0805_2012Metric")
+    for fp in (_fake_fp("U9", "Package_TO_SOT_SMD:SOT-23-6", 170.0, 170.0,
+                        [("1", 169.0, 169.0, 0.6, 0.6, "GND"), ("2", 170.0, 169.0, 0.6, 0.6, "PLANT_SW9"),
+                         ("3", 171.0, 169.0, 0.6, 0.6, "+5V"), ("4", 170.0, 171.0, 0.6, 0.6, "PLANT_FB9")]),
+               _fake_fp("L9", "Inductor_SMD:L_Taiyo-Yuden_NR-40xx", 170.0, 175.0,
+                        [("1", 168.5, 175.0, 1.5, 3.0, "PLANT_SW9"), ("2", 171.5, 175.0, 1.5, 3.0, "+3V3")]),
+               _fake_fp("C9", "Capacitor_SMD:C_0805_2012Metric", 185.0, 169.0,
+                        [("1", 184.0, 169.0, 1.0, 1.25, "+5V"), ("2", 186.0, 169.0, 1.0, 1.25, "GND")])):
+        b.fp_list.append(fp)
+        b.footprints[fp.ref] = fp
+
+
+def mem_pours(ctx):
+    b = ctx.board
+    z = Zone()
+    z.net, z.layers, z.name = next(n for n in b.nets if n.rsplit("/", 1)[-1] == "GND"), ["B.Cu"], "planted island"
+    z.fills = {"B.Cu": [[(170.0, 170.0), (176.0, 170.0), (176.0, 176.0), (170.0, 176.0)]]}
+    z.outline = [[(170.0, 170.0), (176.0, 170.0), (176.0, 176.0), (170.0, 176.0)]]
+    b.zones.append(z)
+
+
+def mem_layer_change(ctx):
+    b = ctx.board
+    _track(b, (180.0, 180.0), (185.0, 180.0), "PLANT_CLK", layer="F.Cu")
+    _track(b, (185.0, 180.0), (190.0, 180.0), "PLANT_CLK", layer="B.Cu")
+    v = Via()
+    v.x, v.y, v.d, v.drill, v.layers, v.net, v.kind, v.uuid, v.locked = 185.0, 180.0, 0.6, 0.3, ["F.Cu", "B.Cu"], "PLANT_CLK", "through", "", False
+    b.vias.append(v)
+
+
+def mem_stubs(ctx):
+    b = ctx.board
+    _track(b, (180.0, 190.0), (190.0, 190.0), "PLANT_CLK")
+    _track(b, (190.0, 190.0), (200.0, 190.0), "PLANT_CLK")
+    _track(b, (190.0, 190.0), (190.0, 196.0), "PLANT_CLK")                      # a 6 mm branch off a clock
+
+
+def mem_length_groups(ctx):
+    ctx.p.cfg.setdefault("checks", {})["length_groups"] = [{"name": "PLANT", "nets": ["PLANT_A", "PLANT_B"], "tolerance_mm": 1}]
+    _track(ctx.board, (180.0, 200.0), (190.0, 200.0), "PLANT_A")
+    _track(ctx.board, (180.0, 202.0), (198.0, 202.0), "PLANT_B")
+
+
+def mem_noise(ctx):
+    _track(ctx.board, (180.0, 210.0), (195.0, 210.0), "PLANT_SW")
+    _track(ctx.board, (180.0, 210.6), (195.0, 210.6), "PLANT_ADC")
+
+
+def mem_esd(ctx):
+    b = ctx.board
+    net = b.footprints["J1"].pad("A6").net
+    fp = _fake_fp("D9", "Package_TO_SOT_SMD:SOT-23-6", 180.0, 220.0,
+                  [("1", 179.0, 219.0, 0.6, 0.6, net), ("2", 180.0, 219.0, 0.6, 0.6, "GND")])
+    fp.value = "USBLC6-2SC6"
+    b.fp_list.append(fp)
+    b.footprints["D9"] = fp
+
+
+def mem_quality(ctx):
+    b = ctx.board
+    fp = _fake_fp("R99", "Resistor_SMD:R_0402_1005Metric", 185.0, 230.0,
+                  [("1", 180.0, 230.0, 0.6, 0.6, "PLANT_DETOUR"), ("2", 190.0, 230.0, 0.6, 0.6, "PLANT_DETOUR")])
+    b.fp_list.append(fp)
+    b.footprints["R99"] = fp
+    _track(b, (180.0, 230.0), (180.0, 245.0), "PLANT_DETOUR")                    # 40 mm for a 10 mm connection
+    _track(b, (180.0, 245.0), (190.0, 245.0), "PLANT_DETOUR")
+    _track(b, (190.0, 245.0), (190.0, 230.0), "PLANT_DETOUR")
+
+
+def mem_dangling(ctx):
+    _track(ctx.board, (180.0, 250.0), (186.0, 250.0), "+5V")                    # a loose piece of +5V
+
+
 # (check id, what is planted, plant, text the new finding must contain; file plants take the project)
 CASES = [
     ("erc", "U2 pin 6 without its no-connect flag", ("file", plant_erc), "pin"),
@@ -397,6 +514,22 @@ CASES = [
     ("si.return_path", "a clock track across a 3 mm gap in the GND pour under it", ("mem", mem_return_path), "gap"),
     ("si.crosstalk", "a signal 0.2 mm beside a clock for 20 mm", ("mem", mem_crosstalk), "beside"),
     ("pcb.antenna", "an ESP32 module with the GND pour under its antenna", ("mem", mem_antenna), "antenna has copper"),
+    ("sch.pinout", "U1 drawn with VIN on pin 1 (the real part has GND there)", ("mem", mem_pinout), "U1"),
+    ("sch.pinout", "a U2 pin on GND with no pad in the footprint", ("mem", mem_pinout_pad), "pin 9"),
+    ("bom.package", "U2 (a wide SOIC-8 part) on the narrow SOIC-8 footprint", ("mem", mem_package), "U2"),
+    ("power.domains", "a 5 V shift register driving the 3.3 V MCU's SDA", ("mem", mem_domains), "I2C_SDA"),
+    ("power.regulators", "the LDO's 22 uF output capacitor removed", ("mem", mem_regulators), "U1"),
+    ("power.thermal", "1.2 A through the SOT-223 LDO from 5 V", ("mem", mem_ldo_heat), "U1"),
+    ("power.drop", "8 A declared along the +3V3 tracks", ("mem", mem_drop), "+3V3"),
+    ("power.switcher", "a buck's input capacitor 14 mm from its VIN", ("mem", mem_switcher), "U9"),
+    ("power.pours", "a GND pour island touching nothing", ("mem", mem_pours), "island"),
+    ("si.layer_change", "a clock via with no ground via near it", ("mem", mem_layer_change), "PLANT_CLK"),
+    ("si.stubs", "a 6 mm branch off a clock", ("mem", mem_stubs), "stub"),
+    ("si.length_groups", "a matched group 8 mm apart", ("mem", mem_length_groups), "skew"),
+    ("si.noise", "an ADC line 0.35 mm beside a switch node for 15 mm", ("mem", mem_noise), "PLANT_ADC"),
+    ("pcb.esd", "a USB ESD array 70 mm from the connector", ("mem", mem_esd), "D9"),
+    ("route.quality", "a 10 mm connection routed as a 40 mm U", ("mem", mem_quality), "PLANT_DETOUR"),
+    ("route.quality", "a loose piece of +5V track", ("mem", mem_dangling), "dangling"),
 ]
 
 

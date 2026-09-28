@@ -26,7 +26,7 @@ live in KiCad, then sends it to the fab.</p>
 - **Mission Control.** A full-screen view of autonomous runs.
 
 **Check it**
-- **36 design checks.** Schematic, BOM, placement, routing, fab limits, assembly, signal integrity and power. Each check is tested against a planted fault.
+- **50 design checks.** Schematic integrity (pinouts, packages, voltage domains), BOM, placement, routing quality, fab limits, assembly, signal integrity and power (regulators, heat, voltage drop, switchers, pours). Each check is tested against a planted fault.
 - **Compare versions.** See what moved and which copper changed since any checkpoint.
 - **Bring-up checklist.** Test the built board step by step, with each reading checked against the plan.
 

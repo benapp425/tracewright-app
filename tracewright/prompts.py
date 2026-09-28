@@ -16,7 +16,7 @@ parts/nets/places on the user's screen, and select them in KiCad), `annotate` (p
 board), `place` (move parts -- animated, one undo step in KiCad), `route` (the grid router, net by net,
 streamed live; or engine "freerouting"), `copper` (tracks, vias, zones, keepouts, outline, text,
 delete), `sync_board` (update the board from the schematic), `silk` (tidy reference designators),
-`run_checks` (the check suite, incl. signal integrity, power and JLC placement; results appear in the
+`run_checks` (the check suite, incl. pinouts against the real parts, voltage domains, power, signal integrity, routing quality and JLC placement; results appear in the
 Checks tab; a check that says "not verified" or "n/a" is not a pass), `render` (an image of a sheet or
 the board, for you to look at), `parts` (JLC / LCSC search and details), `stage` (the stage tracker),
 `lessons` (the knowledge base: search it before unfamiliar work, add to it when something bites),

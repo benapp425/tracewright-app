@@ -17,8 +17,9 @@ description: Draw or change the schematic - generate it with tw.sch for new desi
 - Notes next to the parts they explain (`note`): the formula for a value, the current, the rating margin, the
   layout constraint.
 - Run the script, then `tw.sch.finish(project)` (upgrade + ERC + netlist), then `run_checks` with `sch.*` (incl.
-  `sch.style`),
-  `bom.*`, `power.decoupling`, `lessons.*`. Look at every sheet with `render`.
+  `sch.style` and `sch.pinout`: every symbol's pins against the real part's pinout), `bom.*` (incl.
+  `bom.package`), `power.domains` (parts on different rails wired together), `power.regulators`,
+  `power.thermal` (declare the rails' currents), `power.decoupling`, `lessons.*`. Look at every sheet with `render`.
 
 **Existing schematic** -- change it in place: `tw.sch.edit.set_fields` for fields (values, MPN, LCSC), or make
 the edit in KiCad live. Take a `snapshot` first. If KiCad has the schematic open, save it there before editing

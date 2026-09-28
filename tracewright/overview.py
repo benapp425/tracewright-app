@@ -59,6 +59,15 @@ def _sessions_index(rt):
         return []
 
 
+def check_count():
+    """How many design checks run by default (the number the app quotes)."""
+    try:
+        from tw.checks import load_all
+        return len([c for c in load_all() if c.default and not c.id.startswith("project.")])
+    except Exception:
+        return 0
+
+
 def next_steps(p, board, bom, checks, sourcing):
     """Up to four things to do now, most useful first: {title, detail, action: {kind: chat | tab | command, ...}}."""
     tw = p.tw
@@ -85,7 +94,7 @@ def next_steps(p, board, bom, checks, sourcing):
                         "action": ask("Route the board: supplies first, then pairs, then signals. Stream it and run the routing checks afterwards.")})
     c = (checks or {}).get("counts") or {}
     if not checks:
-        out.append({"icon": "list-checks", "title": "Run checks", "detail": "36 design, fab and assembly checks.", "action": {"kind": "command", "name": "run-checks"}})
+        out.append({"icon": "list-checks", "title": "Run checks", "detail": f"{check_count()} design, fab and assembly checks.", "action": {"kind": "command", "name": "run-checks"}})
     elif c.get("error"):
         out.append({"icon": "circle-x", "title": f"Fix {c['error']} check error{'s' if c['error'] != 1 else ''}", "detail": "Errors block ordering.",
                     "action": ask("Explain the check errors, most important first, and fix what you can.")})
@@ -115,5 +124,5 @@ def overview(app, rt):
             est = None
     return {"project": p.summary(), "board": board, "bom": bom, "checks": checks, "sourcing": sourcing, "estimate": est,
             "estimate_parts": bool(bom and bom.get("cost") is not None),
-            "next": next_steps(p, board, bom, checks, sourcing), "activity": _activity(rt, app),
+            "next": next_steps(p, board, bom, checks, sourcing), "activity": _activity(rt, app), "check_count": check_count(),
             "has_sch": p.tw.has_sch(), "has_pcb": p.tw.has_pcb()}

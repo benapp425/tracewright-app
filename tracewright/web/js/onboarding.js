@@ -46,7 +46,7 @@ export class Onboarding {
       h("div.onb-cards", [
         ["message-square", "Describe it", "Claude turns your requirements into a schematic and layout."],
         ["circuit-board", "Watch it build", "Placement and routing appear live, in KiCad too."],
-        ["list-checks", "Check and order", "36 design checks, then one click to the fab."],
+        ["list-checks", "Check and order", `${(state.info && state.info.check_count) || 50} design checks, then one click to the fab.`],
       ].map(([ic, t, d], i) => h("div.onb-feat", { style: { animationDelay: `${0.1 + i * 0.08}s` } }, h("span.onb-fi", icon(ic, 18)), h("b", t), h("span", d)))));
   }
 

@@ -57,7 +57,7 @@ export class OverviewPanel {
     const cc = (c && c.counts) || {};
     const tiles = [
       tile("list-checks", "Checks", c ? (c.verdict === "checks pass" ? "Passing" : c.verdict === "not ready" ? `${cc.error} error${cc.error === 1 ? "" : "s"}` : `${cc.warning} warning${cc.warning === 1 ? "" : "s"}`) : "Not run",
-        c ? `${cc.error || 0} errors · ${cc.warning || 0} warnings · ${cc.info || 0} notes` : "36 checks", c ? (c.verdict === "checks pass" ? "ok" : c.verdict === "not ready" ? "bad" : "warn") : "", () => this.ws.show("checks")),
+        c ? `${cc.error || 0} errors · ${cc.warning || 0} warnings · ${cc.info || 0} notes` : `${d.check_count || ""} checks`.trim(), c ? (c.verdict === "checks pass" ? "ok" : c.verdict === "not ready" ? "bad" : "warn") : "", () => this.ws.show("checks")),
       tile("circuit-board", "Board", b ? `${b.w} × ${b.h} mm` : "—",
         b ? `${b.layers} layers · ${b.placed}/${b.parts} placed · ${b.nets ? Math.round(100 * b.routed / b.nets) : 0}% routed` : "No board yet", "", () => this.ws.show("board"),
         b && b.nets ? b.routed / b.nets : null),

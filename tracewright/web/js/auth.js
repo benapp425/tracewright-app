@@ -8,7 +8,7 @@ import { BRAND, mark } from "./brand.js";
 
 const POINTS = [
   ["sparkles", "Live in KiCad", "Claude places and routes while you watch."],
-  ["list-checks", "36 design checks", "Each one tested against a known fault."],
+  ["list-checks", "{n} design checks", "Each one tested against a known fault."],
   ["shopping-cart", "Ready to order", "Send to JLCPCB or PCBWay in one click."],
 ];
 
@@ -68,7 +68,7 @@ export class AuthScreen {
       h("div.auth-brand-in",
         h("div.auth-logo", mark(56, true), h("div", h("div.auth-name", BRAND.name), h("div.auth-tag", BRAND.tagline))),
         h("div.auth-points", POINTS.map(([ic, t, d], i) => h("div.auth-pt", { style: { animationDelay: `${0.5 + i * 0.12}s` } },
-          h("span.auth-pti", icon(ic, 16)), h("div", h("b", t), h("span", d))))),
+          h("span.auth-pti", icon(ic, 16)), h("div", h("b", t.replace("{n}", st.check_count || 50)), h("span", d))))),
         h("div.auth-foot", `Version ${st.version || ""}`)));
     this.err = h("div.auth-err");
     const email = h("input", { type: "email", placeholder: "you@example.com", autocomplete: "email", required: true, value: this.email || "" });

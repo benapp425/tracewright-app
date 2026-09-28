@@ -400,9 +400,11 @@ def tool_list(rt, app):
                      f"spot {rep['stuck']}")
 
     # ------------------------------------------------------------------ checks, images
-    @reg("run_checks", "Run the design checks (ERC, DRC, readability, BOM, placement, antenna keep-outs, power widths / "
-         "flyback / capacitor ratings / floating gates, signal integrity: return paths, crosstalk, pairs and impedance, "
-         "DFM, JLC CPL, boot straps, lessons). only: check ids or groups (default all); refresh: re-export everything. "
+    @reg("run_checks", "Run the design checks (ERC, DRC, readability, pinouts and packages against the real parts, voltage "
+         "domains, BOM, placement, ESD placement, antenna keep-outs, power: widths, voltage drop, regulator capacitors and "
+         "heat, switcher hot loops, pours and stitching, flyback, capacitor ratings, floating gates; signal integrity: "
+         "return paths and return vias, crosstalk, stubs, pairs and impedance, length groups, noise near analog lines; "
+         "routing quality, DFM, JLC CPL, boot straps, lessons). only: check ids or groups (default all); refresh: re-export everything. "
          "Results show in the Checks tab; returns the verdict and the findings. Each check has a time limit; one that "
          "could not verify reports it (never a pass).",
          {"type": "object", "properties": {"only": {"type": "array", "items": {"type": "string"}}, "refresh": {"type": "boolean"}}})
