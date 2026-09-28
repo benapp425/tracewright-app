@@ -1,22 +1,29 @@
 """Schematics as code (generate) and precise in-place edits (edit.set_fields).
 
 Generate: write design/schematic.py with Design / Builder / Part (see builder.py), run it, then
-`finish(project)` upgrades the files to the running KiCad's format, runs ERC and exports the
-netlist. The agent re-runs the script after every change; once the user edits the schematic by
+`finish(project)` upgrades the files to the running KiCad's format, redraws them in the project's
+schematic style (hierarchical or flat, style.py), runs ERC and exports the netlist. The agent re-runs the script after every change; once the user edits the schematic by
 hand, edit in place instead (or fold their change into the script first).
 """
 import os
 from .kisch import Project, Sheet, LibSymbol, make_ic, load_stock, snap, uid, rot_vec
 from .builder import Design, Builder, Part, stock, power, KIND, NOTE, TITLE
+from . import style
 from .. import kicad
 
 
 def finish(project, erc=True):
-    """Upgrade every sheet in place, export the netlist, run ERC; returns a short summary."""
+    """Upgrade every sheet in place, redraw it in the project's schematic style when the script drew
+    the other one (tracewright.json schematic.style: "hierarchical" or "flat"; see style.py), export
+    the netlist, run ERC; returns a short summary."""
     out = {"sheets": [], "erc": None}
     for f in project.sheets():
         kicad.sch_upgrade(f)
         out["sheets"].append(os.path.basename(f))
+    want = ((getattr(project, "cfg", None) or {}).get("schematic") or {}).get("style")
+    if want in style.STYLES:
+        r = style.convert(project.sch, want)
+        out["style"] = {"ok": r["ok"], "message": r["message"]}
     kicad.netlist(project.sch, os.path.join(project.build, f"{project.stem}.net"))
     if erc:
         d = kicad.erc(project.sch, os.path.join(project.build, "erc.json"))

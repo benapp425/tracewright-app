@@ -6,7 +6,7 @@ router, the check self-test (a planted fault per check), projects and history, t
 in-place schematic edits, and a smoke test of the web API. Tests that need KiCad are skipped when
 it is not installed.
 """
-import os, sys, json, shutil, tempfile, time, traceback, asyncio
+import os, re, sys, json, shutil, tempfile, time, traceback, asyncio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -1761,6 +1761,141 @@ def guided_start_canvas_ready_and_start():
             assert (await c.post(f"/api/projects/{p.id}/start", json={})).status == 409
         rt.stop()
     asyncio.run(go())
+
+
+@test(needs=("kicad",))
+def sheet_connectivity_rules_match_kicad():
+    """The schematic reading the style converter relies on, against KiCad's own netlist, over every rule it
+    models: wire ends and dots (a T without a dot and crossing wires do not join), a pin on the middle of a
+    wire (no), labels anywhere on a wire, same-name labels on one sheet (local, hierarchical, global, and
+    a power symbol), global labels and power symbols across sheets, local labels across sheets (no), sheet
+    pins, and PWR_FLAG (names nothing)."""
+    from tw.sch import Design as SchDesign, Part, stock, style
+    from tw import kicad
+    hw = os.path.join(TMP, "rules", "hw")
+    R = stock("Device", "R")
+    cat = {"R": Part(R, "Resistor_SMD:R_0402_1005Metric", "10k")}
+    d = SchDesign("rules")
+    root = d.root("Root", paper="A4")
+    sub, sub2 = d.sheet("Sub", "sub.kicad_sch", "Sub", paper="A4"), d.sheet("Sub2", "sub2.kicad_sch", "Sub2", paper="A4")
+    rb, sb, s2 = d.builder(root, 0, cat), d.builder(sub, 100, cat), d.builder(sub2, 200, cat)
+    n = [0]
+
+    def glabel(sh, name, at):
+        n[0] += 1
+        sh.items.append(["global_label", sexp_q(name), ["shape", "input"], ["at", at[0], at[1], 0],
+                         ["effects", ["font", ["size", 1.27, 1.27]], ["justify", "left"]], ["uuid", sexp_q(f"00000000-0000-4000-a000-{n[0]:012d}")]])
+    from tw.sexp import Q as sexp_q
+    two = lambda b, ref, at: b.two("R", "R", at, "down", ref=ref)
+    r = two(sb, "R101", (30.48, 30.48)); sb.lab(r.pin("1"), "A")                  # local + hierarchical, one sheet
+    r = two(sb, "R102", (50.8, 30.48)); sb.hl(r.pin("1"), "A", "r", "input")
+    r = two(sb, "R103", (30.48, 60.96)); sb.lab(r.pin("1"), "B")                  # local + global, one sheet
+    r = two(sb, "R104", (50.8, 60.96)); glabel(sub, "B", r.pin("1"))
+    r5 = two(sb, "R105", (30.48, 91.44)); sb.w(r5.pin("1"), (60.96, 91.44))       # a T without a dot
+    r6 = two(sb, "R106", (45.72, 101.6)); sb.w(r6.pin("1"), (45.72, 91.44))
+    sb.w((76.2, 91.44), (101.6, 91.44))                                             # a pin on the middle of a wire
+    two(sb, "R107", (88.9, 91.44)); two(sb, "R108", (101.6, 91.44))
+    r = two(sb, "R109", (76.2, 30.48)); glabel(sub, "+3V3", r.pin("1"))           # global label = power symbol
+    r = two(rb, "R1", (30.48, 30.48)); rb.rail(r.pin("1"), "+3V3"); rb.flag(r.pin("2"))
+    r = two(sb, "R110", (30.48, 121.92)); sb.w(r.pin("1"), (60.96, 121.92))       # crossing wires
+    r = two(sb, "R111", (45.72, 132.08)); sb.w(r.pin("1"), (45.72, 111.76))
+    r = two(sb, "R112", (30.48, 152.4)); sb.w(r.pin("1"), (60.96, 152.4)); sb.lab((45.72, 152.4), "L8")   # label mid-wire
+    r = two(sb, "R113", (76.2, 152.4)); sb.lab(r.pin("1"), "L8")
+    r3 = two(sb, "R114", (101.6, 60.96)); sb.w(r3.pin("1"), (132.08, 60.96))      # a T with a dot
+    r4 = two(sb, "R115", (116.84, 71.12)); sb.w(r4.pin("1"), (116.84, 60.96)); sb.j((116.84, 60.96))
+    r = two(sb, "R116", (132.08, 30.48)); sb.lab(r.pin("1"), "C2B")               # local here, global elsewhere
+    r = two(rb, "R2", (50.8, 30.48)); glabel(root, "C2B", r.pin("1"))
+    r = two(sb, "R117", (132.08, 91.44)); sb.lab(r.pin("1"), "SAME")              # one local name on two sheets
+    r = two(s2, "R201", (30.48, 30.48)); s2.lab(r.pin("1"), "SAME")
+    r = two(s2, "R202", (50.8, 30.48)); glabel(sub2, "G15", r.pin("1"))            # globals on two sheets
+    r = two(sb, "R118", (132.08, 121.92)); glabel(sub, "G15", r.pin("1"))
+    r = two(sb, "R119", (152.4, 30.48)); sb.lab(r.pin("1"), "+5V")                # local + power symbol, one sheet
+    r = two(sb, "R120", (172.72, 30.48)); sb.rail(r.pin("1"), "+5V")
+    r = two(s2, "R203", (76.2, 30.48)); s2.lab(r.pin("1"), "+5V")                 # ... and on a sheet without one
+    r = two(s2, "R204", (101.6, 30.48)); s2.hl(r.pin("1"), "HX", "r", "input")     # hierarchical label to a sheet pin
+    root.subsheet(sub, (101.6, 30.48), (30.48, 20.32), [("A", "left", 5.08, "input")])
+    root.subsheet(sub2, (101.6, 71.12), (30.48, 20.32), [("HX", "left", 5.08, "input")])
+    r = two(rb, "R3", (76.2, 35.56)); rb.w(r.pin("1"), root.sheet_pin_pos(sub, "A"))
+    r = two(rb, "R4", (76.2, 76.2)); rb.w(r.pin("1"), root.sheet_pin_pos(sub2, "HX"))
+    d.write(hw)
+    open(os.path.join(hw, "rules.kicad_pro"), "w").write("{}")
+    sch = os.path.join(hw, "rules.kicad_sch")
+    kicad.netlist(sch, os.path.join(hw, "rules.net"))
+    from tw.netlist import Netlist
+    nl = Netlist.load(os.path.join(hw, "rules.net"))
+    same = lambda a, b: nl.pin[(a, "1")] == nl.pin[(b, "1")]
+    assert same("R101", "R102") and same("R103", "R104") and same("R109", "R1") and same("R112", "R113")
+    assert same("R114", "R115") and same("R202", "R118") and same("R119", "R120") and same("R3", "R102") and same("R4", "R204")
+    assert not same("R105", "R106") and not same("R107", "R108") and not same("R110", "R111")
+    assert not same("R116", "R2") and not same("R117", "R201") and not same("R203", "R120")
+    ours = style.Design(sch).partition()
+    theirs = {frozenset((r, p) for r, p in nodes if not r.startswith("#")) for nodes in nl.nets.values()} - {frozenset()}
+    assert ours == theirs, style._diff(theirs, ours)
+
+
+@test(needs=("kicad",))
+def schematic_style_round_trip_with_proof():
+    """The demo redrawn flat and back: each time KiCad's netlist is unchanged, the parent sheet loses (or
+    regains) its sheet pins, facing sheets are wired straight across; the CLI keeps the project's choice;
+    a sheet used twice is not flattened; the API redraws and records the style."""
+    from tw.sch import style
+    from tw import cli as twcli
+    p = fixture_copy("style")
+    before = style.detect(p.sch)
+    assert before["style"] == "hierarchical" and before["sheet_pins"] == 4, before
+    r = style.convert(p.sch, "flat")
+    assert r["ok"] and r["proof"]["same"] and r["after"] == "flat", r
+    d = style.detect(p.sch)
+    assert d["style"] == "flat" and d["sheet_pins"] == 0 and d["crossing"] == ["USB_D_N", "USB_D_P"], d
+    root = open(p.sch).read()
+    assert "(pin " not in root.split("(sheet_instances")[0].split("(sheet")[1] and root.count("(wire") == before_wires(p) - 2
+    r = style.convert(p.sch, "hierarchical")
+    assert r["ok"] and r["proof"]["same"] and r["report"].get("wired") == 2, r
+    d = style.detect(p.sch)
+    assert d["style"] == "hierarchical" and d["sheet_pins"] == 4 and d["global_labels"] == 0, d
+    assert style.convert(p.sch, "hierarchical")["message"] == "Already hierarchical."
+    # the CLI: shows the style, converts, keeps the choice for tw.sch.finish
+    cwd = os.getcwd()
+    os.chdir(p.root)
+    try:
+        assert twcli.main(["style", "flat"]) == 0
+    finally:
+        os.chdir(cwd)
+    assert json.load(open(os.path.join(p.root, "tracewright.json")))["schematic"]["style"] == "flat"
+    assert style.detect(p.sch)["style"] == "flat"
+    # a sheet used twice stays hierarchical
+    q = fixture_copy("style_reuse")
+    t = open(q.sch).read()
+    i = t.index("\n\t(sheet\n")
+    j = t.index("\n\t)\n", i) + 4
+    dup = t[i:j].replace("mcu.kicad_sch", "power.kicad_sch")
+    dup = re.sub(r'\(uuid "[^"]+"\)', '(uuid "0badc0de-0000-4000-a000-00000000beef")', dup, count=1)
+    open(q.sch, "w").write(t[:j] + dup[1:] + t[j:])
+    r = style.convert(q.sch, "flat")
+    assert not r["ok"] and "used 2 times" in r["message"], r
+    # the API
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    proj = ProjectStore().import_copy(FIXTURE, "Style demo")
+
+    async def go():
+        webapp = make_app()
+        async with TestClient(TestServer(webapp)) as c:
+            g = await (await c.get(f"/api/projects/{proj.id}/schematic/style")).json()
+            assert g["style"] is None and g["detected"]["style"] == "hierarchical", g
+            res = await c.post(f"/api/projects/{proj.id}/schematic/style", json={"style": "flat"})
+            j = await res.json()
+            assert res.status == 200 and j["ok"] and j["changed"], j
+            g = await (await c.get(f"/api/projects/{proj.id}/schematic/style")).json()
+            assert g["style"] == "flat" and g["detected"]["style"] == "flat", g
+            assert (await c.post(f"/api/projects/{proj.id}/schematic/style", json={"style": "sideways"})).status == 400
+        webapp["app"].rt(proj.id).stop()
+    asyncio.run(go())
+
+
+def before_wires(p):
+    return open(os.path.join(FIXTURE, "hardware", "demo", "demo.kicad_sch")).read().count("(wire")
 
 
 @test(needs=("node",))

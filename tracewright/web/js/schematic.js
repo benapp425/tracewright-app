@@ -1,6 +1,6 @@
 // The live schematic: KiCad's own plot of each sheet (SVG), with clickable symbols over it, find,
 // and the review flags.
-import { h, clear, api, toast, menu } from "./util.js";
+import { h, clear, api, toast, menu, confirmDialog } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
 
@@ -37,10 +37,13 @@ export class SchematicView {
     this.findIn = h("input", { placeholder: "Find a symbol", spellcheck: false });
     this.findRes = h("div.findres", { style: { display: "none" } });
     this.flagBtn = h("button.tbtn", { onclick: () => this.flags.toggle(), "data-tip": "Flag an issue", "data-kbd": "c" }, icon("flag", 15));
+    this.styleBtn = h("button.tbtn.style-pick", { onclick: (e) => this.styleMenu(e.currentTarget), "data-tip": "How the sheets are joined",
+      style: { display: "none" } });
+    this.styleSep = h("div.tsep", { style: { display: "none" } });
     this.hudTc = h("div.hud.tc");
     this.el.appendChild(h("div.viewer.paper", this.svg,
       h("div.hud.tl", this.tabs),
-      h("div.hud.tr", h("div.hudbox", h("div.findbox", icon("search", 13), this.findIn, this.findRes), h("div.tsep"), this.flagBtn, h("div.tsep"),
+      h("div.hud.tr", h("div.hudbox", this.styleBtn, this.styleSep, h("div.findbox", icon("search", 13), this.findIn, this.findRes), h("div.tsep"), this.flagBtn, h("div.tsep"),
         h("button.tbtn", { "data-tip": "Zoom out", onclick: () => this.zoom(1.4) }, icon("zoom-out", 15)),
         h("button.tbtn", { "data-tip": "Zoom in", onclick: () => this.zoom(1 / 1.4) }, icon("zoom-in", 15)),
         h("button.tbtn", { "data-tip": "Fit the sheet", "data-kbd": "f", onclick: () => this.fit() }, icon("scan", 15)))),
@@ -118,6 +121,7 @@ export class SchematicView {
     if (!this.cur || !this.sheets.find((s) => s.name_path === this.cur)) this.cur = this.sheets[0].name_path;
     this.renderTabs();
     this.showSheet(this.cur, keepView);
+    this.loadStyle();
     if (this.pendingProbe) { const r = this.pendingProbe; this.pendingProbe = null; this.probe(r, "pending"); }
   }
 
@@ -167,6 +171,54 @@ export class SchematicView {
   }
 
   sheet() { return this.sheets.find((s) => s.name_path === this.cur); }
+
+  // ------------------------------------------------------------------ hierarchical or flat
+  async loadStyle() {
+    try { this.style = await api(`/api/projects/${encodeURIComponent(this.pid)}/schematic/style`); } catch (e) { return; }
+    const d = this.style.detected;
+    const now = d && (d.style === "hierarchical" || d.style === "flat" || d.style === "mixed") ? d.style : this.style.style;
+    clear(this.styleBtn);
+    const show = !!(d && d.sheets > 1);
+    this.styleBtn.style.display = this.styleSep.style.display = show ? "" : "none";
+    if (!show) return;
+    this.styleBtn.append(icon(now === "flat" ? "layers" : "waypoints", 14),
+      h("span", now === "flat" ? "Flat" : now === "mixed" ? "Mixed" : "Hierarchical"), icon("chevron-down", 12));
+  }
+
+  styleMenu(anchor) {
+    const d = (this.style && this.style.detected) || {};
+    const now = d.style;
+    menu(anchor, [
+      { head: "Sheets joined by" },
+      { label: "Sheet pins (hierarchical)", checked: now === "hierarchical", run: () => this.setStyle("hierarchical") },
+      { label: "Global labels (flat)", checked: now === "flat", run: () => this.setStyle("flat") },
+      "-",
+      { custom: h("div.menu-note", d.reused && d.reused.length ? `${d.reused.join(", ")} is used more than once, so it stays hierarchical.`
+        : "Every pin stays on its net: the redrawn sheets are checked against KiCad's netlist before anything changes.") },
+    ], { align: "end" });
+  }
+
+  async setStyle(target) {
+    const d = (this.style && this.style.detected) || {};
+    if (d.style === target) return;
+    const flat = target === "flat";
+    const ok = await confirmDialog({ title: flat ? "Redraw the schematic flat?" : "Redraw the schematic hierarchical?",
+      text: (flat ? "Sheet pins and hierarchical labels become global labels (supplies become power symbols), and wiring on the parent sheet that only joined sheet pins is removed."
+        : "Global labels become hierarchical labels, with sheet pins on each sheet symbol, wired to each other or labelled on the parent sheet.")
+        + " The result is checked against KiCad's netlist before anything is written, and a checkpoint is taken first. Net names can change, so update the board from the schematic afterwards.",
+      ok: "Redraw" });
+    if (!ok) return;
+    this.styleBtn.disabled = true; this.styleBtn.classList.add("busy");
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/schematic/style`, { body: { style: target } });
+      if (r.ok) {
+        toast(r.message, "ok", 6000);
+        const stale = (r.report && r.report.stale_notes) || [];
+        if (stale.length) toast(`Check ${stale.length === 1 ? "this note" : "these notes"}, written for the old style: “${stale[0]}”${stale.length > 1 ? ` and ${stale.length - 1} more` : ""}`, "warn", 9000);
+      } else toast(r.message || "The schematic was not changed.", "error", 9000);
+    } catch (e) { toast(e.message, "error"); }
+    finally { this.styleBtn.disabled = false; this.styleBtn.classList.remove("busy"); this.loadStyle(); }
+  }
 
   showSheet(np, keepView) {
     const prev = this.cur;

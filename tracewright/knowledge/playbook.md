@@ -59,7 +59,7 @@ gates become assumptions recorded for review:
 | Brief | docs/requirements.md: function, interfaces, power budget, size, environment, quantity, cost | the user agrees |
 | Architecture | docs/architecture.md: block diagram, power tree with currents, interface list, key parts and why | the user agrees |
 | Parts | docs/parts.md: every part with MPN, LCSC code, JLC stock (dated query), data sheet link, symbol/footprint source and how it was verified | every part verified or marked |
-| Schematic | hierarchical schematic, commented, readable | ERC clean, `sch.*` and `bom.*` checks pass |
+| Schematic | sheets in the project's style (hierarchical unless chosen flat), short notes where they help, readable | ERC clean, `sch.*` and `bom.*` checks pass |
 | Board setup | outline, stack-up, net classes (impedance computed where needed), fab rules, mounting holes, connector positions | `dfm.rules` passes; the user agrees the outline |
 | Placement | every part placed with intent | `pcb.placement`, `power.decoupling` pass |
 | Routing | every net routed, pours filled | DRC clean; `route.*`, `power.width`, `hs.pairs` pass |
@@ -80,10 +80,17 @@ Draw it the way professional sheets are drawn (lesson `schematic-conventions`; `
   series parts in line (`inline`), crystal at its pins, divider at FB. Dashed `zone` + caption around
   parts that need layout care (hot loop, switch node, crystal, pairs).
 - **Names and labels**: UPPERCASE nets with underscores, _P/_N pairs, active-low _N; short stub +
-  local label on busy pins; hierarchical labels between sheets; a junction dot on every T, never a
-  four-way junction; no-connect flags on unused pins.
+  local label on busy pins; between sheets the project's style (hierarchical: sheet pins; flat:
+  global labels; `./tw style`); a junction dot on every T, never a four-way junction; no-connect
+  flags on unused pins.
 - **Notes beside the parts**: why this value (the formula or data sheet table), the current, the
-  voltage rating margin, the layout constraint ("hot loop: smallest loop to PGND"). 1.27 mm text.
+  voltage rating margin, the layout constraint ("hot loop: smallest loop to PGND"). 1.27 mm text,
+  a line or two each.
+- **Write like an engineer marking up a sheet, not like a README** (`sch.text`): no instructions
+  for the tool, no explanations of how labels or no-connects work, no part counts, nothing inside
+  sheet symbols, no review checklists, disclaimers or firmware requirements -- those go in docs/.
+  The cover is the board's name, one line on what it is, the sheet list, a short numbered list of
+  general notes and the revisions.
 - **Readability is checked on the plotted sheets** (`sch.render`): no text over wires, pins, other
   text or block borders. Pin numbers of 2 digits need 3.81 mm pins and 3 digits 5.08 mm to clear a
   no-connect flag. Keep everything on the 1.27 mm grid.
@@ -91,7 +98,8 @@ Draw it the way professional sheets are drawn (lesson `schematic-conventions`; `
   (`sch.wiring`).
 - **Fields on every placed part**: Value, Footprint, MPN, Manufacturer, LCSC (for JLC assembly),
   Datasheet. DNP parts are marked DNP, not deleted. Title block filled on every sheet.
-- **Supplies**: power symbols for rails, PWR_FLAG where a rail enters, one name per rail.
+- **Supplies**: power symbols for rails, KiCad's power:PWR_FLAG where a rail enters (never a box
+  standing in for it), one name per rail.
 - **Generated schematics** (design/*.py with tw.sch) are the fastest way to a large, consistent
   schematic, and let you re-lay a whole sheet. Once the user edits the schematic by hand, edit the
   file (or KiCad, live) rather than regenerating over their work.

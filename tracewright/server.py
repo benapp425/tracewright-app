@@ -876,6 +876,53 @@ def make_app():
             return err("no sheets plotted", 404)
         return web.FileResponse(f, headers={"Content-Type": "image/svg+xml", "Cache-Control": "no-cache"})
 
+    @routes.get("/api/projects/{pid}/schematic/style")
+    async def schematic_style(request):
+        """How the sheets are joined now, and the project's choice."""
+        rt = app.rt(request.match_info["pid"])
+        from tw.sch import style as schstyle
+        d = await asyncio.to_thread(schstyle.detect, rt.p.tw.sch) if rt.p.tw.has_sch() else None
+        return jresp({"style": rt.p.schematic_style(), "detected": d})
+
+    @routes.post("/api/projects/{pid}/schematic/style")
+    async def schematic_style_set(request):
+        """Redraw the sheets hierarchical or flat. The redrawn sheets are checked against KiCad's netlist
+        before anything is written (a checkpoint is taken first); the choice is kept for new sheets."""
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        body = await request.json()
+        target = body.get("style")
+        if target not in ("hierarchical", "flat"):
+            return err("style must be hierarchical or flat")
+        if not rt.p.tw.has_sch():
+            await asyncio.to_thread(rt.p.set_schematic_style, target)
+            rt.hub.emit("project.changed", summary=rt.p.summary())
+            return jresp({"ok": True, "changed": [], "message": f"New sheets will be drawn {target}."})
+        if app.agent_busy(pid):
+            return err("Claude is working on this design. Change the style when it finishes, or ask Claude to.", 409)
+        from tw.sch import style as schstyle
+        from tw import kicad as twkicad
+
+        def work():
+            if history.has_repo(rt.p.root):
+                history.snapshot(rt.p.root, f"Before redrawing the schematic {target}")
+            rt.mark_self(30)
+            r = schstyle.convert(rt.p.tw.sch, target)
+            if r["ok"]:
+                rt.p.set_schematic_style(target)
+                if r["changed"]:
+                    twkicad.netlist(rt.p.tw.sch, os.path.join(rt.p.tw.build, f"{rt.p.tw.stem}.net"))
+            return r
+        try:
+            r = await asyncio.to_thread(work)
+        except Exception as e:
+            app.log(traceback.format_exc())
+            return err(f"the redraw failed: {e}", 500)
+        if r.get("changed"):
+            rt.hub.emit("schematic.changed", source="tracewright", files=r["changed"])
+        rt.hub.emit("project.changed", summary=rt.p.summary())
+        return jresp(r)
+
     @routes.get("/api/projects/{pid}/model.glb")
     async def model_glb(request):
         """The board as a 3D model (binary glTF) for the interactive 3D view; parts=0 for the bare board."""

@@ -83,6 +83,22 @@ def plant_style(p):
     _edit(sch, lambda t: re.sub(r'(\(lib_id "[^"]*:GND"\)\s*\(at [\d.]+ [\d.]+ )0\)', r"\g<1>180)", t, count=1))
 
 
+def plant_text_in_sheet(p):
+    # the kind of text an agent writes inside a sheet symbol on the root
+    note = ('\t(text "Sheet 2 / 14 components\\nOpen to inspect named pin-to-net connections."\n\t\t(exclude_from_sim no)\n'
+            '\t\t(at 45.72 50.8 0)\n\t\t(effects\n\t\t\t(font\n\t\t\t\t(size 1.27 1.27)\n\t\t\t)\n\t\t\t(justify left)\n\t\t)\n'
+            '\t\t(uuid "0badc0de-0000-4000-a000-000000000002")\n\t)\n')
+    _edit(p.sch, lambda t: t.replace("\n\t(sheet\n", "\n" + note + "\t(sheet\n", 1))
+
+
+def plant_text_narration(p):
+    # a note that explains how KiCad works, on the cover
+    note = ('\t(text "Use the NC marks as intentional unused pins. Global labels with the same name are electrically connected."\n'
+            '\t\t(exclude_from_sim no)\n\t\t(at 25.4 180.34 0)\n\t\t(effects\n\t\t\t(font\n\t\t\t\t(size 1.27 1.27)\n\t\t\t)\n'
+            '\t\t\t(justify left)\n\t\t)\n\t\t(uuid "0badc0de-0000-4000-a000-000000000003")\n\t)\n')
+    _edit(p.sch, lambda t: t.replace("\n\t(sheet\n", "\n" + note + "\t(sheet\n", 1))
+
+
 def plant_dru(p):
     # one misspelt constraint: KiCad ignores the whole file without a word
     path = os.path.splitext(p.pcb)[0] + ".kicad_dru"
@@ -484,6 +500,8 @@ CASES = [
     ("sch.render", "a note written over R1's value", ("file", plant_render), "PLANTED"),
     ("sch.wiring", "a wire laid along an existing wire", ("file", plant_wiring), "collinear"),
     ("sch.style", "a ground symbol turned upside down", ("file", plant_style), "points up"),
+    ("sch.text", "a part count written inside a sheet symbol", ("file", plant_text_in_sheet), "inside the sheet symbol"),
+    ("sch.text", "a note explaining how labels work", ("file", plant_text_narration), "how schematics work"),
     ("sch.nets", "J2 pin 3 on 'I2C_SDA1' instead of I2C_SDA", ("mem", mem_sch_nets), "I2C_SDA1"),
     ("bom.fields", "R1's LCSC code without its C", ("mem", mem_bom_fields), "LCSC"),
     ("bom.board", "R3 is 22k on the board", ("mem", mem_bom_board), "R3"),

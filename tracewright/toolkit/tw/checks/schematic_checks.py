@@ -196,12 +196,16 @@ def sch_style(ctx):
     out = []
     seen = set()
     many_sheets = len(ctx.hier.sheets) > 1
+    style = ((ctx.cfg or {}).get("schematic") or {}).get("style")         # the project's choice (Schematic tab)
+    supplies = {s_.value for sh in ctx.hier.sheets for s_ in sh.symbols if s_.is_power and s_.value}
+    has_pins = any(c["pins"] for sh in ctx.hier.sheets for c in sh.children)
     for sh in ctx.hier.sheets:
         sf = sh.sf
         where = {"sheet": sh.name_path, "file": sh.filename}
         if sf.path not in seen:                                    # file-level: once per file
             seen.add(sf.path)
             colored, filled, small, globals_ = {}, 0, 0, []
+            hier_labels = sum(1 for item in sf.tree[1:] if isinstance(item, list) and item and item[0] == "hierarchical_label")
             for item in sf.tree[1:]:
                 if not isinstance(item, list) or item[0] in ("lib_symbols", "title_block"):
                     continue
@@ -237,10 +241,18 @@ def sch_style(ctx):
                 out.append(Finding("sch.style", "warning", f"{small} texts or labels smaller than 1 mm", where,
                                    hint="1.27 mm for labels, fields and notes; 2 mm for block titles.",
                                    key=f"style:small:{sf.path}"))
-            if many_sheets and globals_:
-                out.append(Finding("sch.style", "info", f"{len(globals_)} global labels ({', '.join(sorted(set(globals_))[:6])})",
-                                   where, hint="Hierarchical labels (sheet pins) show which signals cross which sheets.",
-                                   key=f"style:global:{sf.path}"))
+            if many_sheets and globals_ and (style == "hierarchical" or (style is None and has_pins)):
+                signals = sorted(set(globals_) - supplies)
+                if signals:
+                    out.append(Finding("sch.style", "info", f"{len(signals)} global labels ({', '.join(signals[:6])}) "
+                                       + ("in a hierarchical schematic" if style else "alongside sheet pins"), where,
+                                       hint="Sheet pins show which signals cross which sheets (`./tw style hierarchical` redraws "
+                                            "them); or choose flat in the Schematic tab if that is how this design is drawn.",
+                                       key=f"style:global:{sf.path}"))
+            if many_sheets and style == "flat" and sh.parent is not None and hier_labels:
+                out.append(Finding("sch.style", "info", f"{hier_labels} hierarchical labels in a flat schematic", where,
+                                   hint="`./tw style flat` redraws them as global labels, checked against KiCad's netlist.",
+                                   key=f"style:hier:{sf.path}"))
             tb = sf.title
             missing = [k for k in ("title", "rev", "date") if not tb.get(k)]
             if missing:
@@ -296,6 +308,76 @@ def sch_style(ctx):
                                                 "D diode or LED, Q transistor, U IC, J connector, SW switch, Y crystal, F fuse, "
                                                 "FB ferrite, TP test point, H mounting hole.", key=f"style:ref:{s_.ref}"))
                     break
+    return out
+
+
+# What a person writes on a schematic is short: a name, a value, why a part is there, a layout note.
+# These read like a tool talking, a review checklist, or a README pasted onto the sheet.
+NARRATION = [
+    (re.compile(r"\bopen(ed)?\s+(it\s+)?to\s+(inspect|see|view)\b|\b(double[- ]?)?click\b|\bpin[- ]to[- ]net\b|"
+                r"\bnamed\s+pin", re.I), "warning", "tells the reader how to use the tool"),
+    (re.compile(r"\b(labels?|nets?)\s+(with|of)\s+the\s+same\s+name\b|\belectrically\s+connected\b|\bNC\s+marks?\b|"
+                r"\bintentional(ly)?\s+unused\b", re.I), "warning", "explains how schematics work"),
+    (re.compile(r"\b\d+\s+components?\b|\bsheet\s+\d+\s*/\s*\d+", re.I), "warning", "counts parts or pages"),
+    (re.compile(r"\b(must|should|needs? to)\s+be\s+(bench[- ])?(validated|verified|measured|confirmed|checked)\b|"
+                r"\bbefore\s+(deployment|unattended\s+use|release)\b|\bengineering\s+release\b|\bverification\s+with\b|"
+                r"\brequires?\s+(a\s+)?bench\b", re.I), "info", "is a review note, not a drawing note"),
+    (re.compile(r"\bfirmware\s+(must|should|shall)\b", re.I), "info", "is a firmware requirement"),
+    (re.compile(r"\b(this|the)\s+(sheet|page)\s+(shows|contains|holds|covers)\b|\bare\s+shown\s+on\s+the\b", re.I),
+     "info", "narrates the drawing"),
+]
+
+
+@check("sch.text", "Notes read like an engineer's", "Schematic", needs=("sch",))
+def sch_text(ctx):
+    """The words on the sheets: nothing inside a sheet symbol (it shows its name, file and pins); no notes
+    that talk about the tool, explain how labels work, count parts, or hold review items and firmware
+    requirements (those go in docs/); no wall of prose; supplies and flags drawn with KiCad's own power
+    symbols, not boxes."""
+    out, seen = [], set()
+    for sh in ctx.hier.sheets:
+        sf = sh.sf
+        where = {"sheet": sh.name_path, "file": sh.filename}
+        if sf.path in seen:
+            continue
+        seen.add(sf.path)
+        for c in sh.children:
+            (x, y), (w, hh) = c["at"], c["size"]
+            inside = [t for t in sf.texts if x < t["x"] < x + w and y < t["y"] < y + hh]
+            if inside:
+                out.append(Finding("sch.text", "warning", f"text inside the sheet symbol for {c['name'] or c['file']}: "
+                                   f"\u201c{inside[0]['text'].splitlines()[0][:60]}\u201d", {**where, "x": inside[0]["x"], "y": inside[0]["y"]},
+                                   hint="A sheet symbol shows its name, its file and its pins. Say what the sheet holds on "
+                                        "that sheet, or in the cover's contents list.", key=f"text:insheet:{sf.path}:{c['path']}"))
+        total = 0
+        for t in sf.texts:
+            body = t["text"]
+            total += len(body)
+            for rx, sev, why in NARRATION:
+                m = rx.search(body)
+                if m:
+                    line = next((l for l in body.splitlines() if rx.search(l)), body)[:90]
+                    out.append(Finding("sch.text", sev, f"note {why}: \u201c{line.strip()}\u201d", {**where, "x": t["x"], "y": t["y"]},
+                                       hint="Keep notes to what the drawing cannot show: why a value, a rating, a layout "
+                                            "constraint, a short numbered list of general notes. Review items, firmware rules "
+                                            "and background go in docs/.", key=f"text:{why[:12]}:{sf.path}:{t['x']:.1f}:{t['y']:.1f}"))
+                    break
+            longest = max((len(l) for l in body.splitlines()), default=0)
+            if longest > 110:
+                out.append(Finding("sch.text", "info", f"a {longest}-character line of text", {**where, "x": t["x"], "y": t["y"]},
+                                   hint="A schematic note is a line or two beside what it explains.",
+                                   key=f"text:long:{sf.path}:{t['x']:.1f}:{t['y']:.1f}"))
+        long_notes = [t for t in sf.texts if len(t["text"]) > 40]
+        if total > 1400 or len(long_notes) > 10:
+            out.append(Finding("sch.text", "info", f"{len(sf.texts)} notes, {total} characters, on one sheet", where,
+                               hint="This reads like a document. Keep the cover to what the board is, the sheet list, a short "
+                                    "numbered list of general notes and the revisions; the rest belongs in docs/.",
+                               key=f"text:wall:{sf.path}"))
+        for s_ in sh.symbols:
+            if s_.ref.startswith("#FLG") and s_.lib and any(k == "rectangle" for _, _, k, _ in s_.lib.graphics):
+                out.append(Finding("sch.text", "warning", f"{s_.ref} is a box standing in for PWR_FLAG", {**where, "ref": s_.ref},
+                                   hint="Use KiCad's power:PWR_FLAG: a small flag on the supply wire it marks.",
+                                   key=f"text:flag:{s_.ref}"))
     return out
 
 

@@ -26,8 +26,12 @@ source: research 2026-09-26 -- IEEE 315 / ASME Y14.44 / IPC-2612-1 / IEC 60062, 
   Wires that cross without a dot are not connected.
 - **Power symbols** for rails and ground, never long supply wires across the sheet.
 - On busy ICs and connectors, a **short stub and a local net label** on each pin beats a long wire.
-  **Hierarchical labels** (sheet pins) carry signals between sheets so the structure shows which
-  signals cross which sheets; global labels are for power only.
+- **Between sheets, one way per project** (the project's schematic style, chosen in the Schematic tab):
+  *hierarchical* -- sheet pins and hierarchical labels, so the parent sheet shows which signals cross
+  which sheets (a straight wire between facing sheet pins, a short stub and label where they don't
+  face); or *flat* -- pages joined by global labels of the same name. Supplies are power symbols in
+  both, never global labels or sheet pins. `./tw style` redraws one as the other and proves the
+  netlist unchanged.
 - **Net names**: UPPERCASE with underscores (I2C_SDA, SPI_MOSI, USB_D_P / USB_D_N for a pair);
   active-low with the overbar on the library pin name (~{RESET}) and a trailing _N on the net
   (RESET_N) -- one convention per project; buses as prefix + index (D0..D7). Labels read left to
@@ -58,9 +62,32 @@ source: research 2026-09-26 -- IEEE 315 / ASME Y14.44 / IPC-2612-1 / IEC 60062, 
 - **General notes** on the cover apply unless a local note says otherwise ("Resistors 0402 1 %,
   capacitors 0402 X7R 16 V, unless noted").
 
+**What text belongs on a schematic** (the `sch.text` check reads every note)
+- Write what the drawing cannot show, the way an engineer marks up a sheet: a value's reason
+  ("Rset 2k0: 500 mA charge"), a rating ("25 V: 12 V input + surge"), a layout constraint ("Kelvin to
+  R12 pads"), a fitted option ("DNP: fit for 5 V I/O"). One or two short lines, beside the part.
+- The cover holds the board's name and one line on what it is, the sheet list, a short numbered list
+  of general notes, and the revisions. It is not a README.
+- Never on a sheet: instructions for the tool ("open to inspect", "click"), explanations of how
+  schematics work ("global labels with the same name are connected", "NC marks are unused pins"),
+  part or page counts, review checklists and verification disclaimers ("must be bench-validated
+  before deployment"), firmware requirements, restated requirements, or narration ("this sheet
+  shows ..."). Those go in docs/ (requirements.md, decisions.md, bring-up.md).
+- Nothing inside a sheet symbol: it shows its name, file and pins; the sheet itself says what it
+  holds.
+- KiCad's own symbols for supplies and flags: power:PWR_FLAG is a small flag on the supply wire,
+  never a box drawn to stand in for it.
+
+Bad cover note: "PROTOTYPE REV A: electrical and mechanical verification with the actual loads is
+required before deployment." Good: nothing -- the revision is in the title block and the
+verification plan is in docs/bring-up.md. Bad: "Sheet 3 / 34 components -- open to inspect named
+pin-to-net connections." (inside a sheet symbol). Good: the sheet symbol, its name and its pins.
+
 The `sch.style` check enforces what can be checked from the files: custom colours and filled shapes
 (notes), four-way junctions, upside-down ground and supply symbols, text under 1 mm, missing title
-block fields, and designator letters that do not match the part. The worked example is
+block fields, designator letters that do not match the part, and signals crossing sheets the way the
+project's style does not. `sch.text` reads the notes, and `sch.render` finds text over wires, pins
+and other text on the plotted sheets. The worked example is
 `tools/tw/examples/demo_board.py`.
 
 Sources: Zuken "4 rules for better PCB schematics"; HMC "How to draw circuits"; Sierra Circuits

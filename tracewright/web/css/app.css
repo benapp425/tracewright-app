@@ -1855,3 +1855,8 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .gd-price { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
 .gd-total { display: flex; justify-content: space-between; align-items: baseline; padding-top: 10px; border-top: 1px solid var(--line-2); font-size: 12.5px; color: var(--text-2); }
 .gd-total b { font-size: 14px; color: var(--text); }
+
+/* ------------------------------------------------------------------ schematic style */
+.tbtn.style-pick { width: auto; gap: 6px; padding: 0 8px 0 7px; font-size: 12px; font-weight: 550; }
+.tbtn.style-pick.busy { opacity: .6; pointer-events: none; }
+.menu-note { max-width: 250px; padding: 4px 10px 6px; font-size: 11.5px; line-height: 1.45; color: var(--text-3); white-space: normal; }

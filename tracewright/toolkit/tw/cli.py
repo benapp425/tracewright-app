@@ -19,6 +19,9 @@
   fill                       refill copper zones
   silk [--dry-run]           move silk reference designators off pads, other silk and the edge
   pcb OPS.json               apply a list of board operations (see tw/pcb/ops.py)
+  style [flat|hierarchical] [--dry-run]
+                             how the sheets are joined; redraw them the other way (sheet pins and
+                             hierarchical labels, or global labels), checked against KiCad's netlist
 """
 import os, sys, json, argparse
 
@@ -212,6 +215,39 @@ def cmd_route(a):
     print(json.dumps(res.get("summary", res), indent=1))
 
 
+def cmd_style(a):
+    from tw.sch import style
+    p = env.project()
+    if not p.has_sch():
+        print("no schematic yet")
+        return 1
+    want = (p.cfg.get("schematic") or {}).get("style")
+    if not a.style:
+        d = style.detect(p.sch)
+        print(f"style     {d['style']}" + (f"  (project setting: {want})" if want else ""))
+        print(f"sheets    {d['sheets']}: {d['sheet_pins']} sheet pins, {d['hierarchical_labels']} hierarchical labels, "
+              f"{d['global_labels']} global labels")
+        if d["crossing"]:
+            print("across sheets by global label: " + ", ".join(d["crossing"][:16]) + (" ..." if len(d["crossing"]) > 16 else ""))
+        if d["reused"]:
+            print("sheets used more than once: " + ", ".join(d["reused"]))
+        return 0
+    r = style.convert(p.sch, a.style, write=not a.dry_run)
+    print(r["message"])
+    rep = r.get("report") or {}
+    for k, v in rep.items():
+        if v and k not in ("stale_notes",):
+            print(f"  {k.replace('_', ' ')}: {v if not isinstance(v, (list, dict)) else json.dumps(v)[:300]}")
+    for n in rep.get("stale_notes") or []:
+        print(f"  note that may be out of date: {n}")
+    if r["ok"] and not a.dry_run:
+        p.cfg.setdefault("schematic", {})["style"] = a.style
+        p.save_cfg()
+        if r["changed"]:
+            kicad.netlist(p.sch, os.path.join(p.build, f"{p.stem}.net"))
+    return 0 if r["ok"] else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tw", description=f"Tracewright toolkit {__version__}")
     sub = ap.add_subparsers(dest="cmd")
@@ -259,6 +295,9 @@ def main(argv=None):
     rt.add_argument("--engine", default="grid", choices=["grid", "freerouting"])
     rt.add_argument("--clear", action="store_true")
     rt.add_argument("--dry-run", action="store_true")
+    st = sub.add_parser("style")
+    st.add_argument("style", nargs="?", choices=["flat", "hierarchical"])
+    st.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
