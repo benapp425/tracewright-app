@@ -2,7 +2,8 @@
  *
  * State = (layer, cell, arrival direction); direction 8 = "none" (a source, or just arrived by via).
  * Same cost model as the Python reference in router.py:
- *   step 10 orthogonal / DG diagonal, x layer factor, x bcu_cross for non-x moves on B.Cu,
+ *   step 10 orthogonal / DG diagonal, x layer factor, x bcu_cross for non-x moves on B.Cu, x fcu_cross for
+ *   non-y moves on F.Cu,
  *   + cell cost (congestion / history, per layer) scaled by the step length,
  *   bends: 45 deg -> bend45, 90 deg -> bend90, sharper turns forbidden,
  *   via: via_cost (+ cell cost of the landing cell); needs lv[cell] and a legal cell on the other layer,
@@ -69,7 +70,7 @@ long astar(int nx, int ny,
            int ti0, int ti1, int tj0, int tj1,   /* target bounding box, for the heuristic */
            int wi0, int wi1, int wj0, int wj1,
            float bend45, float bend90, float via_cost, float fcu_factor, float bcu_cross,
-           float hweight, int allow_vias, long max_expand,
+           float fcu_cross, float hweight, int allow_vias, long max_expand,
            int32_t *out, long out_cap)
 {
     const long N = (long)nx * ny;
@@ -133,7 +134,8 @@ long astar(int nx, int ny,
                 if (!(ltl[idx + DX[nd]] && ltl[idx + (long)DY[nd] * nx])) continue;
             }
             float c = step[nd] * lfac[l];
-            if (l == 1 && nd != 0 && nd != 4) c *= bcu_cross;
+            if (l == 1 && nd != 0 && nd != 4) c *= bcu_cross;      /* B.Cu prefers runs along x */
+            if (l == 0 && nd != 2 && nd != 6) c *= fcu_cross;      /* F.Cu along y, when asked (1 = no preference) */
             if (cc) c += cc[l * N + ni] * step[nd] * 0.1f;
             long ns = ((long)l * WN + WIDX(ni)) * 9 + nd;
             float ng = gs + c + bend;

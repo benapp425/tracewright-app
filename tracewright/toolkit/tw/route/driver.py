@@ -13,6 +13,7 @@ Two signal layers (F.Cu, B.Cu): inner layers are taken to be planes. `on_progres
 every net so the caller can show routing as it happens.
 """
 import math, time, collections
+import numpy as np
 from .. import env, geom
 from ..board import Board
 from ..pro import ProjectSettings
@@ -20,6 +21,10 @@ from . import router as R
 
 VIA_COST = 1000.0          # a via costs as much as 10 mm of track: change layer to reach a pin or cross a bus
 CHEAP_VIA = 500.0
+V2_FCU_CROSS = 1.10        # F.Cu along y (B.Cu along x already); off by default: longer routes on SMD boards
+PAIR_K = 25.0              # v2: cost a cell for a pair's second half away from its partner's side
+REFINE_MIN_S = 20.0        # v2: the second look's time budget is the routing time, at least this
+HIST_AMOUNT = 40.0         # PathFinder history added to contested cells at each rip-up
 
 
 def dump_for_router(b):
@@ -180,8 +185,13 @@ def islands(B, Rt, net, pads, existing):
 
 
 class GridRoute:
-    def __init__(self, project=None, nets=None, clear=False, on_progress=None, via_cost=VIA_COST, log=print):
+    def __init__(self, project=None, nets=None, clear=False, on_progress=None, via_cost=VIA_COST, log=print, v2=None,
+                 layer_dirs=None, cleanup=None):
         self.p = project or env.project()
+        self.v2 = bool(v2)
+        self.layer_dirs = False if layer_dirs is None else layer_dirs      # measured: longer routes on SMD boards
+        self.do_cleanup = self.v2 if cleanup is None else cleanup
+        self.couple = self.v2
         self.b = Board.load(self.p.pcb)
         self.pro = ProjectSettings.load(self.p.pro) if self.p.pro else ProjectSettings({})
         self.only = set(nets) if nets else None
@@ -190,6 +200,7 @@ class GridRoute:
         self.log = log
         self.via_cost = via_cost
         self.failed = {}
+        self.hist_amount = HIST_AMOUNT
 
     def _net_ok(self, n):
         if not n or n.startswith("unconnected-"):
@@ -236,6 +247,8 @@ class GridRoute:
             B.stamp_via(v["net"], v["pos"], v["d"])
         B.snapshot()
         Rt = R.Router(B, via=self.via_cost)
+        if self.layer_dirs:                           # layer directions: F.Cu runs along y, B.Cu along x
+            Rt.fcu_cross = V2_FCU_CROSS
         Rt._prof_of = {n: self.net_class.get(n, "Default") for n in nets}
         self.B, self.Rt = B, Rt
         self.planes = plane_nets(b)
@@ -356,7 +369,7 @@ class GridRoute:
         return made
 
     # ------------------------------------------------------------------ routing
-    def route_job(self, job, keep_going=False):
+    def route_job(self, job, keep_going=False, allow_vias=True, cell_cost=None):
         B, Rt = self.B, self.Rt
         isl = islands(B, Rt, job.net, job.pads, {"tracks": [t for t in self.dump["tracks"]],
                                                   "vias": self.dump["vias"]})
@@ -369,7 +382,7 @@ class GridRoute:
         while rest:
             nxt = min(rest, key=lambda g: min(geom.dist(a, q) for a in g[1] for q in pts))
             rest.remove(nxt)
-            rec = Rt.connect(job.net, job.prof, tree, nxt[0], fcu_factor=job.fcu)
+            rec = Rt.connect(job.net, job.prof, tree, nxt[0], fcu_factor=job.fcu, allow_vias=allow_vias, cell_cost=cell_cost)
             if rec is None:
                 fail = (list(tree), nxt[0], f"({nxt[1][0][0]:.1f}, {nxt[1][0][1]:.1f})")
                 if not keep_going:
@@ -394,20 +407,89 @@ class GridRoute:
     def run(self, max_rips=6):
         t0 = time.time()
         B, Rt = self.B, self.Rt
-        n_esc = self.escapes()
+        n_esc = self.n_esc = self.escapes()
         if n_esc:
             self.log(f"  {n_esc} escape vias to the planes")
         jobs = self.jobs()
         by_net = {j.net: j for j in jobs}
+        self.by_pads = {j.net: j.pads for j in jobs}
+        pairs = self.pairs(jobs) if self.couple else {}
         queue = [j.net for j in jobs]
+        if pairs:                                       # a pair routes together, as soon as its first half is due
+            q2, seen = [], set()
+            for n in queue:
+                if n in seen:
+                    continue
+                q2.append(n)
+                seen.add(n)
+                m = pairs.get(n)
+                if m in by_net and m not in seen:
+                    q2.append(m)
+                    seen.add(m)
+            queue = q2
+        self.coupled = {}
         rips, failed = {}, {}
-        done = 0
         total = len(jobs)
+        done = self._negotiate(queue, by_net, pairs, rips, failed, 0, total, max_rips)
+        if failed and self.v2:
+            done = self.second_chance(by_net, pairs, failed, done, total, max_rips)
+        self._finish_run(t0, failed, total)
+        return self._result(t0, failed, total)
+
+    def _negotiate(self, queue, by_net, pairs, rips, failed, done, total, max_rips):
+        """Route the queue, ripping up whatever stands in a net's way and routing that again after it
+        (PathFinder history makes contested copper dearer each time); a net that has ripped others
+        max_rips times gets cheaper vias, then is left failed. Returns the routed count."""
+        B, Rt = self.B, self.Rt
         while queue:
             net = queue.pop(0)
             job = by_net[net]
             before = len(Rt.routes)
-            fail = self.route_job(job)
+            cc = None
+            mate = pairs.get(net)
+            if mate and any(r["net"] == mate for r in Rt.routes):
+                cc = self.corridor(net, mate, job.prof)
+            fail = self.route_job(job, cell_cost=cc)
+            if fail is not None and cc is not None:      # no room beside its partner: route it on its own
+                Rt.rip([net])
+                Rt.rebuild()
+                fail = self.route_job(job)
+                cc = None
+            if fail is not None and mate in by_net and any(r["net"] == mate for r in Rt.routes) and not job.__dict__.get("swapped"):
+                # the partner walled it in (a USB-C receptacle's D- pads sit between the D+ pads): route this
+                # half first, then the partner beside it, the way the breakout is drawn by hand
+                Rt.rip([net, mate])
+                Rt.rebuild()
+                job.swapped = by_net[mate].swapped = True
+                if self.route_job(job) is None:
+                    cc2 = self.corridor(mate, net, by_net[mate].prof)
+                    if self.route_job(by_net[mate], cell_cost=cc2) is None:
+                        self.coupled[mate] = net
+                        fail = None
+                        recs = [r for r in Rt.routes[before:] if r["net"] in (net, mate)]
+                        done += 1
+                        self._emit("routed", mate, {"segments": [sg for r in recs if r["net"] == mate for sg in r["segments"]],
+                                                    "vias": [v for r in recs if r["net"] == mate for v in r["vias"]]},
+                                   done=done, total=total, note="pair routed together")
+                    else:
+                        Rt.rip([mate])
+                        Rt.rebuild()
+                        if self.route_job(by_net[mate]) is None:
+                            fail = None
+                        else:
+                            Rt.rip([net, mate])
+                            Rt.rebuild()
+                            fail = self.route_job(job)
+                            queue.insert(0, mate)
+                else:
+                    Rt.rip([net])
+                    Rt.rebuild()
+                    queue.insert(0, mate)
+                    fail = self.route_job(job)
+            if fail is None and cc is not None:
+                self.coupled[net] = mate
+            elif fail is None and net in self.coupled and not job.__dict__.get("swapped"):
+                self.coupled.pop(net, None)
             if fail is None:
                 failed.pop(net, None)
                 done += 1
@@ -450,24 +532,272 @@ class GridRoute:
                 queue.insert(0, net)
                 continue
             who = sorted(w for w in who if w in by_net)
-            Rt.add_history(Rt.last_taken)
+            Rt.add_history(Rt.last_taken, amount=self.hist_amount)
             Rt.rip(who)
             Rt.rebuild()
             for w in who:
                 self._emit("ripped", w, by=net)
                 done = max(0, done - 1)
             queue = [net] + who + [q for q in queue if q not in who and q != net]
+        return done
+
+    def _finish_run(self, t0, failed, total):
         self.failed = failed
-        n_stitch = self.stitch() if self.planes else 0
-        if n_stitch:
-            self.log(f"  {n_stitch} stitching vias")
+        if self.do_cleanup:
+            self._pair_mates = set(self.coupled.values())
+            # the second look takes at most as long again as the routing did (20 s at least)
+            n_better = self.refine(budget=max(REFINE_MIN_S, time.time() - t0)) if self.v2 else self.cleanup()
+            self.straightened = n_better
+            if n_better:
+                self.log(f"  {n_better} nets straightened on a second pass")
+            if getattr(self, "refine_left", 0):
+                self.log(f"  {self.refine_left} nets left as routed (time)")
+        self.n_stitch = self.stitch() if self.planes else 0
+        if self.n_stitch:
+            self.log(f"  {self.n_stitch} stitching vias")
+
+    def _result(self, t0, failed, total):
+        Rt, n_esc, n_stitch = self.Rt, self.n_esc, self.n_stitch
         segs = [(r["net"], s) for r in Rt.routes if not r.get("fixed") for s in r["segments"]]
         vias = [(r["net"], v) for r in Rt.routes if not r.get("fixed") for v in r["vias"]]
         length = sum(geom.dist(a, b) for _, (l, a, b, w) in segs)
         summary = {"nets": total, "routed": total - len(failed), "failed": failed, "tracks": len(segs), "vias": len(vias),
                    "length_mm": round(length, 1), "seconds": round(time.time() - t0, 1), "escapes": n_esc,
-                   "stitching_vias": n_stitch, "neck_areas": [ref for ref, _ in self.necks]}
+                   "stitching_vias": n_stitch, "neck_areas": [ref for ref, _ in self.necks],
+                   "coupled_pairs": self._coupled_pairs(),
+                   "straightened": getattr(self, "straightened", 0), "left_as_routed": getattr(self, "refine_left", 0)}
         return summary, segs, vias
+
+    def _coupled_pairs(self):
+        """[(a, b, coupling)] once per pair: the coupling of the half routed beside the other."""
+        out, seen = [], set()
+        for a, b in sorted(getattr(self, "coupled", {}).items()):
+            k = frozenset((a, b))
+            if k in seen or not any(r["net"] == a for r in self.Rt.routes) or not any(r["net"] == b for r in self.Rt.routes):
+                continue
+            seen.add(k)
+            out.append((a, b, round(self.coupling(a, b), 2)))
+        return out
+
+    def second_chance(self, by_net, pairs, failed, done, total, max_rips):
+        """Nets that lost the negotiation (two nets taking turns to rip each other up until one ran out of
+        tries) get one more round on the board as it stands: a renewed rip budget, and contested copper
+        weighed three times as much, so the loser's rivals look for another way. Kept only if more nets
+        end up routed; otherwise the board goes back to how it was."""
+        Rt = self.Rt
+        lost = sorted(n for n in failed if "no path even on the fixed copper" not in str(failed[n]))
+        if not lost:                                    # walled in by pads and keepouts: rip-up cannot help
+            return done
+        saved = (list(Rt.routes), dict(failed), dict(self.coupled), Rt.hist.copy(), Rt.use_hist, done)
+        Rt.rip(lost)                                    # their partial copper
+        Rt.rebuild()
+        for n in lost:
+            failed.pop(n, None)
+        self.hist_amount = 3 * HIST_AMOUNT
+        try:
+            done = self._negotiate(list(lost), by_net, pairs, {}, failed, done, total, max_rips)
+        finally:
+            self.hist_amount = HIST_AMOUNT
+        if len(failed) < len(saved[1]):
+            self.log(f"  second chance: {len(saved[1]) - len(failed)} of {len(saved[1])} failed nets routed")
+            return done
+        Rt.routes, Rt.hist, Rt.use_hist = saved[0], saved[3], saved[4]
+        Rt.rebuild()
+        failed.clear()
+        failed.update(saved[1])
+        self.coupled = saved[2]
+        for n in lost:                                  # the live view shows the board as it was
+            recs = [r for r in Rt.routes if r["net"] == n and not r.get("fixed")]
+            self._emit("failed", n, {"segments": [sg for r in recs for sg in r["segments"]],
+                                     "vias": [v for r in recs for v in r["vias"]]}, where=failed[n], done=saved[5], total=total)
+        return saved[5]
+
+    # ------------------------------------------------------------------ v2: a second look
+    def _cost(self, recs):
+        length = sum(geom.dist(a, b) for r in recs for (_, a, b, _) in r["segments"])
+        return length + sum(len(r["vias"]) for r in recs) * self.Rt.via_cost / 100.0      # a via as its mm of track
+
+    def pairs(self, jobs):
+        """{net: partner} for interface pairs (USB, MIPI, HDMI, Ethernet ...) among the jobs."""
+        from ..checks.signal import find_pairs, pair_kind
+        out = {}
+        for a, b in find_pairs([j.net for j in jobs]):
+            if pair_kind(a):
+                out[a], out[b] = b, a
+        return out
+
+    def corridor(self, net, mate, prof):
+        """A cost field for the second half of a pair: free in a band at the pair's pitch beside the first
+        half's route, PAIR_K a cell everywhere else, so the two run side by side."""
+        B, Rt = self.B, self.Rt
+        recs = [[sg for sg in r["segments"] if sg[0] in R.LAYERS] for r in Rt.routes if r["net"] == mate]
+        recs = [r for r in recs if r]
+        if not recs:
+            return None
+        pitch, tol = self.pair_pitch(net, mate, prof)
+        cc = np.full(len(R.LAYERS) * B.N, PAIR_K, dtype=np.float32)
+        mine = [tuple(p["pos"]) for p in self.by_pads.get(net, [])]
+        cross = lambda a, b, x, y: (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+        for segs in recs:
+            # one side of the partner for the whole of its route: the side this half's pads are on, each
+            # judged against the partner's track nearest to it (both sides when the ends disagree: the
+            # pair has to cross once)
+            vote = 0.0
+            for q in mine:
+                _, a, b, _ = min(segs, key=lambda sg: geom.seg_point_dist(q, sg[1], sg[2]))
+                if geom.dist(a, b) > 1e-6:
+                    vote += np.sign(cross(a, b, *q)) / (1.0 + geom.seg_point_dist(q, a, b))
+            s0 = float(np.sign(vote)) if abs(vote) > 0.05 else 0.0
+            for lname, a, b, _ in segs:
+                l = R.LAYERS.index(lname)
+                pad = pitch + tol + 0.3
+                j0, i0 = B.cell(min(a[0], b[0]) - pad, min(a[1], b[1]) - pad)
+                j1, i1 = B.cell(max(a[0], b[0]) + pad, max(a[1], b[1]) + pad)
+                j0, i0, j1, i1 = max(0, j0), max(0, i0), min(B.ny - 1, j1), min(B.nx - 1, i1)
+                X, Y = B.GX[j0:j1 + 1, i0:i1 + 1], B.GY[j0:j1 + 1, i0:i1 + 1]
+                d = R._seg_dist(X, Y, a[0], a[1], b[0], b[1])
+                band = (d >= pitch - R.RES * 0.5) & (d <= pitch + tol)
+                if s0 and geom.dist(a, b) > 1.0:
+                    band &= np.sign(cross(a, b, X, Y)) == s0
+                jj, ii = np.nonzero(band)
+                cc[l * B.N + (jj + j0) * B.nx + (ii + i0)] = 0.0
+        return cc
+
+    def pair_pitch(self, net, mate, prof):
+        """Centre-to-centre distance of the pair's two tracks: the class's pair gap, or the closest the
+        clearance allows when that is wider (the router keeps every net at its clearance); and the band's
+        width beyond it (three grid cells)."""
+        B = self.B
+        c = self.pro.cls(self.net_class.get(net, "Default"))
+        w = B.profiles[prof].w
+        wm = B.profiles[self.net_class.get(mate, "Default")].w if self.net_class.get(mate) in B.profiles else w
+        gap = max(float(c.get("diff_pair_gap") or 0.0), B.profiles[prof].cl)
+        return w / 2 + wm / 2 + gap + R.RES, 3 * R.RES
+
+    def coupling(self, net, mate):
+        """How much of `net`'s track runs beside its partner at the pair's pitch (0..1)."""
+        Rt = self.Rt
+        mine = [sg for r in Rt.routes if r["net"] == net for sg in r["segments"]]
+        theirs = [sg for r in Rt.routes if r["net"] == mate for sg in r["segments"]]
+        if not mine or not theirs:
+            return 0.0
+        pitch, tol = self.pair_pitch(net, mate, self.net_class.get(net, "Default"))
+        tol += R.RES
+        near = total = 0.0
+        for l, a, b, _ in mine:
+            L = geom.dist(a, b)
+            n = max(1, int(L / 0.2))
+            for k in range(n):
+                t = (k + 0.5) / n
+                q = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                dmin = min((geom.seg_point_dist(q, x, y) for l2, x, y, _ in theirs if l2 == l), default=9e9)
+                total += L / n
+                if abs(dmin - pitch) <= tol:
+                    near += L / n
+        return near / total if total else 0.0
+
+    def refine(self, budget=None):
+        """A second look at the nets a reviewer would query, each rerouted with everything else in place
+        and kept only when it costs less (length, and a via as 10 mm of track): a net with vias is tried
+        on one layer first, then as before; a net that wanders (over 1.4x its shortest length) again.
+        The worst go first; budget (seconds) stops the pass, leaving the rest as they were."""
+        Rt = self.Rt
+        t_end = time.time() + budget if budget else None
+        by_net = {j.net: j for j in self.jobs()}
+        pads = collections.defaultdict(list)
+        for p in self.dump["pads"]:
+            if p["net"]:
+                pads[p["net"]].append(tuple(p["pos"]))
+        from ..checks.layout_quality import _mst
+        cur = {}
+        for r in Rt.routes:
+            if not r.get("fixed") and r["net"] in by_net:
+                cur.setdefault(r["net"], []).append(r)
+        todo = []
+        mates = getattr(self, "_pair_mates", set())
+        for n, recs in cur.items():
+            # the half a partner was routed beside may move only along its partner; the partner stays
+            if n in self.failed or (n in mates and n not in self.coupled):
+                continue
+            vias = sum(len(r["vias"]) for r in recs)
+            length = sum(geom.dist(a, b) for r in recs for (_, a, b, _) in r["segments"])
+            m = _mst(pads[n]) or 1.0
+            if vias or length / m > 1.4:
+                todo.append((-(vias * 10 + length / m), n))
+        better = 0
+        self.refine_left = 0
+        for i, (_, net) in enumerate(sorted(todo)):
+            if t_end and time.time() > t_end:
+                self.refine_left = len(todo) - i
+                break
+            old = [r for r in Rt.routes if r["net"] == net and not r.get("fixed")]
+            c0 = self._cost(old)
+            mate = self.coupled.get(net)
+            cc = self.corridor(net, mate, by_net[net].prof) if mate else None
+            k0 = self.coupling(net, mate) if mate else None
+            best = None
+            for vias_ok in ((False, True) if any(r["vias"] for r in old) else (True,)):
+                Rt.rip([net])
+                Rt.rebuild()
+                n0 = len(Rt.routes)
+                fail = self.route_job(by_net[net], allow_vias=vias_ok, cell_cost=cc)
+                new = [r for r in Rt.routes[n0:] if r["net"] == net]
+                ok = fail is None and new and self._cost(new) < (best[0] if best else c0) - 0.5
+                if ok and mate:                         # still beside its partner
+                    ok = self.coupling(net, mate) >= k0 - 0.05
+                if ok:
+                    best = (self._cost(new), new)
+                Rt.rip([net])
+            Rt.routes += best[1] if best else old
+            Rt.rebuild()
+            if best:
+                better += 1
+        return better
+
+    def cleanup(self, rounds=2):
+        """Each routed net ripped and routed again with everything else in place, worst detour first; the
+        new route is kept when it costs less (length, and a via as 10 mm). Nets routed early did not know
+        the later ones, later ones went round the earlier: a second look straightens both."""
+        Rt = self.Rt
+        by_net = {j.net: j for j in self.jobs()}
+        pads = collections.defaultdict(list)
+        for p in self.dump["pads"]:
+            if p["net"]:
+                pads[p["net"]].append(tuple(p["pos"]))
+        from ..checks.layout_quality import _mst
+        mst = {n: _mst(pads[n]) or 1.0 for n in by_net}
+        better = 0
+        for _ in range(rounds):
+            cur = {}
+            for r in Rt.routes:
+                if not r.get("fixed") and r["net"] in by_net:
+                    cur.setdefault(r["net"], []).append(r)
+            order = sorted(cur, key=lambda n: -self._cost(cur[n]) / mst[n])
+            # only what could improve: a detour, or a layer change a straight run might not need
+            order = [n for n in order if self._cost(cur[n]) / mst[n] > 1.25 or any(r["vias"] for r in cur[n])]
+            changed = 0
+            for net in order:
+                if net in self.failed:
+                    continue
+                old = [r for r in Rt.routes if r["net"] == net and not r.get("fixed")]
+                if not old:
+                    continue
+                c0 = self._cost(old)
+                Rt.rip([net])
+                Rt.rebuild()
+                n0 = len(Rt.routes)
+                fail = self.route_job(by_net[net])
+                new = [r for r in Rt.routes[n0:] if r["net"] == net]
+                if fail is None and new and self._cost(new) < c0 - 0.5:
+                    changed += 1
+                    continue
+                Rt.rip([net])
+                Rt.routes += old
+                Rt.rebuild()
+            better += changed
+            if not changed:
+                break
+        return better
 
     def ops(self, segs, vias):
         ops = []
@@ -490,13 +820,17 @@ class GridRoute:
         return ops
 
 
-def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_progress=None, live="auto", log=print):
-    """Route and (by default) write the copper to the board. Returns {'summary', 'apply'}."""
+def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_progress=None, live="auto", log=print, v2=None):
+    """Route and (by default) write the copper to the board. Returns {'summary', 'apply'}. v2: pairs routed
+    together (the enclosed half first, the other beside it) and a second look at nets with vias or
+    detours; the default follows tracewright.json route.v2 (on unless set false)."""
     project = project or env.project()
     if engine == "freerouting":
         from . import freerouting
         return freerouting.route(project, on_progress=on_progress, log=log)
-    g = GridRoute(project, nets=nets, clear=clear, on_progress=on_progress, log=log).setup()
+    if v2 is None:
+        v2 = ((getattr(project, "cfg", None) or {}).get("route") or {}).get("v2", True)
+    g = GridRoute(project, nets=nets, clear=clear, on_progress=on_progress, log=log, v2=v2).setup()
     summary, segs, vias = g.run()
     out = {"summary": summary}
     if apply and (segs or vias or clear):

@@ -28,6 +28,58 @@ def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+# Claude Code ends a turn with "You've hit your session limit · resets 5:10am (America/Chicago)" (or a
+# weekly one, "resets Oct 3, 9am (...)") when the account's usage runs out.
+LIMIT_RE = re.compile(r"\b(hit|reached|out of)\b[^.\n]{0,40}\blimit\b|\busage limit\b|\blimit reached\b", re.I)
+RESET_RE = re.compile(r"resets?\s+(?:at\s+)?(?:(?P<mon>[A-Za-z]{3,9})\.?\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?"
+                      r"(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap])\.?m\.?(?:\s*\((?P<tz>[^)]+)\))?", re.I)
+LIMIT_MARGIN_S = 90.0          # resume this long after the reset time, in case the clocks differ
+LIMIT_UNKNOWN_S = 30 * 60.0    # when the message names no time, try again after this long
+LIMIT_MAX_WAITS = 8            # waits in a row before an unattended run gives up
+RESUME_TEXT = "Carry on from where you stopped."
+RESUME_HIDDEN = ("The account's usage limit stopped your last turn part-way; it has reset now. Carry on from where "
+                 "you stopped: check the agenda and the files for what is already done, and don't redo finished work.")
+
+
+def is_limit(text):
+    return bool(text and LIMIT_RE.search(text))
+
+
+def limit_reset(text, now=None):
+    """The epoch time the account's usage limit resets, read from Claude Code's message; None when the
+    text is not about a limit or names no time. A time already past by a few minutes means now."""
+    import datetime as dt
+    if not is_limit(text):
+        return None
+    m = RESET_RE.search(text)
+    if not m:
+        return None
+    tz = None
+    if m.group("tz"):
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(m.group("tz").strip())
+        except Exception:
+            tz = None
+    t0 = time.time() if now is None else now
+    cur = dt.datetime.fromtimestamp(t0, tz) if tz else dt.datetime.fromtimestamp(t0).astimezone()
+    h = int(m.group("h")) % 12 + (12 if m.group("ap").lower() == "p" else 0)
+    mi = int(m.group("m") or 0)
+    try:
+        if m.group("mon"):
+            month = dt.datetime.strptime(m.group("mon")[:3].title(), "%b").month
+            cand = cur.replace(month=month, day=int(m.group("day")), hour=h, minute=mi, second=0, microsecond=0)
+            if cand < cur - dt.timedelta(days=2):
+                cand = cand.replace(year=cand.year + 1)
+        else:
+            cand = cur.replace(hour=h, minute=mi, second=0, microsecond=0)
+            if cand < cur - dt.timedelta(minutes=20):
+                cand += dt.timedelta(days=1)
+    except ValueError:
+        return None
+    return max(cand.timestamp(), t0)
+
+
 class Session:
     """One conversation (our transcript + the SDK's session id for resume)."""
 
@@ -78,6 +130,9 @@ class AgentManager:
         self.steered = False       # a note went to the CLI during this turn (a stop then also ends its queue)
         self.stopping = False
         self.stop_asked = False        # Stop pressed while a turn was still starting
+        self.resume_at = None          # an unattended run waiting for the usage limit to reset: when it carries on
+        self._resume_h = None
+        self.limit_waits = 0
         self._snap_lock = asyncio.Lock()
         self.allowed = set(self._load_allowed())
         self._lock = asyncio.Lock()
@@ -380,12 +435,14 @@ class AgentManager:
         self.tasks = {}
 
     # ------------------------------------------------------------------ a turn
-    async def send(self, text, sid=None, attachments=None, title=None, images=None, hidden=None):
+    async def send(self, text, sid=None, attachments=None, title=None, images=None, hidden=None, by=None):
         """Start a turn. images: PNG files sent with the message (review snapshots), which Claude
         sees directly. hidden: instructions Claude gets with the message that the chat does not show
         (the kickoff's intake instructions: the user sees their own brief)."""
         if self.busy:
             raise RuntimeError("Claude is still working on the last message (interrupt it first)")
+        if by is None:
+            self.cancel_wait()
         self._drop_steers()
         if sid:
             await self.use_session(sid)
@@ -398,8 +455,53 @@ class AgentManager:
             sess.meta["title"] = text.strip().splitlines()[0][:70] if text.strip() else "Conversation"
         self._save_meta(sess.meta)
         self.stop_asked = False
-        self.task = asyncio.ensure_future(self._turn(sess, text, attachments or [], images or [], hidden))
+        self.task = asyncio.ensure_future(self._turn(sess, text, attachments or [], images or [], hidden, by))
         return sess.sid
+
+    # ------------------------------------------------------------------ the usage limit, unattended
+    def _limit_hit(self, sess, text):
+        """A turn ended on the account's usage limit. Unattended (autonomous, past the intake), nobody is
+        there to say "continue": wait for the reset and carry on. Watched runs just show the message."""
+        if not is_limit(text):
+            self.limit_waits = 0
+            return
+        if not self.rt.p.unattended() or self._resume_h is not None:
+            return
+        self.limit_waits += 1
+        now = time.time()
+        if self.limit_waits > LIMIT_MAX_WAITS:
+            rec = {"kind": "waiting", "until": None, "text": "The usage limit stopped the run again; carry on when it has reset."}
+            sess.append(rec)
+            self.hub.emit("agent.waiting", sid=sess.sid, until=None, text=rec["text"])
+            return
+        when = limit_reset(text, now)
+        until = (when + LIMIT_MARGIN_S) if when else now + LIMIT_UNKNOWN_S
+        self.resume_at = until
+        at = time.strftime("%-I:%M %p", time.localtime(until)).lower().replace(" am", " am").replace(" pm", " pm")
+        rec = {"kind": "waiting", "until": until, "text": f"Usage limit reached. Claude carries on at {at}."}
+        sess.append(rec)
+        self.hub.emit("agent.waiting", sid=sess.sid, until=until, text=rec["text"])
+        sid = sess.sid
+        self._resume_h = asyncio.get_running_loop().call_later(max(1.0, until - now),
+                                                               lambda: asyncio.ensure_future(self._resume(sid)))
+
+    def cancel_wait(self):
+        if self._resume_h is not None:
+            self._resume_h.cancel()
+            self._resume_h = None
+            if self.resume_at and self.session:
+                self.hub.emit("agent.waiting", sid=self.session.sid, until=None, text="")
+        self.resume_at = None
+
+    async def _resume(self, sid):
+        self._resume_h = None
+        self.resume_at = None
+        if self.busy or not self.rt.p.unattended():
+            return
+        try:
+            await self.send(RESUME_TEXT, sid=sid, hidden=RESUME_HIDDEN, by="app")
+        except Exception as e:
+            self.app.log(f"resume after the usage limit: {e}")
 
     async def steer(self, text):
         """A message sent while Claude works, as in Claude Code: the CLI takes it in at Claude's next
@@ -457,12 +559,12 @@ class AgentManager:
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}})
         yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
 
-    async def _turn(self, sess, text, attachments, images=(), hidden=None):
+    async def _turn(self, sess, text, attachments, images=(), hidden=None, by=None):
         hub = self.hub
         tid = uuid.uuid4().hex[:8]
         started = time.time()
-        sess.append({"kind": "user", "text": text, "attachments": attachments, "turn": tid})
-        hub.emit("agent.user", sid=sess.sid, text=text, turn=tid, attachments=attachments)
+        sess.append({"kind": "user", "text": text, "attachments": attachments, "turn": tid, **({"by": by} if by else {})})
+        hub.emit("agent.user", sid=sess.sid, text=text, turn=tid, attachments=attachments, **({"by": by} if by else {}))
         self.steered = False
         hub.emit("agent.status", sid=sess.sid, busy=True, turn=tid, phase="starting")
         starting = True
@@ -630,6 +732,7 @@ class AgentManager:
                 return
             for b in m.content:
                 if isinstance(b, TextBlock) and b.text.strip():
+                    t["last_text"] = b.text
                     sess.append({"kind": "assistant", "text": b.text, "turn": tid})
                     hub.emit("agent.text_done", sid=sess.sid, turn=tid, text=b.text)
                 elif isinstance(b, ToolUseBlock):
@@ -669,6 +772,8 @@ class AgentManager:
             sess.append(rec)
             hub.emit("agent.done", sid=sess.sid, **{k: v for k, v in rec.items() if k != "kind"}, session_cost=sess.meta["cost"])
             follow = not self.stopping and any(st["sent"] for st in self.steers)   # an unread note: the CLI runs it next
+            if not follow and not self.stopping:
+                self._limit_hit(sess, (getattr(m, "result", None) or "") + "\n" + (t.get("last_text") or "") if m.is_error else "")
             if t["auto"]:
                 self._end_turn(t, quiet=follow)
             else:
@@ -718,6 +823,7 @@ class AgentManager:
         return name
 
     async def interrupt(self):
+        self.cancel_wait()
         if self.busy and not self.turn:
             # Still starting (the checkpoint before the message, or connecting to Claude): the turn ends
             # there, before its message reaches Claude. Cancelling it mid-connect could strand the CLI.

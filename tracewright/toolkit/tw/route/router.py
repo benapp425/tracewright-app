@@ -60,7 +60,7 @@ def _lib():
         P8, P32 = (np.ctypeslib.ndpointer(t, flags="C_CONTIGUOUS") for t in (np.uint8, np.int32))
         L.astar.restype = ctypes.c_long
         L.astar.argtypes = ([ctypes.c_int] * 2 + [P8, P8, ctypes.c_void_p, P32, ctypes.c_long, P8] + [ctypes.c_int] * 8
-                            + [ctypes.c_float] * 6 + [ctypes.c_int, ctypes.c_long, P32, ctypes.c_long])
+                            + [ctypes.c_float] * 7 + [ctypes.c_int, ctypes.c_long, P32, ctypes.c_long])
         _LIB = L
     return _LIB
 
@@ -226,10 +226,8 @@ class Board:
         sub[free] = code
         sub[other] = -2
 
-    def stamp(self, net, cls, layers, kind, geom, extra=0.0, via_only=False, block_all_vias=False):
-        """Mark cells near copper of `net` for every profile. kind: 'poly' (list of pts), 'seg'
-        (ax, ay, bx, by, halfwidth), 'circle' (cx, cy, r)."""
-        code = self.code(net) if net else -2
+    def stamp_window(self, cls, kind, geom, extra=0.0):
+        """The cells (j0, j1, i0, i1) a stamp of this copper can touch."""
         if kind == "poly":
             xs = [p[0] for p in geom]; ys = [p[1] for p in geom]
             bb = (min(xs), min(ys), max(xs), max(ys))
@@ -239,8 +237,24 @@ class Board:
         else:
             cx, cy, r = geom
             bb = (cx - r, cy - r, cx + r, cy + r)
-        rmax = max(max(self.clearance(cls, p) + max(pr.hw, pr.vr) for p, pr in self.profiles.items()), 0) + extra + RES
-        j0, j1, i0, i1 = self._window(bb[0] - rmax, bb[1] - rmax, bb[2] + rmax, bb[3] + rmax)
+        key = (cls, extra)
+        rmax = self._rmax.get(key) if hasattr(self, "_rmax") else None
+        if rmax is None:
+            rmax = max(max(self.clearance(cls, p) + max(pr.hw, pr.vr) for p, pr in self.profiles.items()), 0) + extra + RES
+            if not hasattr(self, "_rmax"):
+                self._rmax = {}
+            self._rmax[key] = rmax
+        return self._window(bb[0] - rmax, bb[1] - rmax, bb[2] + rmax, bb[3] + rmax)
+
+    def stamp(self, net, cls, layers, kind, geom, extra=0.0, via_only=False, block_all_vias=False):
+        """Mark cells near copper of `net` for every profile. kind: 'poly' (list of pts), 'seg'
+        (ax, ay, bx, by, halfwidth), 'circle' (cx, cy, r)."""
+        code = self.code(net) if net else -2
+        j0, j1, i0, i1 = self.stamp_window(cls, kind, geom, extra)
+        if kind == "seg":
+            ax, ay, bx, by, h = geom
+        elif kind == "circle":
+            cx, cy, r = geom
         sl = (slice(j0, j1), slice(i0, i1))
         PX, PY = self.GX[sl], self.GY[sl]
         if kind == "poly":
@@ -333,6 +347,13 @@ class Board:
                 self.T[k][li][...] = self.T0[k][li]
                 self.V[k][li][...] = self.V0[k][li]
 
+    def restore_window(self, j0, j1, i0, i1):
+        sl = (slice(j0, j1), slice(i0, i1))
+        for k in self.T:
+            for li in range(len(LAYERS)):
+                self.T[k][li][sl] = self.T0[k][li][sl]
+                self.V[k][li][sl] = self.V0[k][li][sl]
+
     # ---------------------------------------------------------------- legality for one net
     def legal(self, net, prof, static=False):
         """(lt [2, N] uint8 track-legal cells per layer, lv [N] uint8 via-legal cells) for `net`;
@@ -375,7 +396,9 @@ class Router:
         self.hweight, self.margin = hweight, int(margin_mm / RES)
         self.bend45, self.bend90, self.via_cost = bend45, bend90, via
         self.bcu_cross, self.max_expand = bcu_cross, max_expand
+        self.fcu_cross = 1.0                     # v2 sets F.Cu to prefer runs along y (layer directions)
         self.routes = []     # dicts: net, profile, segments [(layer, a, b, w)], vias [(pos, d, drill)], fixed
+        self._on_grid = {}   # id -> (route, its stamp windows): the routed copper the grid holds now
         self.last_status = 0
         self.hist = np.zeros(2 * board.N, dtype=np.float32)    # PathFinder history: cost of contested cells
         self.use_hist = False
@@ -406,7 +429,7 @@ class Router:
         n = _lib().astar(nx, B.ny, np.ascontiguousarray(lt).ravel(), np.ascontiguousarray(lv),
                          cc.ctypes.data if cc is not None else None, src, len(src), tmask,
                          min(ti), max(ti), min(tj), max(tj), wi0, wi1, wj0, wj1,
-                         self.bend45, self.bend90, self.via_cost, fcu_factor, self.bcu_cross, self.hweight,
+                         self.bend45, self.bend90, self.via_cost, fcu_factor, self.bcu_cross, self.fcu_cross, self.hweight,
                          1 if allow_vias else 0, self.max_expand, out, cap)
         self.last_status = int(n)
         if n <= 0:
@@ -480,6 +503,8 @@ class Router:
                 c = step[nd] * layer_fac[l]
                 if l == 1 and nd not in (0, 4):
                     c *= self.bcu_cross
+                if l == 0 and nd not in (2, 6):
+                    c *= self.fcu_cross
                 ns = (l * N + ni) * 9 + nd
                 ng = gs + c + bend
                 if ng < g.get(ns, 1e18):
@@ -651,7 +676,22 @@ class Router:
             B.stamp_via(net, pos, dv)
         rec = {"net": net, "profile": prof, "segments": segs, "vias": vias, "fixed": fixed}
         self.routes.append(rec)
+        self._on_grid[id(rec)] = (rec, self._windows(rec))
         return rec
+
+    def _windows(self, rec):
+        B = self.B
+        cls = B.net_class.get(rec["net"], "Default")
+        out = [B.stamp_window(cls, "seg", (a[0], a[1], b[0], b[1], w / 2)) for _, a, b, w in rec["segments"]]
+        out += [B.stamp_window(cls, "circle", (pos[0], pos[1], dv / 2)) for pos, dv, _ in rec["vias"]]
+        return out
+
+    def _stamp(self, rec):
+        B = self.B
+        for lname, a, b, w in rec["segments"]:
+            B.stamp_track(rec["net"], lname, a, b, w)
+        for pos, dv, dr in rec["vias"]:
+            B.stamp_via(rec["net"], pos, dv)
 
     # ------------------------------------------------------------------ rip-up and reroute
     def rip(self, nets):
@@ -659,14 +699,34 @@ class Router:
         nets = set(nets)
         self.routes = [r for r in self.routes if r["net"] not in nets or r.get("fixed")]
 
-    def rebuild(self):
+    def rebuild(self, full=False):
+        """Bring the grid in line with self.routes. Where copper left, the fixed copper is restored and
+        every route that reaches there is stamped again; new copper is stamped. Stamps are idempotent
+        and do not depend on order, so the rest of the grid stays as it is."""
         B = self.B
-        B.restore()
-        for r in self.routes:
-            for lname, a, b, w in r["segments"]:
-                B.stamp_track(r["net"], lname, a, b, w)
-            for pos, dv, dr in r["vias"]:
-                B.stamp_via(r["net"], pos, dv)
+        now = {id(r): r for r in self.routes}
+        gone = [w for k, (r, w) in self._on_grid.items() if k not in now]
+        kept = {k: v for k, v in self._on_grid.items() if k in now}
+        rects = [x for w in gone for x in w]
+        if full or sum((j1 - j0) * (i1 - i0) for j0, j1, i0, i1 in rects) > 0.3 * B.N:
+            B.restore()
+            redo = list(self.routes)
+        else:
+            for x in rects:
+                B.restore_window(*x)
+            if rects:
+                R = np.array(rects)
+                def near(w):
+                    W = np.array(w)
+                    return bool(((W[:, None, 0] < R[None, :, 1]) & (R[None, :, 0] < W[:, None, 1]) &
+                                 (W[:, None, 2] < R[None, :, 3]) & (R[None, :, 2] < W[:, None, 3])).any())
+                redo = [r for k, (r, w) in kept.items() if w and near(w)]
+            else:
+                redo = []
+            redo += [r for k, r in now.items() if k not in kept]
+        for r in redo:
+            self._stamp(r)
+        self._on_grid = {k: kept[k] if k in kept else (r, self._windows(r)) for k, r in now.items()}
 
     def blockers(self, net, prof, sources, targets, fcu_factor=1.0, penalty=60.0, margin=None, include_fixed=False):
         """Which routed nets stand in the way of this connection? Route on the fixed copper only, with

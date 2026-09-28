@@ -246,7 +246,9 @@ export class Chat {
         else this.put(this.qPlaceholder(r.id, r.questions));   // still open: the card itself is in the dock
         continue;
       }
-      if (r.kind === "user") { this.userMsg(r.text, r.attachments); if (agenda && agendaDone(agenda)) agenda = null; }
+      if (r.kind === "user" && r.by === "app") this.resumeLine();
+      else if (r.kind === "user") { this.userMsg(r.text, r.attachments); if (agenda && agendaDone(agenda)) agenda = null; }
+      else if (r.kind === "waiting") this.waitLine(r, i === recs.length - 1 || recs.slice(i + 1).every((x) => x.kind !== "user"));
       else if (r.kind === "assistant") { const b = this.assistantBlock(); b.text = r.text; this.renderMd(b, true); this.cur = null; }
       else if (r.kind === "tool") this.toolCard(r);
       else if (r.kind === "tool_result") this.toolResult(r);
@@ -266,7 +268,10 @@ export class Chat {
 
   wire() {
     const ev = this.ws.ev;
+    ev.on("agent.waiting", (e) => this.waitLine(e, true));
     ev.on("agent.user", (e) => {
+      if (e.by === "app") { this.clearWait(); this.resumeLine(); this.sid = e.sid; return; }
+      this.clearWait();
       if (e.text !== this.lastSent) this.userMsg(e.text, e.attachments);
       this.lastSent = null; this.sid = e.sid;
       if (this.agenda && agendaDone(this.agenda)) this.setAgenda(null);     // a new request: the finished plan goes
@@ -627,7 +632,8 @@ export class Chat {
     if (!answers) return h("div.qdone.muted", h("div", "Not answered:"), (questions || []).map((q) => h("div", "· " + q.question)));
     const keys = Object.keys(answers);
     if (!keys.length) return h("div.qdone.muted", "Skipped. Claude used its recommendations.");
-    return h("div.qdone", h("div.qd-h", icon("message-square", 12), "You answered"), keys.map((k) => h("div", h("span.muted", (head[k] || k) + ": "), h("b", Array.isArray(answers[k]) ? answers[k].join(", ") : String(answers[k])))));
+    const plain = (v) => String(v).replace(/\s*\(recommended\)\s*/i, " ").trim();
+    return h("div.qdone", h("div.qd-h", icon("message-square", 12), "You answered"), keys.map((k) => h("div", h("span.muted", (head[k] || k) + ": "), h("b", Array.isArray(answers[k]) ? answers[k].map(plain).join(", ") : plain(answers[k])))));
   }
 
   showChat() { if (this.ws.chatPane && this.ws.chatPane.classList.contains("collapsed")) this.ws.toggleChat(); this.scroll(true); }
@@ -661,6 +667,19 @@ export class Chat {
   }
 
   autoLine() { this.put(h("div.noteline", icon("refresh-cw", 13), "Resumed after background work")); }
+
+  // an unattended run stopped by the account's usage limit: when it carries on (the line goes when it does)
+  waitLine(r, live) {
+    if (!r.text) { this.clearWait(); return; }
+    this.clearWait();
+    const el = h("div.noteline" + (live && r.until ? ".waiting" : ""), icon("clock", 13), r.text);
+    this.put(el);
+    if (live && r.until) this.waitEl = el;
+  }
+
+  clearWait() { if (this.waitEl) { this.waitEl.classList.remove("waiting"); this.waitEl = null; } }
+
+  resumeLine() { this.put(h("div.noteline", icon("play", 13), "The usage limit has reset: carrying on")); }
 
   taskLine(e) {
     const txt = e.status === "running" ? `Running in the background: ${e.description}` : e.status === "completed" ? `Finished in the background: ${e.description}` : `Background work ${e.status}: ${e.description}`;

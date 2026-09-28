@@ -792,7 +792,17 @@ class Group:
             if self._clear([("text", box, None)]):
                 self._commit([("text", text, at)], [("text", box, None)])
                 return
-        at = (snap(x0), snap(y1 + 3.81))
+        # nowhere beside it: under everything the group has drawn, which is always clear
+        gx0, gy0, gx1, gy1 = self.bbox()
+        for sx in (x0, gx0):
+            for k in range(0, 40):
+                at = (snap(sx), snap(gy1 + 3.81 + k * P))
+                box = _text_box(text, at)
+                if self._clear([("text", box, None)]):
+                    self._commit([("text", text, at)], [("text", box, None)])
+                    self.page.crowded.append(f"note near {near}: below the group")
+                    return
+        at = (snap(gx0), snap(gy1 + 3.81 + 40 * P))
         self._commit([("text", text, at)], [("text", _text_box(text, at), None)])
         self.page.crowded.append(f"note near {near}: crowded")
 

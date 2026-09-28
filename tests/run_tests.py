@@ -2092,6 +2092,93 @@ def stop_while_a_turn_is_still_starting():
 
 
 @test()
+def unattended_run_waits_for_the_usage_limit_and_carries_on():
+    """A turn that ends on the account's usage limit ("You've hit your session limit · resets 5:10am"):
+    an unattended run waits for the reset and carries on by itself; a watched run only shows it; a
+    message from the user ends the wait."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+    from tracewright.server import App
+    from tracewright.projects import ProjectStore
+    from tracewright import agent as agentmod
+    from tracewright.agent import AgentManager, limit_reset
+    ct = ZoneInfo("America/Chicago")
+    now = dt.datetime(2026, 9, 28, 2, 52, 3, tzinfo=ct).timestamp()
+    at = lambda txt: dt.datetime.fromtimestamp(limit_reset(txt, now), ct).strftime("%m-%d %H:%M")
+    assert at("You've hit your session limit · resets 5:10am (America/Chicago)") == "09-28 05:10"
+    assert at("You've hit your weekly limit · resets Oct 3, 9am (America/New_York)") == "10-03 08:00"
+    assert at("Claude usage limit reached. Your limit will reset at 11pm (America/Chicago)") == "09-28 23:00"
+    assert at("You've hit your session limit · resets 2:40am (America/Chicago)") == "09-28 02:52"      # just past: now
+    assert limit_reset("You've hit your limit", now) is None and limit_reset("Routed 12 of 12 nets", now) is None
+    pid = ProjectStore().import_copy(FIXTURE, "Limit demo").id
+
+    class LimitedCLI:
+        """Answers the first message with the limit, every later one normally."""
+        def __init__(self):
+            self.sent, self.q = [], asyncio.Queue()
+        async def receive_messages(self):
+            while (m := await self.q.get()) is not None:
+                yield m
+        async def query(self, prompt):
+            self.sent.append(prompt)
+            limited = len(self.sent) == 1
+            text = "You've hit your session limit · resets 5:10am (America/Chicago)" if limited else "Carried on."
+            self.q.put_nowait(AssistantMessage(content=[TextBlock(text=text)], model="m"))
+            self.q.put_nowait(ResultMessage(subtype="success", duration_ms=5, duration_api_ms=5, is_error=limited,
+                                            num_turns=1, session_id="s1", result=text))
+        async def interrupt(self):
+            pass
+        async def disconnect(self):
+            self.q.put_nowait(None)
+
+    async def go(unattended):
+        app = App()
+        rt = app.rt(pid)
+        events = []
+        rt.hub.emit = lambda type_, **kw: events.append((type_, kw))
+        rt.p.unattended = lambda: unattended
+        a = AgentManager(app, rt)
+        cli = LimitedCLI()
+
+        async def connect():
+            a.session = a.session or a.get_session()
+            if a.client is None:
+                a.client, a.client_key = cli, "k"
+                a.reader = asyncio.ensure_future(a._read(cli, a.session))
+            return a.client
+        a.connect = connect
+        saved = agentmod.limit_reset, agentmod.LIMIT_MARGIN_S
+        agentmod.limit_reset = lambda text, now=None: time.time() + 0.3      # the reset, 0.3 s from now
+        agentmod.LIMIT_MARGIN_S = 0.0
+        try:
+            await a.send("route the board")
+            for _ in range(150):
+                await asyncio.sleep(0.02)
+                if len(cli.sent) >= 2 or (not unattended and not a.busy and any(t == "agent.done" for t, _ in events)):
+                    break
+            await asyncio.sleep(0.1)
+            waits = [kw for t, kw in events if t == "agent.waiting"]
+            return a, cli, events, waits
+        finally:
+            agentmod.limit_reset, agentmod.LIMIT_MARGIN_S = saved
+            if a.task and not a.task.done():
+                a.task.cancel()
+            await a.disconnect()
+            rt.stop()
+
+    a, cli, events, waits = asyncio.run(go(True))
+    assert waits and waits[0]["until"] and "carries on" in waits[0]["text"], waits
+    assert len(cli.sent) == 2 and cli.sent[1].endswith(agentmod.RESUME_TEXT), cli.sent
+    users = [kw for t, kw in events if t == "agent.user"]
+    assert users[-1].get("by") == "app", users
+    recs = a.session.transcript()
+    assert any(r.get("kind") == "waiting" for r in recs) and any(r.get("kind") == "user" and r.get("by") == "app" for r in recs)
+    a, cli, events, waits = asyncio.run(go(False))                   # someone is watching: no wait, no resume
+    assert not waits and len(cli.sent) == 1, (waits, cli.sent)
+
+
+@test()
 def bring_up_checklist_reads_the_plan_and_judges_readings():
     from tracewright import bringup
     md = """# Bring-up
