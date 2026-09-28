@@ -1953,6 +1953,11 @@ def schematic_laid_out_by_rule():
     g2.pull(U3, "1", "R10k", "+3V3", net="RESET")
     g2.net(U3, "7", "SCL")
     g2.nc(U3, "6")
+    j150 = g2.part("JST4", "J", ref="J150")                   # the same net on a neighbour: wired, labelled once
+    g2.net(j150, "4", "SCL")
+    g2.power(j150, "1", "GND")
+    g2.power(j150, "2", "+3V3")
+    g2.nc(j150, "3")
     # a FET's gate with its series resistor and pull-down: one line, the pull hanging from a junction
     cat["AO3400A"] = Part(stock("Transistor_FET", "AO3400A"), "Package_TO_SOT_SMD:SOT-23", "AO3400A", "AO3400A", "AOS", "C20917")
     g3 = pg.group("PYRO SWITCH")
@@ -1963,6 +1968,7 @@ def schematic_laid_out_by_rule():
     g3.net(q, "3", "PYRO_OUT")
     pg.layout()
     assert not any("R151" in c or "R150" in c for c in pg.crowded), pg.crowded
+    assert sum(op[0] == "label" and op[1] == "SCL" for op in g2.ops) <= 2
     gops = [op for op in g3.ops if op[0] in ("junction", "llabel", "label")]
     assert [op[0] for op in gops].count("junction") == 1 and sum(op[0] == "llabel" and op[1] == "GATE" for op in gops) == 1, gops
     d2.write(hw2)
@@ -1973,6 +1979,36 @@ def schematic_laid_out_by_rule():
     assert nl2.net_of(y, "1") == nl2.net_of("U101", "2") and nl2.net_of(caps[1], "1") == nl2.net_of("U101", "3")
     assert nl2.net_of(caps[0], "2") == "GND"
     assert nl2.net_of("R151", "1") == nl2.net_of("Q101", "1") == nl2.net_of("R150", "1") and nl2.net_of("R151", "2") == "GND"
+    assert nl2.net_of("J150", "4") == nl2.net_of("U101", "7") == "SCL"
+    # a connector beside the MCU on one net: a wire from its pin to the MCU's label, not a second label
+    root3 = os.path.join(TMP, "auto3")
+    hw3 = os.path.join(root3, "hardware", "q")
+    os.makedirs(hw3)
+    json.dump({"name": "Q", "kicad_project": "hardware/q/q.kicad_pro"}, open(os.path.join(root3, "tracewright.json"), "w"))
+    d3 = Design("q", title="Wired", company="t")
+    r3 = d3.root("Cover", paper="A4")
+    sh3 = d3.sheet("S", "s.kicad_sch", "S", paper="A4")
+    r3.subsheet(sh3, (38.1, 40.64), (50.8, 25.4), [])
+    pg3 = Page(d3, sh3, base=100, catalog=cat)
+    g4 = pg3.group("PORT")
+    u4 = g4.part("MCU", "U", ref="U101")
+    g4.power(u4, "8", "+3V3")
+    g4.power(u4, "4", "GND")
+    g4.net(u4, "5", "SDA_X")
+    g4.nc(u4, ["1", "2", "3", "6", "7"])
+    j4 = g4.part("JST4", "J", ref="J101")
+    g4.net(j4, "3", "SDA_X")
+    g4.power(j4, "1", "GND")
+    g4.power(j4, "2", "+3V3")
+    g4.nc(j4, "4")
+    pg3.layout()
+    d3.write(hw3)
+    open(os.path.join(hw3, "q.kicad_pro"), "w").write("{}")
+    r = finish(env.Project(root3))
+    assert r.get("connections") == "as asked" and not r.get("crowded"), (r.get("connections"), r.get("crowded"))
+    assert sum(op[0] == "label" and op[1] == "SDA_X" for op in g4.ops) == 1, [op for op in g4.ops if op[0] == "label"]
+    nl3 = Netlist.load(os.path.join(env.Project(root3).build, "q.net"))
+    assert nl3.net_of("J101", "3") == nl3.net_of("U101", "5") == "SDA_X"
     assert nl2.net_of("R150", "2") != nl2.net_of("Q101", "1")
 
 

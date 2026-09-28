@@ -406,6 +406,55 @@ class Group:
         self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin]}, record=False)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {rail} as a label (no room for its symbol) {getattr(self, 'why', '')}")
 
+    def _mark(self, name, pt, d, owner, boxes):
+        """Remember where a net's label was drawn in this group, so a later pin of the net can be wired to it."""
+        self.__dict__.setdefault("marks", {}).setdefault(name, []).append({"pt": pt, "d": d, "owner": owner, "boxes": boxes})
+
+    def _wire_to_mark(self, inst, pin, name, reach=40.0):
+        """A pin whose net is already labelled in this group, on another part: a short orthogonal wire to that
+        label's end, the way a person joins neighbours, when it runs clear of everything (and not over the
+        label). True when drawn."""
+        marks = (self.__dict__.get("marks") or {}).get(name) or []
+        p, d = inst.pin(pin), inst.pin_dir(pin)
+        marks = sorted((m for m in marks if m["owner"] != inst.ref),
+                       key=lambda m: abs(m["pt"][0] - p[0]) + abs(m["pt"][1] - p[1]))
+        for m in marks:
+            mx, my = m["pt"]
+            if abs(mx - p[0]) + abs(my - p[1]) > reach:
+                continue
+            md = m["d"]
+            # the label's own text, less the bit where the wire meets it
+            lab = [b for b in m["boxes"] if b[0] == "label"]
+            keep = [b for b in m["boxes"] if b[0] != "label"]
+            shrunk = [("label", (bx[0] + 0.6 * max(md[0], 0), bx[1] + 0.6 * max(md[1], 0), bx[2] + 0.6 * min(md[0], 0),
+                                 bx[3] + 0.6 * min(md[1], 0)), None) for _, bx, _ in lab]
+            for L in (P, 2 * P, 3 * P):
+                e = _add(p, d, L)
+                paths = [[p, e, (mx, my)]] if abs(e[0] - mx) < 1e-6 or abs(e[1] - my) < 1e-6 else \
+                    [[p, e, (mx, e[1]), (mx, my)], [p, e, (e[0], my), (mx, my)]]
+                for path in paths:
+                    pts = [path[0]]
+                    for q in path[1:]:
+                        if q != pts[-1]:
+                            pts.append((snap(q[0]), snap(q[1])))
+                    if len(pts) < 2:
+                        continue
+                    last = (pts[-1][0] - pts[-2][0], pts[-1][1] - pts[-2][1])
+                    if last[0] * md[0] + last[1] * md[1] < 0:     # coming in from the label's side: it would run over it
+                        continue
+                    items = self._wire_items(pts, inst.ref)
+                    saved = self.boxes
+                    self.boxes = [b for b in self.boxes if b not in m["boxes"]] + shrunk
+                    ok = self._clear(items, anchor=inst.ref)
+                    self.boxes = saved
+                    if ok:
+                        self._commit([("wire", pts)], items)
+                        m["joined"] = m.get("joined", 0) + 1
+                        if m["joined"] == 2:                    # three wires meet at the label: a dot
+                            self.ops.append(("junction", m["pt"]))
+                        return True
+        return False
+
     def _draw_net(self, rq, record=True):
         inst, name, pins = rq["inst"], rq["name"], rq["pins"]
         if record:
@@ -413,6 +462,8 @@ class Group:
                 self._connect(name, inst.ref, pin)
         d = inst.pin_dir(pins[0])
         pts = [inst.pin(pin) for pin in pins]
+        if record and len(pins) == 1 and not rq.get("rail") and self._wire_to_mark(inst, pins[0], name):
+            return
         for L in (P, 2 * P, 3 * P, 4 * P, 6 * P, 8 * P):
             if len(pins) == 1:
                 end = _add(pts[0], d, L)
@@ -436,6 +487,10 @@ class Group:
                 items += self._wire_items([mid, out], inst.ref) + [("label", _label_box(name, out, d), None)]
             if self._clear(items, anchor=inst.ref):
                 self._commit(ops, items)
+                if record and not rq.get("rail"):
+                    lab = [op for op in ops if op[0] == "label"][-1]
+                    self._mark(name, lab[2], lab[3], inst.ref, [it for it in items if it[0] == "label"] +
+                               [it for it in items if it[0] == "wire"][-1:])
                 return
         # nowhere clear: each pin carries the label itself (no wire, so it cannot touch another net)
         for q in pts:
