@@ -2224,6 +2224,132 @@ def project_store_is_quick_and_knows_icloud_only_files():
     assert p.summary()["cloud_only"] == 0
 
 
+@test()
+def chat_attachments_go_to_their_place_and_pictures_to_claude():
+    """Files attached to a message go into the project by type -- pictures to uploads/images, PDFs to
+    docs/datasheets, a symbol library into lib/ and the symbol table, a footprint into the project's own
+    footprint library, a .pretty folder into lib/ and the footprint table, a 3D model to lib/3d, anything else
+    to uploads -- and never replace a file already there. Taking one back removes what it added (its table
+    entry too). On send, Claude gets the pictures in the message (a screenshot as it is, a big photo scaled
+    down to JPEG) and is told what every other file is and where it went; a note sent while Claude works
+    carries its attachments the same way."""
+    import io, subprocess
+    from PIL import Image
+    from aiohttp import FormData
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import fakeclaude as fc
+    pid = ProjectStore().import_copy(FIXTURE, "Attach demo").id
+    src = os.path.join(TMP, "attach-src")
+    os.makedirs(os.path.join(src, "MyParts.pretty"), exist_ok=True)
+    Image.new("RGBA", (300, 200), (200, 30, 30, 255)).save(os.path.join(src, "shot.png"))
+    Image.new("RGB", (4000, 3000), (30, 120, 200)).save(os.path.join(src, "photo.jpg"), quality=95)
+    files = {"LM7805.pdf": b"%PDF-1.4 fake", "Sensors.kicad_sym": b"(kicad_symbol_lib (version 20231120) (generator test))\n",
+             "SOT-23-5.kicad_mod": b'(footprint "SOT-23-5" (version 20240108))\n', "enclosure.step": b"ISO-10303-21;", "notes.csv": b"a,b\n1,2\n"}
+    for n, data in files.items():
+        with open(os.path.join(src, n), "wb") as f:
+            f.write(data)
+    with open(os.path.join(src, "MyParts.pretty", "X.kicad_mod"), "w") as f:
+        f.write('(footprint "X")\n')
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            async def attach(names):
+                fd = FormData()
+                for n in names:
+                    fd.add_field("file", open(os.path.join(src, n), "rb"), filename=n)
+                r = await c.post(f"/api/projects/{pid}/attach", data=fd)
+                assert r.status == 200, await r.text()
+                return (await r.json())["attached"]
+            recs = await attach(["shot.png", "photo.jpg", "LM7805.pdf", "Sensors.kicad_sym", "SOT-23-5.kicad_mod", "enclosure.step", "notes.csv"])
+            where = {r["name"]: r["path"] for r in recs}
+            assert where == {"shot.png": "uploads/images/shot.png", "photo.jpg": "uploads/images/photo.jpg",
+                             "LM7805.pdf": "docs/datasheets/LM7805.pdf", "Sensors.kicad_sym": "hardware/demo/lib/Sensors.kicad_sym",
+                             "SOT-23-5.kicad_mod": "hardware/demo/lib/Demo_USB-C_ATtiny.pretty/SOT-23-5.kicad_mod",
+                             "enclosure.step": "hardware/demo/lib/3d/enclosure.step", "notes.csv": "uploads/notes.csv"}, where
+            rt = app.rt(pid)
+            root = rt.p.root
+            sym = open(os.path.join(root, "hardware/demo/sym-lib-table")).read()
+            assert '(name "Sensors")' in sym and "${KIPRJMOD}/lib/Sensors.kicad_sym" in sym, sym
+            again = await attach(["notes.csv"])                        # the name is taken: a new one, the first kept
+            assert again[0]["path"] == "uploads/notes-2.csv" and open(os.path.join(root, "uploads/notes.csv")).read() == "a,b\n1,2\n"
+            r = await c.post(f"/api/projects/{pid}/attach-paths", json={"paths": [os.path.join(src, "MyParts.pretty")]})
+            lib = (await r.json())["attached"][0]
+            assert lib["path"] == "hardware/demo/lib/MyParts.pretty" and lib["kind"] == "footprints", lib
+            fp = open(os.path.join(root, "hardware/demo/fp-lib-table")).read()
+            assert '(name "MyParts")' in fp and '(name "Demo_USB-C_ATtiny")' in fp, fp
+            # taken back: its files and its table entry go; the rest stay
+            for path in ("uploads/notes-2.csv", "hardware/demo/lib/MyParts.pretty"):
+                assert (await (await c.post(f"/api/projects/{pid}/attach/remove", json={"path": path})).json())["removed"]
+            assert not os.path.exists(os.path.join(root, "uploads/notes-2.csv")) and not os.path.exists(os.path.join(root, "hardware/demo/lib/MyParts.pretty"))
+            fp = open(os.path.join(root, "hardware/demo/fp-lib-table")).read()
+            assert "MyParts" not in fp and '(name "Demo_USB-C_ATtiny")' in fp, fp
+            assert not (await (await c.post(f"/api/projects/{pid}/attach/remove", json={"path": "tracewright.json"})).json())["removed"]
+            assert os.path.exists(os.path.join(root, "tracewright.json"))  # only what an attachment added can go
+
+            # sent: pictures in the message, the rest described
+            fake = fc.FakeClaude([fc.reply("Got them.")])
+            a = app.agent(pid)
+            fake.plug(a)
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Use these", "files": [x["path"] for x in recs if x["name"] != "notes.csv"] + ["uploads/notes.csv"]})
+            assert r.status == 200, await r.text()
+            await fake.settle(a)
+            p = fake.prompts[-1]
+            kinds = [k for k, _ in p.images]
+            assert kinds == ["image/png", "image/jpeg"], kinds
+            assert p.images[0][1] == open(os.path.join(src, "shot.png"), "rb").read()      # small: as it is
+            with Image.open(io.BytesIO(p.images[1][1])) as im:
+                assert max(im.size) <= 1568 and im.size[0] > im.size[1], im.size              # big: scaled down, same shape
+            for want in ("a picture, uploads/images/shot.png (it is in this message)", "a PDF, docs/datasheets/LM7805.pdf (read the pages you need)",
+                         'a KiCad symbol library, hardware/demo/lib/Sensors.kicad_sym (added to the project\'s symbol library table as "Sensors")',
+                         'a KiCad footprint, hardware/demo/lib/Demo_USB-C_ATtiny.pretty/SOT-23-5.kicad_mod (in the project\'s footprint library "Demo_USB-C_ATtiny")',
+                         "a 3D model, hardware/demo/lib/3d/enclosure.step", "a file, uploads/notes.csv", "Use these"):
+                assert want in p.text, (want, p.text[-1500:])
+            assert not rt.attached                                          # sent: nothing left waiting
+            user = [x for x in a.get_session(a.session.sid).transcript() if x["kind"] == "user"][-1]
+            assert {x["path"] for x in user["attachments"] if x.get("kind") == "file"} >= {"uploads/images/shot.png", "docs/datasheets/LM7805.pdf"}
+            # attachments alone (no words) still go
+            more = await attach(["shot.png"])
+            fake.script.append(fc.reply("A red rectangle."))
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "", "files": [more[0]["path"]]})
+            assert r.status == 200, await r.text()
+            await fake.settle(a)
+            assert "(Attached with no message.)" in fake.prompts[-1].text and len(fake.prompts[-1].images) == 1
+            assert (await c.post(f"/api/projects/{pid}/chat", json={"text": "  "})).status == 400
+            # a note while Claude works takes its picture along
+            gate = asyncio.Event()
+
+            async def slow(prompt):
+                await gate.wait()
+                return fc.reply("done")
+            fake.script.append(lambda prompt: [fc.init(), fc.text("working")])
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Start"})
+            await asyncio.sleep(0.1)
+            assert a.busy
+            note = await attach(["shot.png"])
+            r = await c.post(f"/api/projects/{pid}/chat/steer", json={"text": "Also this one", "files": [note[0]["path"]]})
+            assert r.status == 200, await r.text()
+            await asyncio.sleep(0.05)
+            p = fake.prompts[-1]
+            assert "Also this one" in p.text and "Attached: a picture, " + note[0]["path"] in p.text and len(p.images) == 1, p
+            fake.q.put_nowait(fc.result())
+            await fake.settle(a)
+            await a.disconnect()
+            rt.stop()
+            # HEIC (iPhone photos): made a JPEG, which is what Claude gets
+            if sys.platform == "darwin" and shutil.which("sips"):
+                subprocess.run(["sips", "-s", "format", "heic", os.path.join(src, "shot.png"), "--out", os.path.join(src, "IMG_1.heic")], capture_output=True)
+                if os.path.exists(os.path.join(src, "IMG_1.heic")):
+                    h = (await attach(["IMG_1.heic"]))[0]
+                    assert h["path"] == "uploads/images/IMG_1.jpg" and h["kind"] == "image", h
+                    assert open(os.path.join(root, h["path"]), "rb").read(2) == b"\xff\xd8"
+    asyncio.run(run())
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

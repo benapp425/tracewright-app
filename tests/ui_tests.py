@@ -213,6 +213,41 @@ async def board_names_nets_when_zoomed(t):
     check(fit < len(zoomed["texts"]), f"as many texts at fit ({fit}) as zoomed in ({len(zoomed['texts'])})")
 
 
+@test
+async def attachments_paste_drop_and_take_back(t):
+    await t.open_project("board")
+    await t.page.wait("document.querySelector('.composer textarea')", 10)
+    # a screenshot pasted into the message box
+    await t.page.js("""(async () => {
+        const c = document.createElement('canvas'); c.width = 120; c.height = 80;
+        const g = c.getContext('2d'); g.fillStyle = '#c33'; g.fillRect(0, 0, 120, 80);
+        const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+        const dt = new DataTransfer(); dt.items.add(new File([blob], 'image.png', { type: 'image/png' }));
+        const ta = document.querySelector('.composer textarea'); ta.focus();
+        ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+        return true; })()""")
+    await t.page.wait("[...document.querySelectorAll('.attachrow .attach')].some((a) => /pasted-.*\\.png/.test(a.textContent) && !a.classList.contains('busy'))", 15)
+    # a data sheet dropped on the window
+    await t.page.js("""(() => {
+        const dt = new DataTransfer(); dt.items.add(new File(['%PDF-1.4 test'], 'LM7805.pdf', { type: 'application/pdf' }));
+        for (const type of ['dragenter', 'dragover', 'drop']) window.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
+        return true; })()""")
+    await t.page.wait("[...document.querySelectorAll('.attachrow .attach')].some((a) => a.textContent.includes('LM7805.pdf') && !a.classList.contains('busy'))", 15)
+    check(not await t.page.js("!!document.querySelector('.dropzone')"), "the drop overlay stayed up")
+    pics = t.s.get(f"api/projects/{t.pid}/files?path=uploads/images")["entries"]
+    docs = t.s.get(f"api/projects/{t.pid}/files?path=docs/datasheets")["entries"]
+    check(any(e["name"].startswith("pasted-") for e in pics), f"pasted picture not in uploads/images: {pics}")
+    check(any(e["name"] == "LM7805.pdf" for e in docs), f"PDF not in docs/datasheets: {docs}")
+    check(await t.page.js("!document.querySelector('.sendbtn').classList.contains('idle')"), "Send stays grey with files attached")
+    await t.shot("attachments")
+    # taken back: the chip goes and so does the file
+    await t.page.js("[...document.querySelectorAll('.attachrow .attach')].find((a) => a.textContent.includes('LM7805.pdf')).querySelector('.ax').click()")
+    await t.page.wait("![...document.querySelectorAll('.attachrow .attach')].some((a) => a.textContent.includes('LM7805.pdf'))", 5)
+    await asyncio.sleep(0.4)
+    docs = t.s.get(f"api/projects/{t.pid}/files?path=docs/datasheets")["entries"]
+    check(not any(e["name"] == "LM7805.pdf" for e in docs), f"the taken-back PDF is still there: {docs}")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

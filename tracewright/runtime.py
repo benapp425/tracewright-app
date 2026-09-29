@@ -35,6 +35,7 @@ class ProjectRuntime:
         self.version = {"board": 0, "schematic": 0}
         self.user_changes = []          # summaries for the agent's next turn
         self.selection = {"app": [], "kicad": []}
+        self.attached = {}               # files attached to the message being written: path -> record (attach.py)
         self.live = {"running": False, "board_open": False, "sch_open": False, "api": twlive.HAVE_KIPY}
         self._live_place = None
         self._live_sel = None

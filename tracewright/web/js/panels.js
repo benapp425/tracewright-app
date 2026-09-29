@@ -71,7 +71,19 @@ export class FilesPanel {
     el.appendChild(h("div.split2", this.list, this.view));
     this.load("");
   }
-  shown() { this.load(this.path); }
+  shown() { if (!this.opening) this.load(this.path); }
+
+  // a file: its folder listed, the file shown
+  async open(path) {
+    this.opening = true;
+    const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+    await this.load(dir);
+    this.opening = false;
+    const it = [...this.list.querySelectorAll(".fitem")].find((x) => x.dataset.path === path);
+    this.list.querySelectorAll(".fitem").forEach((x) => x.classList.toggle("on", x === it));
+    if (it) it.scrollIntoView({ block: "nearest" });
+    viewFile(this.ws, path, this.view);
+  }
 
   async load(path) {
     this.path = path;
@@ -92,7 +104,7 @@ export class FilesPanel {
       btn("upload", null, { "data-tip": "Upload files", onclick: () => picker.click() }, "sm ghost")));
     if (d.path) this.list.appendChild(h("div.fitem.dir", { onclick: () => this.load(d.path.split("/").slice(0, -1).join("/")) }, icon("arrow-left", 14), h("span.fn", "..")));
     for (const e of d.entries) {
-      const it = h("div.fitem" + (e.dir ? ".dir" : ""), { onclick: () => {
+      const it = h("div.fitem" + (e.dir ? ".dir" : ""), { "data-path": e.path, onclick: () => {
         if (e.dir) this.load(e.path);
         else { this.list.querySelectorAll(".fitem").forEach((x) => x.classList.remove("on")); it.classList.add("on"); viewFile(this.ws, e.path, this.view); }
       }, ondblclick: () => { if (!e.dir && !(state.info && state.info.server_mode)) openFile(this.ws, e.path); } },
@@ -101,7 +113,7 @@ export class FilesPanel {
     }
     if (!d.entries.length) this.list.appendChild(h("div.small.muted", { style: { padding: "14px" } }, "Empty folder"));
     if (!this.view.firstChild) this.view.appendChild(h("div.empty.plain", { style: { marginTop: "70px" } }, h("div.eicon", icon("folder-open", 22)), h("h3", "Project files"),
-      h("p", "Select a file to preview it. Drop files on the window to add them.")));
+      h("p", "Select a file to preview it. Files dropped on the window are attached to your next message.")));
   }
 }
 

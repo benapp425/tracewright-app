@@ -503,14 +503,14 @@ class AgentManager:
         except Exception as e:
             self.app.log(f"resume after the usage limit: {e}")
 
-    async def steer(self, text):
+    async def steer(self, text, images=None):
         """A message sent while Claude works, as in Claude Code: the CLI takes it in at Claude's next
         tool call, inside the same turn, or as the next turn when Claude was already writing its
         answer. The CLI echoes each message as it reads it, which marks the note read."""
         if not self.busy:
             raise RuntimeError("Claude is not working now; send it as a new message")
         sess = self.session or self.get_session()
-        st = {"id": uuid.uuid4().hex[:8], "text": text, "sent": False}
+        st = {"id": uuid.uuid4().hex[:8], "text": text, "sent": False, "images": list(images or [])}
         self.steers.append(st)
         turn = self.turn["tid"] if self.turn else None
         sess.append({"kind": "steer", "id": st["id"], "text": text, "turn": turn})
@@ -527,7 +527,8 @@ class AgentManager:
             if not st["sent"]:
                 st["sent"] = True
                 self.steered = True
-                await client.query(STEER_HEAD + st["text"])
+                note = STEER_HEAD + st["text"]
+                await client.query(self._with_images(note, st["images"]) if st.get("images") else note)
 
     def _steer_read(self, said, sess, tid):
         said = said.strip()
@@ -548,15 +549,18 @@ class AgentManager:
 
     @staticmethod
     async def _with_images(text, images):
-        """The message as content blocks: the text, then each image (streaming input)."""
+        """The message as content blocks: the text, then each picture (streaming input) -- PNG, JPEG, GIF or
+        WebP, scaled down when it is bigger than Claude takes (attach.image_for_claude)."""
+        from .attach import image_for_claude
         content = [{"type": "text", "text": text}]
         for path in images:
             try:
-                with open(path, "rb") as f:
-                    data = base64.b64encode(f.read()).decode()
+                got = await asyncio.to_thread(image_for_claude, path)
             except OSError:
                 continue
-            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}})
+            if got:
+                content.append({"type": "image", "source": {"type": "base64", "media_type": got[0],
+                                                            "data": base64.b64encode(got[1]).decode()}})
         yield {"type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
 
     async def _turn(self, sess, text, attachments, images=(), hidden=None, by=None):

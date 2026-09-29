@@ -1062,6 +1062,53 @@ def make_app():
             return err("no board yet", 404)
         return web.FileResponse(f, headers={"Content-Type": "model/gltf-binary", "Cache-Control": "no-cache"})
 
+    # ------------------------------------------------------------------ attachments (the chat's message box)
+    @routes.post("/api/projects/{pid}/attach")
+    async def attach_upload(request):
+        """Files attached to a message (dropped or pasted in the browser): each into its place in the
+        project by type (attach.py), recorded until the message goes out."""
+        from . import attach
+        rt = app.rt(request.match_info["pid"])
+        out = []
+        reader = await request.multipart()
+        async for part in reader:
+            if not part.filename:
+                continue
+            kind, dest = attach.destination(rt.p, part.filename)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            await _stream(part, dest, 512 * 1024 ** 2)
+            rec = await asyncio.to_thread(attach.finish, rt.p, kind, dest)
+            rt.attached[rec["path"]] = rec
+            out.append(rec)
+        return jresp({"attached": out})
+
+    @routes.post("/api/projects/{pid}/attach-paths")
+    async def attach_paths(request):
+        """Files and folders from this Mac attached to a message (dropped on the Mac app, or picked)."""
+        from . import attach
+        if app.server_mode:
+            return err("on a server, upload the files instead")
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        out = []
+        for src in body.get("paths") or []:
+            if not os.path.exists(os.path.expanduser(str(src))):
+                continue
+            rec = await asyncio.to_thread(attach.add_path, rt.p, src)
+            rt.attached[rec["path"]] = rec
+            out.append(rec)
+        return jresp({"attached": out})
+
+    @routes.post("/api/projects/{pid}/attach/remove")
+    async def attach_remove(request):
+        """An attachment taken back before sending: its files go (only files it added) and its library entry."""
+        from . import attach
+        rt = app.rt(request.match_info["pid"])
+        rec = rt.attached.pop((await request.json()).get("path", ""), None)
+        if rec:
+            await asyncio.to_thread(attach.remove, rt.p, rec)
+        return jresp({"removed": bool(rec)})
+
     @routes.post("/api/projects/{pid}/add-files")
     async def add_files(request):
         """Files from this Mac into the project (dropped on the window): copied into `dir` (uploads/)."""
@@ -1837,28 +1884,44 @@ def make_app():
         s = await a.use_session(request.match_info["sid"])
         return jresp(s.meta)
 
+    def _attached(rt, paths):
+        """The message's attached files (their records), and the pictures among them to send with it."""
+        recs = [rt.attached.pop(p) for p in paths or [] if p in rt.attached]
+        items = [{"kind": "file", "ftype": r["kind"], "path": r["path"], "name": r["name"], "label": r["label"],
+                  "size": r.get("size", 0)} for r in recs]
+        images = [os.path.join(rt.p.root, r["path"]) for r in recs if r["kind"] == "image"]
+        return items, images
+
     @routes.post("/api/projects/{pid}/chat")
     async def chat(request):
-        a = app.agent(request.match_info["pid"])
+        pid = request.match_info["pid"]
+        a, rt = app.agent(pid), app.rt(pid)
         body = await request.json()
         text = (body.get("text") or "").strip()
-        if not text:
+        files, images = _attached(rt, body.get("files"))
+        if not text and not files:
             return err("empty message")
-        sid = await a.send(text, body.get("sid"), body.get("attachments"))
+        if not text:
+            text = "(Attached with no message.)"
+        sid = await a.send(text, body.get("sid"), (body.get("attachments") or []) + files, images=images)
         return jresp({"sid": sid})
 
     @routes.post("/api/projects/{pid}/chat/steer")
     async def steer(request):
         """A note for Claude while it works: read at its next tool call (409 when it has stopped, so
         the app sends it as a new message instead)."""
-        a = app.agent(request.match_info["pid"])
+        pid = request.match_info["pid"]
+        a, rt = app.agent(pid), app.rt(pid)
         body = await request.json()
         text = (body.get("text") or "").strip()
-        if not text:
+        if not text and not body.get("files"):
             return err("empty message")
         if not a.busy:
             return err("Claude is not working now", 409)
-        return jresp({"id": await a.steer(text)})
+        files, images = _attached(rt, body.get("files"))
+        if files:
+            text = (text + "\n\n" if text else "") + "\n".join("Attached: " + f["label"] for f in files)
+        return jresp({"id": await a.steer(text, images=images)})
 
     @routes.post("/api/projects/{pid}/chat/interrupt")
     async def interrupt(request):

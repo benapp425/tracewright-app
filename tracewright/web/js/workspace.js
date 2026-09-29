@@ -1,6 +1,6 @@
 // A project's workspace: Claude on the left; the board, schematic, 3D model, checks, docs, files,
 // history and outputs on the right; the review flags in a panel beside them.
-import { h, clear, api, toast, menu, Events, fmtTime, btn, modal, popover, confirmDialog, promptDialog, upload } from "./util.js";
+import { h, clear, api, toast, menu, Events, fmtTime, btn, modal, popover, confirmDialog, promptDialog } from "./util.js";
 import { icon } from "./icons.js";
 import { topbar, state, go, command, runCommand } from "./app.js";
 import { native, isNative } from "./native.js";
@@ -537,14 +537,15 @@ export class Workspace {
     document.title = `${this.p.name} — Tracewright`;
   }
 
-  async dropped(paths, files) {
-    try {
-      let saved;
-      if (paths && paths.length) saved = (await api(`/api/projects/${enc(this.pid)}/add-files`, { body: { paths, dir: "uploads" } })).saved;
-      else if (files && files.length) saved = (await upload(`/api/projects/${enc(this.pid)}/upload`, files, { dir: "uploads" })).saved;
-      if (saved && saved.length) toast(`Added ${saved.length === 1 ? saved[0] : saved.length + " files to uploads/"}`, "ok", 5000,
-        { label: "Show", run: () => { this.show("files"); this.view("files").load("uploads"); } });
-    } catch (e) { toast(e.message, "error"); }
+  // files dropped on the window: attached to the message being written (the chat opens if it was hidden)
+  dropped(paths, files) {
+    if (this.chatPane.classList.contains("collapsed")) this.toggleChat();
+    this.chat.attach({ paths: paths || [], files: files || [] });
+  }
+
+  showFile(path) {
+    this.show("files");
+    this.view("files").open(path);
   }
 
   dragSplit(el) {

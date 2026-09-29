@@ -345,9 +345,9 @@ let dropEl = null;
 function dropzone(on) {
   if (on && !dropEl) {
     const inProject = state.current instanceof Workspace;
-    dropEl = h("div.dropzone", icon(inProject ? "upload" : "folder-input", 34),
-      h("div", inProject ? "Add files to the project" : "Import a project"),
-      h("div.small.muted", inProject ? "Saved to uploads/" : "Folder, .kicad_pro, .zip or board file"));
+    dropEl = h("div.dropzone", icon(inProject ? "paperclip" : "folder-input", 34),
+      h("div", inProject ? "Attach to your message" : "Import a project"),
+      h("div.small.muted", inProject ? "Pictures go to Claude. Data sheets, libraries and 3D models go into the project." : "Folder, .kicad_pro, .zip or board file"));
     document.body.appendChild(dropEl);
   } else if (!on && dropEl) { dropEl.remove(); dropEl = null; }
 }

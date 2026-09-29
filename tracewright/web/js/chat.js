@@ -2,10 +2,29 @@
 // folded once a burst of work is over), its agenda as a live checklist, notes you send while it works
 // (read at its next step), its questions docked above the composer, permission prompts, the context
 // you attach (selections, KiCad's selection) and the review flags you send.
-import { h, clear, api, toast, lightbox, fmtTime, btn, menu, copyText } from "./util.js";
+import { h, clear, api, toast, lightbox, fmtTime, btn, menu, copyText, upload } from "./util.js";
 import { icon } from "./icons.js";
 import { markdown } from "./markdown.js";
-import { native } from "./native.js";
+import { native, isNative } from "./native.js";
+
+// attachments by type: the icon, and where in the project they go (attach.py decides; this is for the chip)
+const FILE_KIND = { image: ["image", "Picture: Claude sees it"], pdf: ["file-text", "Saved to docs/datasheets"],
+  symbols: ["microchip", "Symbol library: added to the project"], footprints: ["layers", "Footprint library: added to the project"],
+  footprint: ["layers", "Footprint: into the project's library"], model: ["box", "3D model: into the project's library"],
+  kicad: ["file-code", "KiCad file: saved to uploads/kicad"], file: ["file", "Saved to uploads"] };
+function kindOf(name) {
+  const n = name.toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|heic|heif|bmp|tiff?)$/.test(n)) return "image";
+  if (n.endsWith(".pdf")) return "pdf";
+  if (n.endsWith(".kicad_sym")) return "symbols";
+  if (n.endsWith(".pretty")) return "footprints";
+  if (n.endsWith(".kicad_mod")) return "footprint";
+  if (/\.(step|stp|wrl|glb)$/.test(n)) return "model";
+  if (/\.kicad_(pcb|sch|pro|prl|dru)$/.test(n)) return "kicad";
+  return "file";
+}
+const fileUrl = (pid, path) => `/api/projects/${encodeURIComponent(pid)}/file?path=${encodeURIComponent(path)}&raw=1`;
+const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
 
 export const ICON = { status: "info", board: "circuit-board", show: "target", annotate: "map-pin", place: "move", route: "route", copper: "layers",
   sync_board: "refresh-cw", silk: "pencil", run_checks: "list-checks", render: "image", parts: "microchip", stage: "list-todo", lessons: "book-open",
@@ -98,7 +117,7 @@ export const KIND = (n) => ({ Bash: "command", Read: "read", Grep: "search", Glo
 export class Chat {
   constructor(el, ws) {
     this.el = el; this.ws = ws; this.pid = ws.pid;
-    this.cards = {}; this.cur = null; this.busy = false; this.sel = []; this.kicadSel = []; this.pending = 0;
+    this.cards = {}; this.cur = null; this.busy = false; this.sel = []; this.kicadSel = []; this.pending = 0; this.files = [];
     this.agenda = null; this.agOpen = localStorage.getItem("tw.agenda.open") !== "0";
     this.build();
     this.load();
@@ -121,21 +140,88 @@ export class Chat {
     this.status = h("div.statusline");
     this.dock = h("div.qdock");
     this.chips = h("div.chips");
+    this.filesEl = h("div.attachrow");
     this.input = h("textarea", { placeholder: "Message Claude", rows: 1,
       onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.send(); } },
-      oninput: () => this.grow() });
+      oninput: () => this.grow(),
+      onpaste: (e) => {                                   // a screenshot or copied files: attached, not pasted as text
+        const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+        if (!files.length) return;
+        e.preventDefault();
+        this.attach({ files: files.map((f) => /^image\.(png|jpe?g|gif|webp|tiff?)$/i.test(f.name) ?
+          new File([f], `pasted-${stamp()}.${f.name.split(".").pop()}`, { type: f.type }) : f) });
+      } });
+    this.clipBtn = btn("paperclip", null, { onclick: () => this.pickFiles(), "data-tip": "Attach files: pictures, data sheets, libraries, 3D models" }, "sm ghost clipbtn");
     this.stopBtn = h("button.stopbtn", { onclick: () => this.stop(), "data-tip": "Stop Claude", "data-kbd": "mod+." }, icon("square", 11));
     this.sendBtn = h("button.sendbtn.idle", { onclick: () => this.send(), "data-tip": "Send", "data-kbd": "enter" }, icon("arrow-up", 16));
     this.modelEl = h("span.model");
     this.hintEl = h("span.tiny.faint", "⇧↩ new line");
-    this.el.append(this.agendaEl, this.msgs, this.status, this.dock, h("div.composer", h("div.composer-box", this.chips, this.input,
-      h("div.composer-bar", this.modelEl, h("div.grow"), this.hintEl, this.stopBtn, this.sendBtn))));
+    this.el.append(this.agendaEl, this.msgs, this.status, this.dock, h("div.composer", h("div.composer-box", this.filesEl, this.chips, this.input,
+      h("div.composer-bar", this.clipBtn, this.modelEl, h("div.grow"), this.hintEl, this.stopBtn, this.sendBtn))));
   }
 
   grow() {
     this.input.style.height = "auto";
     this.input.style.height = Math.min(240, this.input.scrollHeight + 2) + "px";
-    this.sendBtn.classList.toggle("idle", !this.input.value.trim());
+    this.sendBtn.classList.toggle("idle", !this.input.value.trim() && !this.files.length);
+  }
+
+  // ------------------------------------------------------------------ attachments
+  // Files dropped on the window, pasted or picked: each goes into the project at once (by type: see attach.py)
+  // and waits as a chip; the message takes them along. Taking a chip back removes what it added.
+  async pickFiles() {
+    if (isNative) {
+      const paths = await native.pick({ kind: "any", multiple: true, title: "Attach to your message", prompt: "Attach" });
+      if (paths && paths.length) this.attach({ paths: Array.isArray(paths) ? paths : [paths] });
+      return;
+    }
+    const inp = h("input", { type: "file", multiple: true, style: { display: "none" },
+      onchange: () => { if (inp.files.length) this.attach({ files: [...inp.files] }); inp.remove(); } });
+    document.body.appendChild(inp);
+    inp.click();
+  }
+
+  attach({ paths = [], files = [] }) {
+    const items = [...paths.map((p) => ({ name: p.split("/").filter(Boolean).pop(), src: p })), ...files.map((f) => ({ name: f.name, file: f }))];
+    if (!items.length) return;
+    const entries = items.map((it) => ({ name: it.name, kind: kindOf(it.name), status: "uploading",
+      thumb: it.file && /^image\//.test(it.file.type) ? URL.createObjectURL(it.file) : null }));
+    this.files.push(...entries);
+    this.renderFiles(); this.grow();
+    const pid = encodeURIComponent(this.pid);
+    const job = (paths.length ? api(`/api/projects/${pid}/attach-paths`, { body: { paths } }) : Promise.resolve({ attached: [] }))
+      .then(async (a) => ({ attached: [...a.attached, ...(files.length ? (await upload(`/api/projects/${pid}/attach`, files)).attached : [])] }));
+    const done = job.then((r) => {
+      entries.forEach((en, i) => {
+        const rec = r.attached[i];
+        if (!rec) { en.status = "error"; return; }
+        Object.assign(en, { status: "ready", rec, kind: rec.kind, name: rec.name });
+        if (!en.thumb && rec.kind === "image") en.thumb = fileUrl(this.pid, rec.path);
+        if (!this.files.includes(en)) this.unattach(en);            // taken back while it uploaded
+      });
+    }).catch((e) => { entries.forEach((en) => { en.status = "error"; }); toast(e.message, "error"); })
+      .finally(() => { this.files = this.files.filter((en) => en.status !== "error"); this.renderFiles(); this.grow(); });
+    entries.forEach((en) => { en.done = done; });
+    this.input.focus();
+  }
+
+  unattach(en) {
+    this.files = this.files.filter((x) => x !== en);
+    if (en.rec) api(`/api/projects/${encodeURIComponent(this.pid)}/attach/remove`, { body: { path: en.rec.path } }).catch(() => {});
+    this.renderFiles(); this.grow();
+  }
+
+  renderFiles() {
+    clear(this.filesEl);
+    this.filesEl.classList.toggle("on", this.files.length > 0);
+    for (const en of this.files) {
+      const [ic, what] = FILE_KIND[en.kind] || FILE_KIND.file;
+      this.filesEl.appendChild(h("div.attach" + (en.status === "uploading" ? ".busy" : ""), { "data-tip": en.rec ? `${what} — ${en.rec.path}` : what },
+        en.thumb ? h("img.athumb", { src: en.thumb, alt: "" }) : h("span.aic", icon(ic, 14)),
+        h("span.aname.ellipsis", en.name),
+        en.status === "uploading" ? h("span.aspin") : null,
+        h("button.ax", { "data-tip": "Take it out", onclick: () => this.unattach(en) }, icon("x", 11))));
+    }
   }
 
   async load() {
@@ -342,8 +428,15 @@ export class Chat {
       this.scroll(true);
       return;
     }
-    const other = (attachments || []).filter((a) => a && a.kind !== "flag");
-    this.put(h("div.msg.user", text, other.length ? h("div.att", other.map((a) => h("span.ctx", a.label || a.ref || a))) : null));
+    const files = (attachments || []).filter((a) => a && a.kind === "file");
+    const other = (attachments || []).filter((a) => a && a.kind !== "flag" && a.kind !== "file");
+    const pics = files.filter((f) => f.ftype === "image"), docs = files.filter((f) => f.ftype !== "image");
+    this.put(h("div.msg.user", text || null,
+      pics.length ? h("div.apics", pics.map((f) => h("img", { src: f.thumb && f.thumb.startsWith("blob:") ? f.thumb : fileUrl(this.pid, f.path), alt: f.name,
+        "data-tip": f.path, onclick: () => lightbox(fileUrl(this.pid, f.path)) }))) : null,
+      docs.length ? h("div.att", docs.map((f) => h("span.ctx.afile", { "data-tip": f.path, onclick: () => this.ws.showFile && this.ws.showFile(f.path) },
+        icon((FILE_KIND[f.ftype] || FILE_KIND.file)[0], 12), f.name))) : null,
+      other.length ? h("div.att", other.map((a) => h("span.ctx", a.label || a.ref || a))) : null));
     this.scroll(true);
   }
 
@@ -503,15 +596,17 @@ export class Chat {
     if (el) this.steerState(el, e.status);
   }
 
-  async steer(text) {
-    const el = this.steerMsg(null, text, "sending");
+  async steer(text, files = []) {
+    const el = this.steerMsg(null, text + (files.length ? (text ? "\n" : "") + files.map((f) => "📎 " + f.name).join("\n") : ""), "sending");
     try {
-      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/chat/steer`, { body: { text } });
+      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/chat/steer`, { body: { text, files: files.map((f) => f.path) } });
       if (!el.dataset.steer) { el.dataset.steer = r.id; this.steerEls[r.id] = el; }
       if (el.dataset.state === "sending") this.steerState(el, "queued");
     } catch (e) {
       if (e.status === 409 || /not working/i.test(e.message)) {             // it had just finished: a new message then
         el.remove();
+        this.files = files.map((f) => ({ name: f.name, kind: f.ftype, status: "ready", thumb: f.thumb, rec: { path: f.path, kind: f.ftype, name: f.name, label: f.label } }));
+        this.renderFiles();
         this.input.value = text; this.setBusy(false); this.send();
       } else { this.steerState(el, "dropped"); toast(e.message, "error"); }
     }
@@ -743,19 +838,33 @@ export class Chat {
 
   prefill(text) { this.input.value = text; this.grow(); this.input.focus(); this.input.setSelectionRange(text.length, text.length); }
 
+  // the attachments, once their uploads are done: [{kind: "file", ftype, path, name, label}]
+  async takeFiles() {
+    if (!this.files.length) return [];
+    if (this.files.some((en) => en.status === "uploading")) {
+      this.sendBtn.classList.add("waiting");
+      await Promise.all(this.files.map((en) => en.done));
+      this.sendBtn.classList.remove("waiting");
+    }
+    const ready = this.files.filter((en) => en.rec);
+    this.files = []; this.renderFiles();
+    return ready.map((en) => ({ kind: "file", ftype: en.rec.kind, path: en.rec.path, name: en.rec.name, label: en.rec.label, thumb: en.thumb }));
+  }
+
   async send() {
     const text = this.input.value.trim();
-    if (!text) return;
-    if (this.busy) { this.input.value = ""; this.grow(); this.steer(text); return; }
+    if (!text && !this.files.length) return;
+    if (this.busy) { this.input.value = ""; this.grow(); this.steer(text, await this.takeFiles()); return; }
     native.askNotify();
     const attachments = this.sel.map((it) => ({ label: (it.ref ? it.ref : it.net ? "net " + it.net : it.label) + (it.source ? ` (${it.source})` : ""), ...it }));
     this.input.value = ""; this.grow();
-    this.lastSent = text;
-    this.userMsg(text, attachments);
+    const files = await this.takeFiles();
+    this.lastSent = text || "(Attached with no message.)";
+    this.userMsg(text, [...attachments, ...files]);
     if (this.agenda && agendaDone(this.agenda)) this.setAgenda(null);
     this.setBusy(true, "starting");
     try {
-      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/chat`, { body: { text, sid: this.sid, attachments } });
+      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/chat`, { body: { text, sid: this.sid, attachments, files: files.map((f) => f.path) } });
       this.sid = r.sid;
       this.sel = []; this.renderChips();
     } catch (e) { this.setBusy(false); this.errorLine(e.message, text); }

@@ -92,3 +92,49 @@ class LibTables:
     def symbol_file(self, lib_id):
         lib = lib_id.split(":")[0] if ":" in lib_id else ""
         return self.sym.get(lib)
+
+
+# ----------------------------------------------------------------------------- editing a project's tables
+def _entries(text):
+    try:
+        return [(str(value(lib, "name")), str(value(lib, "uri"))) for lib in findall(parse(text), "lib")]
+    except ValueError:
+        return []
+
+
+def add_lib(project_dir, table, name, uri, descr=""):
+    """Add a library to the project's sym-lib-table or fp-lib-table (table "sym" | "fp"), creating the table
+    if there is none. A library of that name already there is left as it is. True when it was added."""
+    path = os.path.join(project_dir, f"{table}-lib-table")
+    head = "sym_lib_table" if table == "sym" else "fp_lib_table"
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        text = f"({head}\n\t(version 7)\n)\n"
+    if any(n == name for n, _ in _entries(text)):
+        return False
+    q = lambda s: str(s).replace("\\", "\\\\").replace('"', '\\"')
+    entry = f'\t(lib (name "{q(name)}")(type "KiCad")(uri "{q(uri)}")(options "")(descr "{q(descr)}"))\n'
+    end = text.rstrip().rfind(")")
+    text = text[:end].rstrip("\n") + "\n" + entry + text[end:]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return True
+
+
+def remove_lib(project_dir, table, name):
+    """Take a library out of the project's table (the one add_lib put there). True when it was there."""
+    path = os.path.join(project_dir, f"{table}-lib-table")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines(keepends=True)
+    except OSError:
+        return False
+    pat = re.compile(r'^\s*\(lib \(name "?' + re.escape(name) + r'"?\)')
+    kept = [ln for ln in lines if not pat.match(ln)]
+    if len(kept) == len(lines):
+        return False
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(kept))
+    return True

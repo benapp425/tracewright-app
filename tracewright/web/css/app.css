@@ -614,6 +614,26 @@ a.brand:hover { text-decoration: none; }
 .composer-box textarea { border: 0; background: transparent; box-shadow: none; resize: none; min-height: 44px; max-height: 240px; padding: 10px 12px 4px; line-height: 1.5; }
 .composer-box textarea:focus { box-shadow: none; background: transparent; }
 .composer-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 6px 8px; }
+.composer-bar .clipbtn { width: 26px; min-width: 26px; height: 26px; padding: 0; margin-left: -3px; color: var(--text-3); }
+.composer-bar .clipbtn:hover { color: var(--text); }
+/* attachments waiting to go with the message */
+.attachrow { display: none; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
+.attachrow.on { display: flex; }
+.attach { display: inline-flex; align-items: center; gap: 6px; height: 30px; max-width: 220px; padding: 0 4px 0 4px; border-radius: 8px;
+  border: 1px solid var(--line-2); background: var(--surface); font-size: 12px; color: var(--text-2); }
+.attach .athumb { width: 22px; height: 22px; border-radius: 5px; object-fit: cover; background: var(--canvas); }
+.attach .aic { width: 22px; height: 22px; border-radius: 5px; background: var(--surface-3); display: flex; align-items: center; justify-content: center; color: var(--text-2); }
+.attach .aname { min-width: 0; }
+.attach .ax { border: 0; background: none; color: var(--text-3); width: 18px; height: 18px; border-radius: 5px; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
+.attach .ax:hover { background: var(--surface-3); color: var(--text); }
+.attach.busy { opacity: .75; }
+.attach .aspin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line-2); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
+.sendbtn.waiting { opacity: .6; }
+/* attachments on a sent message */
+.msg.user .apics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.msg.user .apics img { max-width: 180px; max-height: 130px; border-radius: 8px; border: 1px solid var(--line-2); cursor: zoom-in; display: block; object-fit: cover; }
+.msg.user .ctx.afile { cursor: pointer; height: 22px; }
+.msg.user .ctx.afile:hover { color: var(--text); }
 .composer-bar .model { font-size: 11.5px; color: var(--text-3); }
 .sendbtn, .stopbtn { width: 28px; height: 28px; border-radius: 8px; border: 0; background: var(--accent); color: var(--accent-text); display: flex; align-items: center;
   justify-content: center; cursor: pointer; flex: none; transition: background .12s, opacity .12s; }
