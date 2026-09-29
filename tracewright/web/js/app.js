@@ -127,7 +127,7 @@ function shortcutsHelp(intro) {
       ["mod+shift+enter", "Send flags to Claude"], ["esc", "Exit flag tool"]]],
     ["Board and schematic", [["f", "Fit to view"], ["b", "Flip board"], ["m", "Measure"], ["mod+f", "Find a part or net"],
       ["shift+click", "Add to selection"], ["dblclick", "Zoom to part"]]],
-    ["Chat", [["enter", "Send"], ["shift+enter", "New line"], ["mod+shift+m", "Mission Control"]]],
+    ["Chat", [["enter", "Send"], ["shift+enter", "New line"], ["mod+shift+m", "Run monitor"]]],
     ["Tools", [["mod+shift+c", "Calculators"], ["mod+shift+t", "Timelapse"]]],
   ];
   const keysOf = (k) => k.includes("…") ? h("span.kbd", k.replace("mod+", isMac ? "⌘" : "Ctrl+")) : k === "dblclick" ? h("span.kbd", "double-click")

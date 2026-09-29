@@ -2,7 +2,7 @@
 // project's history -- is a frame; the player draws them on its own canvas, parts gliding to their new
 // places and new copper drawing itself in, with markers on the timeline for who changed what, the
 // board's numbers as they grow, and an export to a video. Film (the renderer) is shared with
-// Mission Control, which shows the same picture live.
+// the run monitor, which shows the same picture live.
 import { h, clear, api, toast, btn } from "./util.js";
 import { icon } from "./icons.js";
 import { native, isNative } from "./native.js";

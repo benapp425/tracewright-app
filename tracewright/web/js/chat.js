@@ -114,7 +114,7 @@ export class Chat {
     this.el.append(h("div.chathead",
       h("button.ctitle", { onclick: (e) => this.sessionsMenu(e.currentTarget), "data-tip": "Conversations" }, h("span.cmark", icon("sparkles", 12)), this.titleEl, icon("chevron-down", 12)),
       h("div.grow"), this.modeBtn,
-      this.mcBtn = btn("activity", null, { onclick: () => this.ws.mission(), "data-tip": "Mission Control", "data-kbd": "mod+shift+m" }, "sm ghost mcbtn"),
+      this.mcBtn = btn("activity", null, { onclick: () => this.ws.mission(), "data-tip": "Run monitor", "data-kbd": "mod+shift+m" }, "sm ghost mcbtn"),
       btn("ellipsis", null, { onclick: (e) => this.chatMenu(e.currentTarget), "data-tip": "Conversation" }, "sm ghost")));
     this.agendaEl = h("div.agenda.hidden");
     this.msgs = h("div.msgs");
@@ -178,7 +178,7 @@ export class Chat {
     menu(anchor, [
       { label: "New conversation", icon: "plus", kbd: "mod+shift+n", run: () => this.newSession() },
       { label: "Conversations…", icon: "messages-square", run: () => this.sessionsMenu(this.el.querySelector(".ctitle")) },
-      { label: "Mission Control", icon: "activity", kbd: "mod+shift+m", run: () => this.ws.mission() },
+      { label: "Run monitor", icon: "activity", kbd: "mod+shift+m", run: () => this.ws.mission() },
       "-",
       { label: this.mode === "autonomous" ? "Switch to step by step" : "Switch to autonomous", icon: this.mode === "autonomous" ? "messages-square" : "zap", run: () => this.toggleMode() },
       cost ? { label: `Cost: ${cost}`, icon: "info", disabled: true, hint: "API prices" } : null,

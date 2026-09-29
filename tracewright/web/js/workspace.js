@@ -150,7 +150,7 @@ export class Workspace {
     c("render3d", { title: "Render 3D views", icon: "camera", run: () => { this.show("3d"); this.view("3d").renders(true, true); } });
     c("find", { title: "Find a part or net", icon: "search", group: "View", run: () => this.find() });
     c("timelapse", { title: "Play timelapse", icon: "play", kbd: "mod+shift+t", group: "View", run: () => this.timelapse() });
-    c("mission", { title: "Mission Control", icon: "activity", kbd: "mod+shift+m", group: "View", run: () => this.mission() });
+    c("mission", { title: "Run monitor", icon: "activity", kbd: "mod+shift+m", group: "View", run: () => this.mission() });
     c("copper", { title: "Inspect copper by net", icon: "cable", group: "View", run: () => { this.show("board"); this.view("board").setPanel("copper"); } });
     c("rename", { title: "Rename project", icon: "pencil", run: () => this.rename() });
   }
@@ -579,7 +579,7 @@ export class Workspace {
 
   mission() { (this.mc = this.mc || new MissionControl(this)).open(); }
 
-  // Mission Control opens by itself when Claude works on its own (autonomous, past the intake) for more
+  // The run monitor opens by itself when Claude works on its own (autonomous, past the intake) for more
   // than a few seconds -- once per run: closing it keeps it closed until the next one.
   watchMission() {
     this.ev.on("agent.status", (e) => {

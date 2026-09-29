@@ -1110,7 +1110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         var view: [NSMenuItem] = tabs.enumerated().map { i, t in cmd(t.0, "tab:" + t.1, i < 9 ? String(i + 1) : i == 9 ? "0" : "", project: true) }
         view += [sep(), cmd("Review Flags", "review", "r", [.command, .shift], project: true),
                  cmd("Toggle Chat", "toggle-chat", "\\", project: true),
-                 cmd("Mission Control", "mission", "m", [.command, .shift], project: true),
+                 cmd("Run Monitor", "mission", "m", [.command, .shift], project: true),
                  cmd("Timelapse", "timelapse", "t", [.command, .shift], project: true),
                  cmd("Calculators", "calculators", "c", [.command, .shift]),
                  cmd("Command Palette…", "palette", "k"), sep(),
