@@ -74,7 +74,7 @@ export class SchematicView {
 
   destroy() { document.removeEventListener("keydown", this.keys); this.flagLayer.destroy(); }
   shown() {
-    if (this.stale) this.load(); else if (this.vb) this.applyVB();
+    if (this.stale) this.load(); else if (this.wantVB) this.setVB(...this.wantVB); else if (this.vb) this.applyVB();
     if (this.pendingSheet && this.sheets.length) { const np = this.pendingSheet; this.pendingSheet = null; if (np !== this.cur) this.showSheet(np); }
     if (this.pendingZoom && this.sheets.length) { this.pendingZoom = false; requestAnimationFrame(() => this.zoomSel()); }
   }
@@ -473,7 +473,9 @@ export class SchematicView {
 
   setVB(x, y, w, hh, animate) {
     const r = this.viewer.getBoundingClientRect();
-    const asp = r.width / Math.max(r.height, 1);
+    if (!r.width || !r.height) { this.wantVB = [x, y, w, hh]; return; }     // hidden: fit once it is shown
+    this.wantVB = null;
+    const asp = r.width / r.height;
     if (w / hh < asp) { const nw = hh * asp; x -= (nw - w) / 2; w = nw; } else { const nh = w / asp; y -= (nh - hh) / 2; hh = nh; }
     const to = [x, y, w, hh];
     if (!animate || !this.vb) { this.vb = to; this.applyVB(); return; }
@@ -541,7 +543,7 @@ export class SchematicView {
     new ResizeObserver(() => {
       const w = this.viewer.getBoundingClientRect().width;
       this.viewer.classList.toggle("narrow", w < 860); this.viewer.classList.toggle("narrower", w < 640);
-      if (this.vb) this.applyVB();
+      if (this.wantVB) this.setVB(...this.wantVB); else if (this.vb) this.applyVB();
     }).observe(this.el);
   }
 }

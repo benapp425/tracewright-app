@@ -2161,6 +2161,27 @@ def net_kinds_part_inspector_and_schematic_conventions():
 
 
 @test(needs=("node",))
+def board_names_nets_on_copper():
+    """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to
+    top, repeated on long runs), inside pads under the number, on vias; the front layer first, a lower
+    layer's name never on the front copper, no two names meeting (tests/netnames_check.mjs, in Node)."""
+    import subprocess
+    r = subprocess.run(["node", os.path.join(ROOT, "tests", "netnames_check.mjs")], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
+
+
+@test(needs=("chrome",))
+def browser_ui():
+    """The real UI in headless Chrome against a throwaway server with the demo (tests/ui_tests.py): the
+    home screen, the five places and their sub-views, no Ask Claude buttons, net names on the zoomed board,
+    and no console errors anywhere along the way."""
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "ui_tests.py"), "--out", os.path.join(TMP, "ui")],
+                       capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-2500:]
+
+
+@test(needs=("node",))
 def block_diagram_geometry():
     """The guided start's block diagram, laid out at three widths: no wire crosses a block or another wire's
     label, no two wires overlap, labels do not collide (tests/diagram_check.mjs, in Node)."""
@@ -2504,7 +2525,9 @@ def overview_update_changelog_and_board_at_a_checkpoint():
 def main():
     only = sys.argv[sys.argv.index("-k") + 1] if "-k" in sys.argv else None
     fast = "--fast" in sys.argv
-    have = {"kicad": HAVE_KICAD, "kpy": HAVE_KPY, "node": bool(shutil.which("node"))}
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    from cdp import find_chrome
+    have = {"kicad": HAVE_KICAD, "kpy": HAVE_KPY, "node": bool(shutil.which("node")), "chrome": bool(find_chrome())}
     ok = fail = skip = 0
     t_all = time.time()
     for fn, needs in TESTS:

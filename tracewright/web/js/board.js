@@ -35,7 +35,7 @@ export class BoardView {
     this.el = el; this.ws = ws; this.pid = ws.pid;
     this.data = null; this.scale = 10; this.ox = 0; this.oy = 0; this.side = "F";
     this.vis = { "F.Cu": true, "B.Cu": true, inner: true, zones: true, silk: true, labels: true, unrouted: true, findings: true,
-                 fab: false, courtyard: false, notes: true, vias: true, flags: true };
+                 fab: false, courtyard: false, notes: true, vias: true, flags: true, netnames: true };
     this.sel = new Set(); this.selNet = null; this.kicadSel = new Set();
     this.hl = null; this.anim = {}; this.override = {}; this.live = []; this.notes = []; this.findings = [];
     this.tool = "select"; this.measure = null;
@@ -826,7 +826,7 @@ export class BoardView {
     if (this.panel === "copper") { this.copperPanel(); return; }
     const items = [["F.Cu", "Top copper", COL["F.Cu"]], ["B.Cu", "Bottom copper", COL["B.Cu"]]];
     if (this.copper.length > 2) items.push(["inner", "Inner copper", COL["In1.Cu"]]);
-    items.push(["zones", "Pours and areas", [150, 150, 170]], ["vias", "Vias", COL.via], ["silk", "Silkscreen", COL.silkF], ["labels", "References", [200, 200, 200]],
+    items.push(["zones", "Pours and areas", [150, 150, 170]], ["vias", "Vias", COL.via], ["silk", "Silkscreen", COL.silkF], ["labels", "References", [200, 200, 200]], ["netnames", "Net names", [230, 230, 230]],
       ["unrouted", "Unrouted", [255, 190, 90]], ["findings", "Check findings", [240, 101, 96]], ["notes", "Claude's notes", [255, 140, 70]],
       ["flags", "Resolved flags", [67, 194, 131]], ["courtyard", "Courtyards", [180, 90, 200]], ["fab", "Fab layer", [140, 150, 170]]);
     for (const [k, label, c] of items) {
@@ -1027,6 +1027,167 @@ export class BoardView {
     }
   }
 
+  // Net names on the copper once it is big enough to hold them, as KiCad and Altium show them: along each
+  // track (repeated along long ones), inside each pad under its number, and on vias. The front layer is
+  // named first (pads, vias, tracks); a lower layer's name never sits on the front layer's copper, and a
+  // name that would run into one already drawn is left out.
+  drawNetNames(c, copperMode) {
+    const S = this.scale, d = this.data, dpr = this.dpr || 1, W = this.w || 1e5, H = this.h || 1e5;
+    const order = this.side === "F" ? [...this.copper].reverse() : [...this.copper];
+    const layers = copperMode ? this.visibleCopper() : order.filter((l) => this.layerOn(l));
+    if (!layers.length) return;
+    const front = layers[layers.length - 1];
+    const padLayers = copperMode ? layers : layers.filter((l) => l === "F.Cu" || l === "B.Cu");
+    const padFront = padLayers[padLayers.length - 1];
+    const spot = copperMode ? this.spot : null;
+    const name = (n) => n.startsWith("unconnected-") ? "NC" : n.split("/").pop();
+    const bg = copperMode ? [20, 26, 23] : [22, 36, 27];
+    const MIN = 7, MAX = 15;
+    let font = "";
+    if (!this.nnW) this.nnW = new Map();
+    const wid = (t, bold) => {                        // text width per px of font size
+      const k = (bold ? "\u0001" : "") + t;
+      let w = this.nnW.get(k);
+      if (w == null) { c.font = `${bold ? 700 : 600} 100px ${NN_FONT}`; font = ""; w = c.measureText(t).width / 100; this.nnW.set(k, w); }
+      return w;
+    };
+    const ink = (rgb, alpha, ta) => {                 // dark text on light copper, white on dark
+      const m = rgb.map((v, i) => v * alpha + bg[i] * (1 - alpha));
+      return luminance(m) > 0.3 ? `rgba(14,16,20,${ta})` : `rgba(255,255,255,${ta})`;
+    };
+    // what is drawn so far (names, and the front copper once lower layers are named), as rotated boxes in a grid
+    const grid = new Map(), CELL = 96;
+    const cells = (b, fn) => {
+      const r = b.r;
+      for (let gx = Math.floor((b.x - r) / CELL); gx <= Math.floor((b.x + r) / CELL); gx++)
+        for (let gy = Math.floor((b.y - r) / CELL); gy <= Math.floor((b.y + r) / CELL); gy++) if (fn(gx + "," + gy) === false) return false;
+      return true;
+    };
+    const take = (b) => cells(b, (k) => { const q = grid.get(k); if (q) q.push(b); else grid.set(k, [b]); });
+    const claim = (b) => {
+      if (!cells(b, (k) => { const q = grid.get(k); if (q) for (const o of q) if (boxesMeet(b, o)) return false; })) return false;
+      take(b);
+      return true;
+    };
+    const box = (x, y, a, hw, hh) => ({ x, y, ux: Math.cos(a), uy: Math.sin(a), hw, hh, r: Math.hypot(hw, hh) });
+    const put = (t, x, y, a, size, fill, bold, halo) => {
+      const cs = Math.cos(a), sn = Math.sin(a);
+      c.setTransform(dpr * cs, dpr * sn, -dpr * sn, dpr * cs, dpr * x, dpr * y);
+      const f = `${bold ? 700 : 600} ${Math.round(size * 2) / 2}px ${NN_FONT}`;
+      if (f !== font) { c.font = f; font = f; }
+      if (halo) { c.lineWidth = 2.5; c.strokeStyle = "rgba(0,0,0,.75)"; c.strokeText(t, 0, 0); }
+      c.fillStyle = fill; c.fillText(t, 0, 0);
+    };
+    const inView = (x, y, m) => x > -m && y > -m && x < W + m && y < H + m;
+    c.textAlign = "center"; c.textBaseline = "middle";
+
+    // the pads on screen, each with the layer it is named on
+    const pads = [];
+    for (const f of this.fps) {
+      const pose = this.pose(f), dRot = pose ? pose.rot - f.a : 0;
+      for (const p of f.pads) {
+        const all = p.l.includes("*.Cu") || (p.l.includes("F.Cu") && p.l.includes("B.Cu"));
+        const l = all || p.l.includes(padFront) ? padFront : p.l.find((x) => padLayers.includes(x));
+        if (!l) continue;
+        const pw = p.w * S, ph = p.h * S;
+        const [x, y] = pose ? fwdPose(pose, f, p.x, p.y) : [p.x, p.y];
+        const sx = x * S + this.ox, sy = y * S + this.oy;
+        if (!inView(sx, sy, Math.max(pw, ph))) continue;
+        pads.push({ p, l, pw, ph, sx, sy, rot: -(p.a + dRot) * Math.PI / 180 });
+      }
+    }
+    // a pad: the number, and the net under it where there is room (else the net alone, else the number)
+    const namePad = ({ p, l, pw, ph, sx, sy, rot }) => {
+      if (spot && p.net !== spot) return;
+      const lo = Math.max(pw, ph), sh = Math.min(pw, ph);
+      if (sh < 8) return;
+      const a = readable(rot + (pw >= ph ? 0 : Math.PI / 2));
+      const room = p.s === "circle" || p.s === "oval" ? 0.72 : 0.84;
+      const num = p.n || "", net = p.net ? name(p.net) : "";
+      const wn = num ? wid(num, true) : 0, we = net ? wid(net) : 0;
+      const onFront = l === padFront;
+      const col = copperMode ? (p.net ? this.netColor[p.net] || [120, 124, 134] : [150, 152, 160]) : l === "B.Cu" ? COL.padB : COL.pad;
+      const fill = ink(col, copperMode ? (onFront ? 0.95 : 0.45) : onFront ? 1 : 0.6, onFront ? 0.92 : 0.6);
+      const s2 = Math.min(sh * 0.34, lo * room / Math.max(wn, we, 0.01), MAX);
+      if (num && net && s2 >= MIN) {
+        if (!claim(box(sx, sy, a, Math.max(wn, we) * s2 / 2, s2 * 1.1))) return;
+        const dx = -Math.sin(a) * s2 * 0.56, dy = Math.cos(a) * s2 * 0.56;
+        put(num, sx - dx, sy - dy, a, s2, fill, true);
+        put(net, sx + dx, sy + dy, a, s2 * 0.92, fill, false);
+        return;
+      }
+      const one = (w1) => { const s = Math.min(sh * 0.6, lo * room / w1, MAX); return s >= MIN ? s : 0; };
+      let t = null, s1 = 0, bold = false;
+      if (net && (s1 = one(we))) t = net;
+      else if (num && (s1 = one(wn))) { t = num; bold = true; }
+      if (t && claim(box(sx, sy, a, (bold ? wn : we) * s1 / 2, s1 * 0.6))) put(t, sx, sy, a, s1, fill, bold);
+    };
+    // the segments of a layer's tracks on screen: [ax, ay, bx, by, track]
+    const segments = (l) => {
+      const out = [];
+      for (const t of d.tracks) {
+        if (t[5] !== l) continue;
+        const pts = t.length > 7 ? [t[0], t[1], t[7], t[8], t[2], t[3]] : [t[0], t[1], t[2], t[3]];
+        for (let i = 0; i + 3 < pts.length; i += 2) {
+          const ax = pts[i] * S + this.ox, ay = pts[i + 1] * S + this.oy, bx = pts[i + 2] * S + this.ox, by = pts[i + 3] * S + this.oy;
+          if (Math.max(ax, bx) < -20 || Math.min(ax, bx) > W + 20 || Math.max(ay, by) < -20 || Math.min(ay, by) > H + 20) continue;
+          out.push([ax, ay, bx, by, t]);
+        }
+      }
+      return out;
+    };
+    // a layer's tracks: the net along each segment, repeated every few hundred pixels
+    const nameTracks = (l) => {
+      const onFront = l === front;
+      for (const [ax, ay, bx, by, t] of segments(l)) {
+        if (!t[6] || (spot && t[6] !== spot)) continue;
+        const wpx = t[4] * S;
+        if (wpx < 10) continue;
+        const size = Math.min(wpx * 0.66, MAX), label = name(t[6]), tw = wid(label) * size;
+        const L = Math.hypot(bx - ax, by - ay);
+        if (L < tw + size * 1.6) continue;
+        const col = copperMode ? this.netColor[t[6]] || [120, 124, 134] : COL[l] || [160, 160, 160];
+        const fill = ink(col, copperMode ? (onFront || this.solo ? 0.95 : 0.45) : onFront ? 0.95 : 0.6, onFront ? 0.92 : 0.55);
+        const a = readable(Math.atan2(by - ay, bx - ax));
+        const n = Math.max(1, Math.floor(L / Math.max(tw * 4, 260)));
+        for (let k = 0; k < n; k++) {
+          const q = (k + 0.5) / n, x = ax + (bx - ax) * q, y = ay + (by - ay) * q;
+          if (!inView(x, y, tw) || !claim(box(x, y, a, tw / 2 + 2, size * 0.55))) continue;
+          put(label, x, y, a, size, fill, false);
+        }
+      }
+    };
+
+    // the front layer: its pads, the vias, its tracks
+    for (const q of pads) if (q.l === padFront) namePad(q);
+    if (this.vis.vias) for (const v of d.vias) {        // white with a dark edge: it sits over the drill and the ring
+      if (!v[4] || (spot && v[4] !== spot)) continue;
+      const dpx = v[2] * S;
+      if (dpx < 24) continue;
+      const sx = v[0] * S + this.ox, sy = v[1] * S + this.oy;
+      if (!inView(sx, sy, dpx)) continue;
+      const t = name(v[4]), w1 = wid(t);
+      const s = Math.min(dpx * 0.3, dpx * 0.8 / w1, 13);
+      if (s < MIN || !claim(box(sx, sy, 0, w1 * s / 2, s * 0.6))) continue;
+      put(t, sx, sy, 0, s, "rgba(255,255,255,.95)", false, true);
+    }
+    nameTracks(front);
+    const lower = layers.slice(0, -1).reverse();
+    if (!lower.length && pads.every((q) => q.l === padFront)) return;
+    // the lower layers, off the front layer's copper: its tracks (in short pieces) and its pads block them
+    for (const [ax, ay, bx, by, t] of segments(front)) {
+      const L = Math.hypot(bx - ax, by - ay), a = Math.atan2(by - ay, bx - ax), hw = t[4] * S / 2;
+      const n = Math.max(1, Math.ceil(L / CELL));
+      for (let k = 0; k < n; k++) {
+        const q = (k + 0.5) / n;
+        take(box(ax + (bx - ax) * q, ay + (by - ay) * q, a, L / n / 2 + hw, hw));
+      }
+    }
+    for (const q of pads) if (q.l === padFront) take(box(q.sx, q.sy, q.rot, q.pw / 2, q.ph / 2));
+    for (const q of pads) if (q.l !== padFront) namePad(q);
+    for (const l of lower) nameTracks(l);
+  }
+
   setSide() {
     this.side = this.side === "F" ? "B" : "F";
     this.sideBtn.lastChild.textContent = this.side === "F" ? "Top" : "Bottom";
@@ -1112,6 +1273,8 @@ export class BoardView {
         }
       }
     }
+    // net names on the copper big enough to hold them (screen space)
+    if (this.vis.netnames) { c.save(); this.drawNetNames(c, copperMode); c.restore(); }
     // silk, fab, courtyards (faint over the copper inspector)
     const sk = copperMode ? 0.3 : 1;
     for (const f of this.fps) this.withPose(c, f, () => {
@@ -1400,5 +1563,29 @@ function hatchPattern(c) {
   g.strokeStyle = "rgba(240,101,96,.8)"; g.lineWidth = 2;
   g.beginPath(); g.moveTo(-2, 12); g.lineTo(12, -2); g.moveTo(-2, 2); g.lineTo(2, -2); g.moveTo(8, 12); g.lineTo(12, 8); g.stroke();
   return c.createPattern(t, "repeat");
+}
+const NN_FONT = "ui-sans-serif, -apple-system, sans-serif";
+// text turned to read left to right, or bottom to top when upright
+function readable(a) {
+  a = Math.atan2(Math.sin(a), Math.cos(a));
+  if (a > Math.PI / 2 - 1e-3) a -= Math.PI;
+  else if (a < -Math.PI / 2 - 1e-3) a += Math.PI;
+  return a;
+}
+// relative luminance of an sRGB colour, 0..1
+function luminance(rgb) {
+  const [r, g, b] = rgb.map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+// two rotated boxes {x, y, ux, uy, hw, hh} overlap (separating axis test)
+function boxesMeet(a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  if (dx * dx + dy * dy > (a.r + b.r) * (a.r + b.r)) return false;
+  for (const [ax, ay] of [[a.ux, a.uy], [-a.uy, a.ux], [b.ux, b.uy], [-b.uy, b.ux]]) {
+    const ra = a.hw * Math.abs(a.ux * ax + a.uy * ay) + a.hh * Math.abs(-a.uy * ax + a.ux * ay);
+    const rb = b.hw * Math.abs(b.ux * ax + b.uy * ay) + b.hh * Math.abs(-b.uy * ax + b.ux * ay);
+    if (Math.abs(dx * ax + dy * ay) > ra + rb) return false;
+  }
+  return true;
 }
 function roundRect(c, x, y, w, hh, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + hh, r); c.arcTo(x + w, y + hh, x, y + hh, r); c.arcTo(x, y + hh, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
