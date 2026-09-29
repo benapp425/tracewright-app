@@ -175,9 +175,11 @@ class Page:
         return box
 
     async def mouse(self, x, y, button="left", clicks=1):
-        await self.call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
-        await self.call("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button=button, clickCount=clicks)
-        await self.call("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button=button, clickCount=clicks)
+        """A click: press and release stamped with one time, as a quick click is, however busy the page."""
+        t = time.time()
+        await self.call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y, timestamp=t)
+        await self.call("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button=button, clickCount=clicks, timestamp=t)
+        await self.call("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button=button, clickCount=clicks, timestamp=t + 0.05)
 
     async def wheel(self, x, y, dy):
         await self.call("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y, deltaX=0, deltaY=dy)

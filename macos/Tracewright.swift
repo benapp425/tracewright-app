@@ -13,6 +13,8 @@ import Cocoa
 import UserNotifications
 import UniformTypeIdentifiers
 import LocalAuthentication
+import Speech
+import AVFoundation
 
 let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
 
@@ -32,6 +34,110 @@ func randomKey() -> String {
     return Data(bytes).base64EncodedString()
         .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
         .replacingOccurrences(of: "=", with: "")
+}
+
+// MARK: - Dictation (the chat's microphone)
+
+/// Speech to text for the message box: Apple's speech recognizer, on this Mac when it can do that (no audio
+/// leaves it), else Apple's speech service. The words stream to the page as they are heard ("partial", the
+/// whole text so far), then settle ("final"); "level" is the microphone's loudness, for the button.
+final class Dictation {
+    private let audio = AVAudioEngine()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var task: SFSpeechRecognitionTask?
+    private var recognizer: SFSpeechRecognizer?
+    private var cancelled = false
+    private var lastLevel = Date.distantPast
+    var onEvent: (([String: Any]) -> Void)?
+
+    func start(locale: String?) {
+        stop(cancel: true)
+        cancelled = false
+        SFSpeechRecognizer.requestAuthorization { status in
+            DispatchQueue.main.async {
+                guard status == .authorized else {
+                    self.fail("speech-denied", "Speech recognition is off for Tracewright. Turn it on in System Settings > Privacy & Security > Speech Recognition.")
+                    return
+                }
+                AVCaptureDevice.requestAccess(for: .audio) { ok in
+                    DispatchQueue.main.async {
+                        if ok { self.begin(locale: locale) }
+                        else { self.fail("mic-denied", "Tracewright can't use the microphone. Allow it in System Settings > Privacy & Security > Microphone.") }
+                    }
+                }
+            }
+        }
+    }
+
+    private func begin(locale: String?) {
+        let rec = locale.flatMap { SFSpeechRecognizer(locale: Locale(identifier: $0)) } ?? SFSpeechRecognizer()
+        guard let rec = rec, rec.isAvailable else { fail("unavailable", "Dictation isn't available right now."); return }
+        recognizer = rec
+        let req = SFSpeechAudioBufferRecognitionRequest()
+        req.shouldReportPartialResults = true
+        if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
+        if #available(macOS 13, *) { req.addsPunctuation = true }
+        request = req
+        let input = audio.inputNode
+        let format = input.outputFormat(forBus: 0)
+        guard format.channelCount > 0, format.sampleRate > 0 else { fail("no-mic", "No microphone found."); return }
+        input.removeTap(onBus: 0)
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
+            guard let self = self else { return }
+            self.request?.append(buf)
+            let n = Int(buf.frameLength)
+            guard n > 0, let ch = buf.floatChannelData?[0], Date().timeIntervalSince(self.lastLevel) > 0.08 else { return }
+            self.lastLevel = Date()
+            var sum: Float = 0
+            for i in 0..<n { sum += ch[i] * ch[i] }
+            let level = min(1, sqrt(sum / Float(n)) * 9)
+            DispatchQueue.main.async { self.onEvent?(["phase": "level", "level": Double(level)]) }
+        }
+        audio.prepare()
+        do { try audio.start() } catch {
+            input.removeTap(onBus: 0)
+            fail("audio", "The microphone didn't start: \(error.localizedDescription)")
+            return
+        }
+        onEvent?(["phase": "start", "onDevice": req.requiresOnDeviceRecognition])
+        task = rec.recognitionTask(with: req) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let r = result, !self.cancelled {
+                    self.onEvent?(["phase": r.isFinal ? "final" : "partial", "text": r.bestTranscription.formattedString])
+                }
+                if error != nil || (result?.isFinal ?? false) { self.finish(error) }
+            }
+        }
+    }
+
+    /// Stop listening: the words heard so far settle into a final result. cancel: drop them.
+    func stop(cancel: Bool = false) {
+        guard request != nil || task != nil else { return }
+        if cancel { cancelled = true }
+        if audio.isRunning { audio.stop() }
+        audio.inputNode.removeTap(onBus: 0)
+        request?.endAudio()
+        if cancel { task?.cancel() }
+    }
+
+    private func finish(_ error: Error?) {
+        if audio.isRunning { audio.stop(); audio.inputNode.removeTap(onBus: 0) }
+        request = nil
+        task = nil
+        var ev: [String: Any] = ["phase": "end"]
+        // "no speech detected" (1110) and a cancel (216, 301) are not errors worth showing
+        if let e = error as NSError?, !cancelled, ![1110, 216, 301, 203].contains(e.code) {
+            ev["message"] = e.localizedDescription
+        }
+        onEvent?(ev)
+    }
+
+    private func fail(_ code: String, _ message: String) {
+        request = nil
+        task = nil
+        onEvent?(["phase": "end", "code": code, "message": message])
+    }
 }
 
 // MARK: - The engine (the Python server)
@@ -295,6 +401,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     var window: NSWindow!
     var web: AppWebView!
     let engine = Engine()
+    lazy var dictation: Dictation = {
+        let d = Dictation()
+        d.onEvent = { [weak self] ev in
+            var m = ev
+            m["type"] = "dictation"
+            self?.send(m)
+        }
+        return d
+    }()
     var inProject = false
     var loaded = false
     var quitting = false
@@ -675,6 +790,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             replyHandler(nil, nil)
         case "pick":
             pick(m) { replyHandler($0, nil) }
+        case "dictate":
+            switch m["action"] as? String {
+            case "start": dictation.start(locale: m["locale"] as? String)
+            case "cancel": dictation.stop(cancel: true)
+            default: dictation.stop()
+            }
+            replyHandler(["ok": true], nil)
         case "save":
             if let s = m["url"] as? String, let u = URL(string: s, relativeTo: engine.baseURL) {
                 web.startDownload(using: URLRequest(url: u)) { d in d.delegate = self }

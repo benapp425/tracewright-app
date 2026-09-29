@@ -14,6 +14,8 @@
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Tracewright listens while you dictate a message to Claude.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Your words become the text of your message. On this Mac when it can; otherwise through Apple's speech service.</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSSupportsAutomaticTermination</key><false/>
   <key>NSSupportsSuddenTermination</key><false/>

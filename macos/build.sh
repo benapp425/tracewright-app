@@ -20,7 +20,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 swiftc -swift-version 5 -O -target "$ARCH-apple-macos12.0" -o "$TMP/Tracewright" "$HERE/Tracewright.swift" \
-  -framework Cocoa -framework WebKit -framework UserNotifications -framework UniformTypeIdentifiers -framework LocalAuthentication
+  -framework Cocoa -framework WebKit -framework UserNotifications -framework UniformTypeIdentifiers -framework LocalAuthentication -framework Speech -framework AVFoundation
 swiftc -swift-version 5 -O -o "$TMP/make_icon" "$HERE/make_icon.swift" -framework Cocoa
 "$TMP/make_icon" "$TMP/AppIcon.iconset"
 iconutil -c icns "$TMP/AppIcon.iconset" -o "$TMP/AppIcon.icns"

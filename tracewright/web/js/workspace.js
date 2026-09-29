@@ -144,6 +144,10 @@ export class Workspace {
     c("review", { title: "Toggle review flags", icon: "panel-right", kbd: "mod+shift+r", group: "Review", run: () => this.toggleReview() });
     c("send-flags", { title: "Send flags to Claude", icon: "send", kbd: "mod+shift+enter", group: "Review", run: () => this.review.send([...this.review.sel], this.reviewPanel.note.value) });
     c("toggle-chat", { title: "Toggle chat", icon: "panel-left", kbd: "mod+\\", group: "View", run: () => this.toggleChat() });
+    c("dictate", { title: "Dictate a message", icon: "mic", kbd: "mod+shift+d", group: "Chat", run: () => {
+      if (this.chatPane.classList.contains("collapsed")) this.toggleChat();
+      this.chat.toggleDictation();
+    } });
     c("new-chat", { title: "New conversation", icon: "message-square", kbd: "mod+shift+n", run: () => this.chat.newSession() });
     c("stop", { title: "Stop Claude", icon: "circle-stop", kbd: "mod+.", run: () => this.chat.stop() });
     c("outputs", { title: "Generate fab outputs", icon: "package", run: () => { this.show("outputs"); this.view("outputs").generate(true); } });

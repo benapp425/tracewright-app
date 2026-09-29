@@ -35,6 +35,8 @@ export const native = {
   reveal: (path) => post("reveal", { path }),
   // a native Open panel: kind folder | file | any; resolves to a path (or paths), or null
   pick: (opts) => post("pick", opts),
+  // dictation (the Mac app's speech recognizer): action start | stop | cancel; words arrive as "dictation" events
+  dictate: (action, opts = {}) => post("dictate", { action, ...opts }),
   save(url) { if (isNative) post("save", { url }); else { const a = document.createElement("a"); a.href = url; a.download = ""; document.body.appendChild(a); a.click(); a.remove(); } },
   theme: (mode, bg) => post("theme", { mode, bg }),
   // the app lock (Touch ID, or the Mac's password): {enabled, minutes, available, biometrics, locked}

@@ -616,6 +616,14 @@ a.brand:hover { text-decoration: none; }
 .composer-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 6px 8px; }
 .composer-bar .clipbtn { width: 26px; min-width: 26px; height: 26px; padding: 0; margin-left: -3px; color: var(--text-3); }
 .composer-bar .clipbtn:hover { color: var(--text); }
+.composer-bar .micbtn { width: 26px; min-width: 26px; height: 26px; padding: 0; color: var(--text-3); position: relative; touch-action: none; }
+.composer-bar .micbtn:hover { color: var(--text); }
+.composer-bar .micbtn.rec { color: #fff; background: var(--err); }
+.composer-bar .micbtn.rec::after { content: ""; position: absolute; inset: -3px; border-radius: 10px; pointer-events: none;
+  box-shadow: 0 0 0 calc(1px + var(--lvl, 0) * 6px) color-mix(in srgb, var(--err) 35%, transparent); transition: box-shadow .08s linear; }
+.composer-bar .micbtn.rec:not([style*="--lvl"])::after { animation: micpulse 1.4s ease-in-out infinite; }
+@keyframes micpulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--err) 25%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .composer-bar .micbtn.rec::after { animation: none; transition: none; } }
 /* attachments waiting to go with the message */
 .attachrow { display: none; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
 .attachrow.on { display: flex; }
@@ -629,6 +637,7 @@ a.brand:hover { text-decoration: none; }
 .attach.busy { opacity: .75; }
 .attach .aspin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line-2); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
 .sendbtn.waiting { opacity: .6; }
+.composer-bar .listening { color: var(--err); opacity: 1; }
 /* attachments on a sent message */
 .msg.user .apics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .msg.user .apics img { max-width: 180px; max-height: 130px; border-radius: 8px; border: 1px solid var(--line-2); cursor: zoom-in; display: block; object-fit: cover; }

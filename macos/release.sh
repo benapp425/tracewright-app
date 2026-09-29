@@ -18,7 +18,7 @@ trap 'rm -rf "$TMP"' EXIT
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-FW="-framework Cocoa -framework WebKit -framework UserNotifications -framework UniformTypeIdentifiers -framework LocalAuthentication"
+FW="-framework Cocoa -framework WebKit -framework UserNotifications -framework UniformTypeIdentifiers -framework LocalAuthentication -framework Speech -framework AVFoundation"
 for arch in arm64 x86_64; do
   swiftc -swift-version 5 -O -target "$arch-apple-macos12.0" -o "$TMP/tw-$arch" "$HERE/Tracewright.swift" $FW
 done

@@ -248,6 +248,63 @@ async def attachments_paste_drop_and_take_back(t):
     check(not any(e["name"] == "LM7805.pdf" for e in docs), f"the taken-back PDF is still there: {docs}")
 
 
+# a speech recognizer the test speaks through (headless Chrome has no microphone or speech service)
+FAKE_SPEECH = """
+window.SpeechRecognition = window.webkitSpeechRecognition = class {
+  constructor() { window.__sr = this; this.state = 'new'; }
+  start() { this.state = 'on'; setTimeout(() => this.onstart && this.onstart(), 5); }
+  stop() { this.state = 'stopped'; setTimeout(() => this.onend && this.onend(), 5); }
+  abort() { this.state = 'aborted'; this.onend && this.onend(); }
+  say(parts, final) {
+    const results = parts.map((t, i) => Object.assign([{ transcript: t }], { isFinal: !!final || i < parts.length - 1 }));
+    this.onresult && this.onresult({ results });
+  }
+};
+"""
+
+
+@test
+async def dictation_writes_into_the_message_box(t):
+    await t.page.call("Page.addScriptToEvaluateOnNewDocument", source=FAKE_SPEECH)
+    await t.page.call("Page.reload")
+    await asyncio.sleep(0.5)
+    await t.open_project("board")
+    await t.page.wait("document.querySelector('.composer .micbtn')", 10)
+    ta = "document.querySelector('.composer textarea')"
+    await t.page.js(f"{ta}.value = 'Route '; {ta}.dispatchEvent(new Event('input')); 1")
+    # a click starts it; words land after what was typed
+    await t.page.click(".composer .micbtn")
+    await t.page.wait("document.querySelector('.micbtn.rec') && window.__sr && window.__sr.state === 'on'", 5)
+    await t.page.js("window.__sr.say(['the USB pair'], false); 1")
+    check(await t.page.js(f"{ta}.value") == "Route the USB pair", await t.page.js(f"{ta}.value"))
+    await t.page.js("window.__sr.say(['the USB pair', ' first.'], true); 1")
+    check(await t.page.js(f"{ta}.value") == "Route the USB pair first.", await t.page.js(f"{ta}.value"))
+    check("Listening" in await t.page.js("document.querySelector('.composer-bar').innerText"), "the composer does not say it is listening")
+    await t.shot("dictation")
+    # a second click stops it; the text stays
+    await t.page.click(".composer .micbtn")
+    await t.page.wait("!document.querySelector('.micbtn.rec')", 5)
+    check(await t.page.js(f"{ta}.value") == "Route the USB pair first.", "the dictated text did not stay")
+    # Esc while listening drops what was said
+    await t.page.click(".composer .micbtn")
+    await t.page.wait("window.__sr.state === 'on'", 5)
+    await t.page.js("window.__sr.say(['scratch that'], false); 1")
+    await t.page.js(f"{ta}.focus(); 1")
+    await t.page.key("Escape", code="Escape")
+    await t.page.wait("!document.querySelector('.micbtn.rec')", 5)
+    check(await t.page.js(f"{ta}.value") == "Route the USB pair first.", f"Esc left: {await t.page.js(ta + '.value')!r}")
+    # held down: listens until let go
+    box = await t.page.js("(() => { const r = document.querySelector('.composer .micbtn').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")
+    t0 = time.time()
+    await t.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=box[0], y=box[1], timestamp=t0)
+    await t.page.call("Input.dispatchMouseEvent", type="mousePressed", x=box[0], y=box[1], button="left", clickCount=1, timestamp=t0)
+    await t.page.wait("!!document.querySelector('.micbtn.rec') && window.__sr.state === 'on'", 5)   # listening while held
+    await t.page.js("window.__sr.say(['and the power'], true); 1")
+    await t.page.call("Input.dispatchMouseEvent", type="mouseReleased", x=box[0], y=box[1], button="left", clickCount=1, timestamp=t0 + 0.9)
+    await t.page.wait("!document.querySelector('.micbtn.rec')", 5)
+    check(await t.page.js(f"{ta}.value") == "Route the USB pair first. and the power", await t.page.js(f"{ta}.value"))
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

@@ -6,6 +6,7 @@ import { h, clear, api, toast, lightbox, fmtTime, btn, menu, copyText, upload } 
 import { icon } from "./icons.js";
 import { markdown } from "./markdown.js";
 import { native, isNative } from "./native.js";
+import { Dictation, dictationAvailable } from "./dictation.js";
 
 // attachments by type: the icon, and where in the project they go (attach.py decides; this is for the chip)
 const FILE_KIND = { image: ["image", "Picture: Claude sees it"], pdf: ["file-text", "Saved to docs/datasheets"],
@@ -117,6 +118,7 @@ export const KIND = (n) => ({ Bash: "command", Read: "read", Grep: "search", Glo
 export class Chat {
   constructor(el, ws) {
     this.el = el; this.ws = ws; this.pid = ws.pid;
+    el.__chat = this;                                  // for debugging from the console, and the browser tests
     this.cards = {}; this.cur = null; this.busy = false; this.sel = []; this.kicadSel = []; this.pending = 0; this.files = [];
     this.agenda = null; this.agOpen = localStorage.getItem("tw.agenda.open") !== "0";
     this.build();
@@ -142,7 +144,10 @@ export class Chat {
     this.chips = h("div.chips");
     this.filesEl = h("div.attachrow");
     this.input = h("textarea", { placeholder: "Message Claude", rows: 1,
-      onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.send(); } },
+      onkeydown: (e) => {
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.send(); }
+        else if (e.key === "Escape" && this.dict && this.dict.on) { e.preventDefault(); e.stopPropagation(); this.cancelDictation(); }
+      },
       oninput: () => this.grow(),
       onpaste: (e) => {                                   // a screenshot or copied files: attached, not pasted as text
         const files = [...((e.clipboardData && e.clipboardData.files) || [])];
@@ -152,12 +157,73 @@ export class Chat {
           new File([f], `pasted-${stamp()}.${f.name.split(".").pop()}`, { type: f.type }) : f) });
       } });
     this.clipBtn = btn("paperclip", null, { onclick: () => this.pickFiles(), "data-tip": "Attach files: pictures, data sheets, libraries, 3D models" }, "sm ghost clipbtn");
+    this.micBtn = dictationAvailable() ? this.micButton() : null;
     this.stopBtn = h("button.stopbtn", { onclick: () => this.stop(), "data-tip": "Stop Claude", "data-kbd": "mod+." }, icon("square", 11));
     this.sendBtn = h("button.sendbtn.idle", { onclick: () => this.send(), "data-tip": "Send", "data-kbd": "enter" }, icon("arrow-up", 16));
     this.modelEl = h("span.model");
     this.hintEl = h("span.tiny.faint", "⇧↩ new line");
     this.el.append(this.agendaEl, this.msgs, this.status, this.dock, h("div.composer", h("div.composer-box", this.filesEl, this.chips, this.input,
-      h("div.composer-bar", this.clipBtn, this.modelEl, h("div.grow"), this.hintEl, this.stopBtn, this.sendBtn))));
+      h("div.composer-bar", this.clipBtn, this.micBtn, this.modelEl, h("div.grow"), this.hintEl, this.stopBtn, this.sendBtn))));
+  }
+
+  // ------------------------------------------------------------------ dictation
+  // The microphone listens from the moment it is pressed. A short press keeps it listening until the next
+  // click; held down, it stops when let go (push to talk). The words go into the message box after what is
+  // there; Esc drops them. How long it was held is read from the events' own times, so a busy page does not
+  // turn a click into a hold.
+  micButton() {
+    const b = btn("mic", null, { "data-tip": "Dictate: click, or hold to talk", "data-kbd": "mod+shift+d" }, "sm ghost micbtn");
+    let press = null;
+    b.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      if (this.dict && this.dict.on) { press = null; this.dict.stop(); return; }
+      press = e.timeStamp;
+      this.toggleDictation();
+    });
+    b.addEventListener("pointerup", (e) => {
+      if (press != null && e.timeStamp - press >= 450 && this.dict && this.dict.on) this.dict.stop();
+      press = null;
+    });
+    return b;
+  }
+
+  toggleDictation() {
+    if (!this.micBtn) { toast("Dictation isn't available in this browser.", "info"); return; }
+    if (this.dict && this.dict.on) { this.dict.stop(); return; }
+    const base = this.input.value, sep = base && !/\s$/.test(base) ? " " : "";
+    this.micBtn.classList.add("rec");
+    this.dict = new Dictation({
+      onStart: () => { this.input.placeholder = "Listening…"; this.hintEl.textContent = "Listening… Esc cancels"; this.hintEl.classList.add("listening"); },
+      onText: (text) => {
+        this.input.value = base + (text ? sep + text : "");
+        this.grow();
+        this.input.scrollTop = this.input.scrollHeight;
+      },
+      onLevel: (v) => this.micBtn.style.setProperty("--lvl", v.toFixed(2)),
+      onEnd: (msg) => {
+        this.micBtn.classList.remove("rec"); this.micBtn.style.removeProperty("--lvl");
+        this.input.placeholder = this.busy ? "Add a note for Claude" : "Message Claude";
+        this.hintEl.textContent = "⇧↩ new line"; this.hintEl.classList.remove("listening");
+        if (msg) toast(msg, "warn", 8000);
+        const done = this.dictDone; this.dictDone = null; if (done) done();
+      },
+    });
+    this.dict.base = base;
+    this.dict.start();
+    this.input.focus();
+  }
+
+  cancelDictation() {
+    if (!this.dict || !this.dict.on) return;
+    const base = this.dict.base;
+    this.dict.cancel();
+    this.input.value = base; this.grow();
+  }
+
+  // before sending: let what is being said settle into the box (a moment at most)
+  finishDictation() {
+    if (!this.dict || !this.dict.on) return Promise.resolve();
+    return new Promise((res) => { this.dictDone = res; this.dict.stop(); setTimeout(res, 1500); });
   }
 
   grow() {
@@ -796,7 +862,7 @@ export class Chat {
     this.el.classList.toggle("working", this.busy);
     this.mcBtn.classList.toggle("hot", this.busy);
     this.stopBtn.style.display = this.busy ? "" : "none";
-    this.input.placeholder = this.busy ? "Add a note for Claude" : "Message Claude";
+    this.input.placeholder = this.dict && this.dict.on ? "Listening…" : this.busy ? "Add a note for Claude" : "Message Claude";
     this.sendBtn.dataset.tip = this.busy ? "Send note" : "Send";
     this.hintEl.textContent = this.busy ? "↩ sends a note · ⌘. stops" : "⇧↩ new line";
     this.grow();
@@ -852,6 +918,7 @@ export class Chat {
   }
 
   async send() {
+    await this.finishDictation();
     const text = this.input.value.trim();
     if (!text && !this.files.length) return;
     if (this.busy) { this.input.value = ""; this.grow(); this.steer(text, await this.takeFiles()); return; }
