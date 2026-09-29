@@ -5,6 +5,7 @@
 import { h, clear, api, toast, btn } from "./util.js";
 import { icon } from "./icons.js";
 import { diagramSVG } from "./blockdiagram.js";
+import { limitsPanel, limitsSummary } from "./limits.js";
 
 const enc = encodeURIComponent;
 
@@ -82,7 +83,18 @@ export class GuidedCanvas {
 
   // ------------------------------------------------------------------ requirements
   reqCard(r) {
-    return this.card("list", "Requirements", null, h("div.gd-req", r.items.map((i) => h("div.gd-rq", h("span", i.label), h("b", i.value)))));
+    // Advanced: preset limits, all Claude's to decide until you set one (kept open once opened)
+    const sum = h("span.gd-advn", limitsSummary(this.cv.constraints));
+    const adv = h("details.gd-adv" + (this.advOpen ? "" : ""), { open: !!this.advOpen, ontoggle: async (e) => {
+      this.advOpen = e.target.open;
+      if (e.target.open && !body.firstChild) {
+        try { body.appendChild(await limitsPanel(this.pid, (v) => { this.cv.constraints = v; sum.textContent = limitsSummary(v); })); }
+        catch (er) { body.appendChild(h("div.small.muted", er.message)); }
+      }
+    } }, h("summary", h("span", "Advanced"), sum), h("div.gd-advb"));
+    const body = adv.lastChild;
+    if (this.advOpen) adv.dispatchEvent(new Event("toggle"));
+    return this.card("list", "Requirements", null, h("div.gd-req", r.items.map((i) => h("div.gd-rq", h("span", i.label), h("b", i.value)))), adv);
   }
 
   // ------------------------------------------------------------------ block diagram

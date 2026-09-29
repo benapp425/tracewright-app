@@ -169,7 +169,15 @@ class Project:
                 "description": self.cfg.get("description", ""), "archived": self.cfg.get("archived", False),
                 "toolkit": self.cfg.get("toolkit"), "fab": self.cfg.get("fab", {}), "run_mode": self.run_mode(),
                 "unattended": self.unattended(), "start_phase": self.start_phase(),
-                "schematic_style": self.schematic_style(), "schematic": self.schematic_conventions()}
+                "schematic_style": self.schematic_style(), "schematic": self.schematic_conventions(),
+                "constraints": self._constraints()}
+
+    def _constraints(self):
+        try:
+            from tw import constraints
+            return constraints.get(self.cfg)
+        except Exception:
+            return {}
 
     def schematic_style(self):
         """How the sheets are to be joined: 'hierarchical' (sheet pins), 'flat' (global labels), or None

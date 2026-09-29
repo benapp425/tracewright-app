@@ -620,11 +620,23 @@ def make_app():
         name = (body.get("name") or "").strip() or "Untitled board"
         brief = body.get("brief", "")
         guided = body.get("workflow") == "guided" and body.get("start") and brief.strip()
+        lim = None
+        if body.get("constraints"):
+            from tw import constraints
+            try:
+                lim = {k: v for k, v in constraints.validate(body["constraints"]).items() if v is not None}
+            except ValueError as e:
+                return err(str(e))
         p = await asyncio.to_thread(app.store.create, name, brief, {"layers": body.get("layers", 2),
                                                                     "fab_house": body.get("fab_house", "jlcpcb"),
                                                                     "assembly": body.get("assembly", True),
                                                                     "run_mode": body.get("run_mode"),
                                                                     "workflow": "guided" if guided else "classic"})
+        if lim:
+            p.cfg["constraints"] = lim
+            if "layers" in lim:
+                p.cfg.setdefault("fab", {})["layers"] = lim["layers"]
+            p.save()
         if body.get("start") and brief.strip():
             a = app.agent(p.id)
             await a.new_session()
@@ -637,7 +649,8 @@ def make_app():
         from . import canvas
         p = app.store.get(request.match_info["pid"])
         cv = await asyncio.to_thread(lambda: canvas.enrich(p.root, canvas.load(p.root)))
-        return jresp({**cv, "phase": p.start_phase(), "run_mode": p.run_mode()})
+        from tw import constraints
+        return jresp({**cv, "phase": p.start_phase(), "run_mode": p.run_mode(), "constraints": constraints.get(p.cfg)})
 
     @routes.post("/api/projects/{pid}/start")
     async def start_design(request):
@@ -783,8 +796,35 @@ def make_app():
             if "style" in conv and rt.p.tw.has_sch():
                 conv.pop("style")
             p.cfg.setdefault("schematic", {}).update(conv)
+        if "constraints" in body:                           # the requirements' Advanced limits (None: Claude decides)
+            from tw import constraints
+            try:
+                before = constraints.get(p.cfg)
+                now = constraints.merge(p.cfg, body["constraints"] or {})
+            except ValueError as e:
+                return err(str(e))
+            if now != before:
+                rt.user_changes.append("design limits: " + (constraints.describe(p.cfg) or "all left to you"))
+            if now.get("layers"):                          # the fab settings follow the limit
+                p.cfg.setdefault("fab", {})["layers"] = now["layers"]
         p.save()
         return jresp(p.summary())
+
+    @routes.get("/api/constraints")
+    async def constraint_options(request):
+        from tw import constraints
+        return jresp({"options": [{"key": k, "label": o[0], "kind": o[1], "unit": o[2], "hint": o[3], "choices": o[4]}
+                                  for k, o in constraints.OPTIONS.items()]})
+
+    @routes.get("/api/projects/{pid}/constraints")
+    async def get_constraints(request):
+        """The Advanced limits: every option (label, kind, unit, hint, choices) and the values set."""
+        rt = app.rt(request.match_info["pid"])
+        from tw import constraints
+        rt.p.reload()
+        opts = [{"key": k, "label": o[0], "kind": o[1], "unit": o[2], "hint": o[3], "choices": o[4]}
+                for k, o in constraints.OPTIONS.items()]
+        return jresp({"options": opts, "values": constraints.get(rt.p.cfg)})
 
     @routes.delete("/api/projects/{pid}")
     async def delete_project(request):

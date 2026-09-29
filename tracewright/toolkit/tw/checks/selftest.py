@@ -126,6 +126,11 @@ def mem_nets_model(ctx):
     ctx.cfg = {**(ctx.cfg or {}), "nets": {"VCC_OLD": {"kind": "power", "voltage": 5, "current": 1}}}
 
 
+def mem_limits(ctx):
+    # the requirements say the board must fit 20 x 20 mm
+    ctx.cfg = {**(ctx.cfg or {}), "constraints": {"max_size_mm": [20, 20]}}
+
+
 def mem_placement(ctx):
     fp = ctx.board.footprints["U1"]
     _shift(fp, 200.0 - fp.x, 0)
@@ -515,6 +520,7 @@ CASES = [
     ("sch.conventions", "IEC values chosen, a resistor written 5.1k", ("mem", mem_conventions), "writes values"),
     ("sch.nets", "J2 pin 3 on 'I2C_SDA1' instead of I2C_SDA", ("mem", mem_sch_nets), "I2C_SDA1"),
     ("nets.model", "a net declared under a name no net has", ("mem", mem_nets_model), "VCC_OLD"),
+    ("req.limits", "a 20 x 20 mm size limit on a larger board", ("mem", mem_limits), "the limit is"),
     ("bom.fields", "R1's LCSC code without its C", ("mem", mem_bom_fields), "LCSC"),
     ("bom.board", "R3 is 22k on the board", ("mem", mem_bom_board), "R3"),
     ("pcb.placement", "U1 moved off the board", ("mem", mem_placement), "U1"),

@@ -5,6 +5,7 @@ import { go, topbar, state, command, runCommand } from "./app.js";
 import { native, isNative } from "./native.js";
 import { openPalette } from "./palette.js";
 import { IdeasPanel } from "./ideas.js";
+import { limitsForm, limitOptions, limitsSummary } from "./limits.js";
 
 const enc = encodeURIComponent;
 
@@ -203,17 +204,32 @@ export class ProjectsPage {
       if (!brief.value.trim() && !name.value.trim()) { toast("Add a name or a description", "warn"); return; }
       okb.disabled = true; okb.lastChild.textContent = "Creating…";
       try {
+        const lim = Object.fromEntries(Object.entries(limits).filter(([, v]) => v != null));
         const s = await api("/api/projects", { body: { name: name.value || firstLine(brief.value), brief: brief.value, layers, fab_house: fab,
+          ...(Object.keys(lim).length ? { constraints: lim } : {}),
           assembly: assembly.checked, start: start.checked, run_mode: mode, workflow: flow } });
         m.close();
         go("p/" + enc(s.id));
       } catch (e) { toast(e.message, "error"); okb.disabled = false; okb.lastChild.textContent = "Create project"; }
     };
     const okb = btn("plus", "Create project", { onclick: create }, "primary");
+    // Advanced: preset limits, each Claude's to decide until you give it a value
+    const limits = {};
+    const limSum = h("span.small.muted", limitsSummary(limits));
+    const adv = h("details.np-adv", { ontoggle: async (e) => {
+      if (!e.target.open || advBody.firstChild) return;
+      try {
+        advBody.appendChild(limitsForm((await limitOptions()).filter((o) => o.key !== "layers"), limits, (k, v) => {   // layers: above
+          if (v == null) delete limits[k]; else limits[k] = v;
+          limSum.textContent = limitsSummary(limits);
+        }));
+      } catch (er) { advBody.appendChild(h("div.small.muted", er.message)); }
+    } }, h("summary", h("span", "Advanced"), limSum), h("div.np-advb"));
+    const advBody = adv.lastChild;
     const m = modal({ title: "New project", icon: "circuit-board", cls: "wide",
       body: [
         h("div.field", h("label", "Name"), name),
-        h("div.field", h("label", "Description"), brief, h("div.hint", "Claude asks about anything that's missing.")),
+        h("div.field", h("label", "Description"), brief, h("div.hint", "Claude asks about anything that's missing."), adv),
         h("div.opts", { style: { marginBottom: "16px" } },
           h("span.small.muted", "Layers"), seg([[2, "2"], [4, "4"], [6, "6"]], () => layers, (v) => layers = v),
           h("span.small.muted", { style: { marginLeft: "6px" } }, "Fab"), seg([["jlcpcb", "JLCPCB"], ["pcbway", "PCBWay"], ["oshpark", "OSH Park"]], () => fab, (v) => fab = v),

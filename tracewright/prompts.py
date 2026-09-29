@@ -120,6 +120,13 @@ def turn_context(runtime, extra=None):
     if sel_k:
         lines.append("Selected in KiCad: " + ", ".join(_sel(s) for s in sel_k[:20]))
     p = runtime.p
+    try:
+        from tw import constraints
+        lim = constraints.describe(p.cfg)
+        if lim:
+            lines.append(lim)
+    except Exception:
+        pass
     tl = p.cfg.get("toolkit_local") or {}
     if tl and not tl.get("told"):                     # once: the app's update replaced Claude's edits in tools/tw
         lines.append(f"The app updated this project's tools/tw, replacing your edits to {', '.join(tl.get('files', [])[:6])}; "

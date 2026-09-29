@@ -92,14 +92,14 @@ def check(id, title, group, needs=(), default=True, timeout=None):
     return deco
 
 
-GROUPS = ["KiCad", "Schematic", "Parts & BOM", "Placement", "Routing", "Power", "High-speed", "Manufacturing",
+GROUPS = ["Requirements", "KiCad", "Schematic", "Parts & BOM", "Placement", "Routing", "Power", "High-speed", "Manufacturing",
           "Assembly", "Lessons"]
 
 
 def load_all():
     """Import every check module (registration happens on import)."""
     from . import kicad_reports, schematic_checks, bom, placement, routing, power, signal, dfm, lessons, cpl, assembly  # noqa: F401
-    from . import integrity, power_layout, si_layout, layout_quality, nets  # noqa: F401
+    from . import integrity, power_layout, si_layout, layout_quality, nets, requirements  # noqa: F401
     return REGISTRY
 
 

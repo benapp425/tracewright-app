@@ -96,6 +96,7 @@ class Footprint:
         self.texts = []
         self.zones = []
         self.models = []
+        self.model_places = []       # per model: {"offset", "scale", "rotate"} (xyz tuples, mm and degrees)
         self.uuid = ""
         self.path = ""
         self.sheetname = ""
@@ -523,6 +524,16 @@ def _footprint(c, netcodes, board):
             board.zones.append(z)
         elif k == "model":
             fp.models.append(str(ch[1]) if len(ch) > 1 else "")
+            place = {"offset": (0.0, 0.0, 0.0), "scale": (1.0, 1.0, 1.0), "rotate": (0.0, 0.0, 0.0)}
+            for sub in ch[2:]:
+                if isinstance(sub, list) and sub and sub[0] in place:
+                    xyz = next((q for q in sub[1:] if isinstance(q, list) and q and q[0] == "xyz"), None)
+                    if xyz and len(xyz) >= 4:
+                        try:
+                            place[sub[0]] = tuple(float(v) for v in xyz[1:4])
+                        except (TypeError, ValueError):
+                            pass
+            fp.model_places.append(place)
     for t in fp.texts:
         if t.text in ("${REFERENCE}", "%R"):
             t.text = fp.ref

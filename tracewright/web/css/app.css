@@ -1951,3 +1951,23 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .cv-ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .cv-seg { flex-wrap: wrap; flex: 0 1 auto; } .cv-seg button { font-size: 12px; white-space: nowrap; }
 .cv-about { grid-column: 2; font-size: 11.5px; color: var(--text-3); line-height: 1.4; }
+
+/* ------------------------------------------------------------------ Advanced limits (requirements) */
+.gd-adv, .np-adv { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.gd-adv > summary, .np-adv > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.gd-adv > summary::-webkit-details-marker, .np-adv > summary::-webkit-details-marker { display: none; }
+.gd-adv > summary::before, .np-adv > summary::before { content: ""; width: 5px; height: 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; margin: 0 3px 0 1px; }
+.gd-adv[open] > summary::before, .np-adv[open] > summary::before { transform: rotate(45deg) translate(-1px, -1px); }
+.lim-in.unset { color: var(--text-3); }
+.gd-advn { font-weight: 450; color: var(--text-3); }
+.gd-advb, .np-advb { padding-top: 8px; }
+.lim-grid { display: grid; grid-template-columns: 1fr; gap: 4px; }
+.lim-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(150px, 190px) 34px; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 7px; font-size: 12.5px; color: var(--text-2); }
+.lim-row:hover { background: var(--surface-2); }
+.lim-row.on .lim-l { color: var(--text); font-weight: 550; }
+.lim-in { width: 100%; height: 26px; padding: 0 8px; font-size: 12.5px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+.lim-in::placeholder { color: var(--text-3); }
+.lim-in.half { width: calc(50% - 12px); }
+.lim-pair { display: flex; align-items: center; gap: 4px; }
+.lim-sep { color: var(--text-3); font-size: 11.5px; width: 16px; text-align: center; }
+.lim-u { color: var(--text-3); font-size: 11.5px; }

@@ -237,6 +237,42 @@ def net_model_declared_over_inferred():
 
 
 @test(needs=("kicad",))
+def design_limits_held_against_the_board():
+    """The requirements' Advanced limits: values are cleaned (sizes and ranges as pairs, choices from their
+    list), unset ones are left to Claude, Claude hears the ones set, and req.limits holds the board to them:
+    size either way round, layers, part heights from the 3D models, temperature ratings from LCSC data."""
+    from tw import constraints
+    from tw.checks import runner
+    assert constraints.validate({"max_size_mm": "45 x 90", "temp_c": [60, -20], "layers": "4", "finish": "enig"}) == \
+        {"max_size_mm": [45, 90], "temp_c": [-20, 60], "layers": 4, "finish": "ENIG"}
+    for bad in ({"layers": 3}, {"max_height_mm": -1}, {"max_size_mm": [45]}, {"nope": 1}):
+        try:
+            constraints.validate(bad)
+            raise AssertionError(f"accepted {bad}")
+        except ValueError:
+            pass
+    cfg = {}
+    assert constraints.merge(cfg, {"max_height_mm": 9, "layers": 2}) == {"max_height_mm": 9, "layers": 2}
+    assert constraints.merge(cfg, {"max_height_mm": None}) == {"layers": 2} and constraints.describe(cfg).startswith("Hard limits")
+    assert constraints.describe({}) == ""
+    p = fixture_copy("limits")
+    res = runner.run_all(p, only=["req.limits"], offline=True, write=False)
+    assert res["checks"][0].get("na"), res["checks"][0]                     # nothing set: Claude decides
+    cfg = json.load(open(os.path.join(p.root, "tracewright.json")))
+    from tw.board import Board
+    w, hgt = Board.load(p.pcb).size()
+    cfg["constraints"] = {"max_size_mm": [round(hgt) + 1, round(w) + 1], "layers": 4, "max_height_mm": 1.0}
+    json.dump(cfg, open(os.path.join(p.root, "tracewright.json"), "w"))
+    res = runner.run_all(env.Project(p.root), only=["req.limits"], offline=True, write=False)
+    c = res["checks"][0]
+    msgs = [f["message"] for f in c["findings"]]
+    assert not any("the board is" in m and "limit" in m for m in msgs), msgs        # fits turned round
+    assert any("2 copper layers" in m for m in msgs), msgs
+    assert any("stands" in m and "tall" in m for m in msgs), msgs                  # something is taller than 1 mm
+    assert "limits: size, layers, height" in (c.get("scope") or ""), c
+
+
+@test(needs=("kicad",))
 def schematic_field_edit_in_place():
     from tw.sch import edit
     from tw import kicad
