@@ -7,7 +7,7 @@ A project's start (tracewright.json "start"): {"mode": "guided", "phase": "intak
 Classic projects have no start block."""
 import os, json, time, threading
 
-SECTIONS = ("requirements", "diagram", "connectors", "parts", "plan")
+SECTIONS = ("requirements", "diagram", "connectors", "floorplan", "parts", "plan")
 KINDS = ("power", "mcu", "sensor", "connector", "io", "rf", "memory", "display", "motor", "audio", "other")
 EDGES = ("left", "right", "top", "bottom", "")
 _lock = threading.Lock()
@@ -81,6 +81,8 @@ def clean(section, data):
         size = data.get("board") or {}
         board = {"w": float(size.get("w") or 0) or None, "h": float(size.get("h") or 0) or None} if isinstance(size, dict) else {}
         return {"items": items[:12], "board": board}
+    if section == "floorplan":
+        return clean_floorplan(data)
     if section == "parts":
         items = []
         for p in data.get("items") or []:
@@ -96,13 +98,138 @@ def clean(section, data):
     raise ValueError(f"unknown canvas section {section}; sections: {', '.join(SECTIONS)}")
 
 
+# ----------------------------------------------------------------------------- the floorplan
+# The board as it is meant to come out, to scale, before the schematic exists: its size and corners, the
+# mounting holes, each connector on its edge, the main blocks where they go, and keep-outs. Millimetres from
+# the board's top-left corner, y down; a block's x, y is its centre; a connector's `at` is how far along its
+# edge its centre is (from the top for left and right, from the left for top and bottom). The user can drag
+# anything; what they moved keeps its place ("moved") when Claude sends the floorplan again.
+def _num(v, lo=None, hi=None, default=None):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return default
+    if x != x:                                        # NaN
+        return default
+    if lo is not None:
+        x = max(lo, x)
+    if hi is not None:
+        x = min(hi, x)
+    return round(x, 2)
+
+
+def clean_floorplan(data):
+    b = data.get("board") if isinstance(data.get("board"), dict) else {}
+    W = _num(b.get("w"), 5, 500, 50.0)
+    H = _num(b.get("h"), 5, 500, 40.0)
+    board = {"w": W, "h": H, "radius": _num(b.get("radius"), 0, min(W, H) / 2, 0.0)}
+    holes = []
+    for i, o in enumerate(data.get("holes") or []):
+        if not isinstance(o, dict):
+            continue
+        d = _num(o.get("d"), 1, 10, 3.2)
+        holes.append({"id": _s(o.get("id") or o.get("ref") or f"H{i + 1}", 16), "ref": _s(o.get("ref"), 12),
+                      "x": _num(o.get("x"), d / 2, W - d / 2, d), "y": _num(o.get("y"), d / 2, H - d / 2, d), "d": d,
+                      "moved": bool(o.get("moved"))})
+    items, ids = [], set()
+    for o in data.get("items") or []:
+        if not isinstance(o, dict):
+            continue
+        iid = _s(o.get("id") or o.get("ref") or o.get("label"), 32)
+        if not iid or iid in ids:
+            continue
+        ids.add(iid)
+        w, h = _num(o.get("w"), 1, W * 2, 8.0), _num(o.get("h"), 1, H * 2, 6.0)
+        it = {"id": iid, "label": _s(o.get("label") or iid, 40), "ref": _s(o.get("ref"), 12),
+              "kind": o.get("kind") if o.get("kind") in KINDS else ("connector" if o.get("edge") in EDGES[:4] else "other"),
+              "w": w, "h": h, "note": _s(o.get("note"), 80), "moved": bool(o.get("moved"))}
+        if o.get("edge") in EDGES[:4]:
+            it["edge"] = o["edge"]
+            span = H if o["edge"] in ("left", "right") else W
+            it["at"] = _num(o.get("at"), min(w / 2, span / 2), max(span - w / 2, span / 2), span / 2)
+        else:
+            it["x"] = _num(o.get("x"), 0, W, W / 2)
+            it["y"] = _num(o.get("y"), 0, H, H / 2)
+        items.append(it)
+    keepouts = []
+    for o in data.get("keepouts") or []:
+        if isinstance(o, dict):
+            keepouts.append({"label": _s(o.get("label"), 40), "x": _num(o.get("x"), 0, W, W / 2), "y": _num(o.get("y"), 0, H, H / 2),
+                             "w": _num(o.get("w"), 0.5, W, 5.0), "h": _num(o.get("h"), 0.5, H, 5.0)})
+    return {"board": board, "holes": holes[:12], "items": items[:24], "keepouts": keepouts[:8], "note": _s(data.get("note"), 200)}
+
+
+def _keep_moves(old, new):
+    """What the user moved keeps the user's place when Claude sends the floorplan again."""
+    if not old:
+        return new
+    before = {o["id"]: o for o in (old.get("items") or []) + (old.get("holes") or []) if o.get("moved")}
+    for o in (new.get("items") or []) + (new.get("holes") or []):
+        was = before.get(o["id"])
+        if not was:
+            continue
+        for k in ("x", "y", "edge", "at"):
+            o.pop(k, None)
+            if k in was:
+                o[k] = was[k]
+        o["moved"] = True
+    if (old.get("board") or {}).get("moved"):
+        new["board"] = {**new["board"], "w": old["board"]["w"], "h": old["board"]["h"], "moved": True}
+    return new
+
+
+def move(root, what):
+    """The user dragged something on the floorplan: {id, x, y} (a block or hole), {id, edge, at} (a connector) or
+    {board: {w, h}} (the outline's corner). Returns (canvas, a line for Claude's next turn)."""
+    with _lock:
+        d = load(root)
+        fp = d.get("floorplan")
+        if not fp:
+            raise ValueError("there is no floorplan yet")
+        if isinstance(what.get("board"), dict):
+            b = fp["board"]
+            b["w"] = _num(what["board"].get("w"), 5, 500, b["w"])
+            b["h"] = _num(what["board"].get("h"), 5, 500, b["h"])
+            b["moved"] = True
+            for m in what.get("holes") or []:                 # holes that kept to their corners
+                o = next((x for x in fp.get("holes") or [] if x["id"] == str(m.get("id"))), None)
+                if o:
+                    o["x"] = _num(m.get("x"), o["d"] / 2, b["w"] - o["d"] / 2, o["x"])
+                    o["y"] = _num(m.get("y"), o["d"] / 2, b["h"] - o["d"] / 2, o["y"])
+            line = f"floorplan: the user made the board {b['w']:g} x {b['h']:g} mm (the holes kept to their corners)"
+        else:
+            iid = str(what.get("id") or "")
+            o = next((x for x in (fp.get("items") or []) + (fp.get("holes") or []) if x["id"] == iid), None)
+            if o is None:
+                raise ValueError(f"no {iid} on the floorplan")
+            W, H = fp["board"]["w"], fp["board"]["h"]
+            if what.get("edge") in EDGES[:4]:
+                o["edge"] = what["edge"]
+                span = H if o["edge"] in ("left", "right") else W
+                o["at"] = _num(what.get("at"), 0, span, span / 2)
+                o.pop("x", None), o.pop("y", None)
+                line = f"floorplan: the user put {o.get('ref') or o['label']} on the {o['edge']} edge, {o['at']:g} mm along it"
+            else:
+                o["x"] = _num(what.get("x"), 0, W, o.get("x", W / 2))
+                o["y"] = _num(what.get("y"), 0, H, o.get("y", H / 2))
+                if "edge" in o and "d" not in o:
+                    o.pop("edge", None), o.pop("at", None)
+                line = f"floorplan: the user moved {o.get('ref') or o.get('label') or o['id']} to x {o['x']:g}, y {o['y']:g} mm"
+            o["moved"] = True
+        d["floorplan"] = fp
+        d["updated"] = time.time()
+        _save(root, {k: v for k, v in d.items() if v is not None})
+        return d, line
+
+
 def update(root, section, data):
     """Replace one section; returns the whole canvas."""
     if section not in SECTIONS:
         raise ValueError(f"unknown canvas section {section}; sections: {', '.join(SECTIONS)}")
     with _lock:
         d = load(root)
-        d[section] = clean(section, data)
+        new = clean(section, data)
+        d[section] = _keep_moves(d.get("floorplan"), new) if section == "floorplan" else new
         d["updated"] = time.time()
         _save(root, {k: v for k, v in d.items() if v is not None})
         return d

@@ -2350,6 +2350,83 @@ def chat_attachments_go_to_their_place_and_pictures_to_claude():
     asyncio.run(run())
 
 
+@test(needs=("kicad",))
+def floorplan_from_the_start_to_the_board():
+    """The guided start's floorplan: validated and kept on the board; what the user drags keeps its place when
+    Claude sends the plan again (and Claude hears of the move); in board coordinates for ./tw floorplan; as board
+    operations (the outline only when the board has none, the areas as one group that the next plan replaces,
+    the connectors and holes that are on the board moved); and placement.floorplan holds the board to it."""
+    from tracewright import canvas
+    from tw import floorplan
+    from tw.board import Board
+    from tw.checks import runner
+    from tw.pcb import client
+    p = fixture_copy("floorplan-demo")
+    plan = {"board": {"w": 50, "h": 35, "radius": 1},
+            "holes": [{"ref": "H1", "x": 3.5, "y": 3.5}, {"ref": "H2", "x": 46.5, "y": 3.5}, {"ref": "H3", "x": 3.5, "y": 31.5},
+                      {"ref": "H4", "x": 46.5, "y": 31.5}, {"id": "stray", "x": 900, "y": -5}],
+            "items": [{"id": "usb", "ref": "J1", "label": "USB-C", "edge": "left", "at": 17.5, "w": 9.6, "h": 6.3},
+                      {"id": "qwiic", "ref": "J2", "label": "Qwiic", "edge": "right", "at": 17.5, "w": 6.8, "h": 5.6},
+                      {"id": "mcu", "label": "MCU", "kind": "mcu", "x": 30, "y": 16, "w": 12, "h": 10},
+                      {"id": "power", "label": "Power", "kind": "power", "x": 14, "y": 26, "w": 14, "h": 10},
+                      {"id": "bad", "label": "Nowhere", "kind": "banana", "x": "far"}],
+            "keepouts": [{"label": "logo", "x": 40, "y": 30, "w": 8, "h": 4}]}
+    cv = canvas.update(p.root, "floorplan", plan)
+    fp = cv["floorplan"]
+    stray = next(h for h in fp["holes"] if h["id"] == "stray")
+    assert 0 < stray["x"] <= 50 and 0 < stray["y"] <= 35, stray                    # kept on the board
+    bad = next(i for i in fp["items"] if i["id"] == "bad")
+    assert bad["kind"] == "other" and bad["x"] == 25, bad
+    # the user drags the Qwiic connector to the top edge and the MCU over; Claude then sends its plan again
+    cv, line = canvas.move(p.root, {"id": "qwiic", "edge": "top", "at": 30})
+    assert "J2 on the top edge, 30 mm along it" in line, line
+    cv, line = canvas.move(p.root, {"id": "mcu", "x": 33, "y": 14})
+    assert "moved MCU to x 33, y 14" in line, line
+    cv = canvas.update(p.root, "floorplan", plan)                               # Claude's unchanged plan
+    q = next(i for i in cv["floorplan"]["items"] if i["id"] == "qwiic")
+    m = next(i for i in cv["floorplan"]["items"] if i["id"] == "mcu")
+    assert (q["edge"], q["at"], q["moved"]) == ("top", 30, True) and (m["x"], m["y"]) == (33, 14), (q, m)
+    try:
+        canvas.move(p.root, {"id": "nothing"})
+        raise AssertionError("moved something that is not there")
+    except ValueError:
+        pass
+    # in board coordinates (the demo's outline corner is 100, 100)
+    b = Board.load(p.pcb)
+    fp = floorplan.load(p)
+    pl = floorplan.placed(fp, floorplan.origin_for(b))
+    j1 = next(c for c in pl["connectors"] if c["ref"] == "J1")
+    assert (j1["x"], j1["y"], j1["edge"]) == (103.15, 117.5, "left"), j1
+    text = "\n".join(floorplan.describe(fp, floorplan.origin_for(b)))
+    assert "outline rect [100, 100, 150, 135]" in text and "Connector J2 Qwiic: on the top edge" in text and "(the user put it here)" in text, text
+    # the check: J1 is on its edge; J2 is planned on the top edge but sits on the right
+    res = runner.run_all(p, only=["placement.floorplan"], offline=True, write=False)
+    c = res["checks"][0]
+    msgs = [f["message"] for f in c["findings"]]
+    assert c["status"] == "warn" and msgs == ["J2 (Qwiic) was planned on the top edge; it is on the right edge"], (c["status"], msgs)
+    assert "6 connectors and holes against the floorplan" in c.get("scope", ""), c.get("scope")
+    # on the board: the board has an outline, so only the areas and the moves
+    ops = floorplan.ops(fp, b)
+    kinds = [o["op"] for o in ops]
+    assert "outline" not in kinds and kinds.count("floorplan") == 1 and {o["ref"] for o in ops if o["op"] == "move"} == {"J1", "J2", "H1", "H2", "H3", "H4"}, ops
+    res = client.apply(p, ops, live=False)
+    assert res["ok"], res
+    res = client.apply(p, floorplan.ops(floorplan.load(p), Board.load(p.pcb)), live=False)   # again: replaced, not doubled
+    assert res["ok"], res
+    text = open(p.pcb).read()
+    assert text.count('(group "Floorplan"') == 1, text.count('(group "Floorplan"')
+    assert "MCU" in text and "keep out: logo" in text
+    b2 = Board.load(p.pcb)
+    j2 = next(f for f in b2.fp_list if f.ref == "J2")
+    assert abs(j2.x - 130) < 0.01 and abs(j2.y - 102.8) < 0.01, (j2.x, j2.y)
+    res = runner.run_all(p, only=["placement.floorplan"], offline=True, write=False)
+    assert res["checks"][0]["status"] == "pass", res["checks"][0]
+    # no floorplan: not applicable (not a pass)
+    os.remove(os.path.join(p.root, ".tracewright", "canvas.json"))
+    c = runner.run_all(p, only=["placement.floorplan"], offline=True, write=False)["checks"][0]
+    assert c.get("na") and c["status"] != "pass", c
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

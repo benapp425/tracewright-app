@@ -743,6 +743,8 @@ a.brand:hover { text-decoration: none; }
 .vbanner { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 3; pointer-events: none; }
 .vbanner > div { pointer-events: auto; text-align: center; max-width: 440px; color: #9a9ca5; display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .vbanner h3 { color: #ececee; margin: 0; font-size: 15px; font-weight: 600; }
+.vbanner > div.vb-fp { max-width: none; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px 22px; }
+.vbanner .vb-fp p { margin: 0; font-size: 12.5px; }
 .vbanner p { margin: 0 0 6px; }
 .vbanner .eicon { width: 46px; height: 46px; border-radius: 13px; background: rgba(255, 255, 255, .06); color: #c8c9cf; display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
 .viewer.paper .vbanner > div { color: var(--text-3); } .viewer.paper .vbanner h3 { color: var(--text); }
@@ -1812,6 +1814,37 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .gd-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .gd-legend i { width: 16px; height: 0; border-top: 2px solid var(--line-3); }
 .gd-legend i.power { border-color: var(--warn); } .gd-legend i.bus { border-color: var(--info); }
+/* the floorplan: the board to scale, everything draggable */
+.fp { position: relative; }
+.fp-svg { display: block; margin: 0 auto; max-width: 100%; height: auto; touch-action: none; user-select: none; }
+.fp-board { fill: color-mix(in srgb, #2f7d4a 26%, var(--surface-2)); stroke: #3f9b5d; stroke-width: 1.5; }
+.fp-grid line { stroke: color-mix(in srgb, #3f9b5d 16%, transparent); stroke-width: .6; }
+.fp-grid line.m { stroke: color-mix(in srgb, #3f9b5d 28%, transparent); }
+.fp-max { fill: none; stroke: var(--text-3); stroke-dasharray: 4 3; stroke-width: 1; }
+.fp-max.over { stroke: var(--err); }
+.fp-maxl { font: 10px var(--mono); fill: var(--text-3); text-anchor: end; }
+.fp-dim { font: 11px var(--mono); fill: var(--text-3); text-anchor: middle; }
+.fp-ko rect { fill: color-mix(in srgb, var(--err) 10%, transparent); stroke: color-mix(in srgb, var(--err) 55%, transparent); stroke-dasharray: 3 2; }
+.fp-ko text { font: 10px var(--font); fill: var(--err); text-anchor: middle; }
+.fp-item rect { fill: var(--surface); stroke: var(--line-3); stroke-width: 1.2; }
+.fp-item.blk.power rect { stroke: var(--warn); } .fp-item.blk.mcu rect { stroke: var(--accent); }
+.fp-item.blk.sensor rect { stroke: var(--ok); } .fp-item.blk.io rect, .fp-item.blk.display rect { stroke: var(--info); }
+.fp-item.blk.rf rect { stroke: #b48cf2; } .fp-item.blk.memory rect { stroke: var(--info); }
+.fp-item.conn rect { fill: var(--surface-3); stroke: var(--text-3); }
+.fp-item .fp-mouth { stroke: var(--text); stroke-width: 3; stroke-linecap: round; }
+.fp-item.bad rect { stroke: var(--err); stroke-width: 1.8; }
+.fp-bl { font: 600 11.5px var(--font); fill: var(--text); text-anchor: middle; pointer-events: none; }
+.fp-bn { font: 10px var(--font); fill: var(--text-3); text-anchor: middle; pointer-events: none; }
+.fp-cl { font: 600 11px var(--font); fill: var(--text-2); pointer-events: none; }
+.fp-hole circle { fill: var(--canvas); stroke: var(--text-3); stroke-width: 1; }
+.fp-hole circle.ring { fill: none; stroke: color-mix(in srgb, var(--text-3) 40%, transparent); stroke-dasharray: 2 2; }
+.fp-corner { fill: var(--surface); stroke: var(--accent); stroke-width: 1.5; cursor: nwse-resize; }
+.fp.editable .fp-item, .fp.editable .fp-hole { cursor: grab; }
+.fp.dragging, .fp.dragging * { cursor: grabbing !important; }
+.fp-tip { position: absolute; pointer-events: none; font: 11px var(--mono); padding: 3px 7px; border-radius: 6px; background: var(--hud);
+  color: var(--hud-text); border: 1px solid var(--hud-line); white-space: nowrap; z-index: 2; }
+.gd-fpnote { display: flex; gap: 10px; font-size: 12px; color: var(--text-3); margin-top: 8px; flex-wrap: wrap; }
+.gd-fpnote .bad { color: var(--err); }
 .gd-sketch svg { display: block; margin: 0 auto; }
 .gd-sketch .bs-board { fill: color-mix(in srgb, #2f7d4a 30%, var(--surface-2)); stroke: #3f9b5d; stroke-width: 1.5; }
 .gd-sketch .bs-c { fill: var(--surface-3); stroke: var(--text-3); }

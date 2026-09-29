@@ -249,6 +249,37 @@ def cmd_style(a):
     return 0 if r["ok"] else 1
 
 
+def cmd_floorplan(a):
+    """The guided start's floorplan: print it in board coordinates, or put it on the board."""
+    from tw import floorplan
+    from tw.board import Board
+    p = env.project()
+    fp = floorplan.load(p)
+    if not fp:
+        print("no floorplan (it comes from a guided start's canvas)")
+        return 1
+    b = Board.load(p.pcb) if p.has_pcb() else None
+    origin = floorplan.origin_for(b)
+    if a.action == "show":
+        print("\n".join(floorplan.describe(fp, origin)))
+        return 0
+    if b is None:
+        print("no board yet: sync the board from the schematic first")
+        return 1
+    ops = floorplan.ops(fp, b, origin, outline=True if a.outline else None)
+    from tw.pcb import client
+    res = client.apply(p, ops)
+    moved = [o["ref"] for o in ops if o["op"] == "move"]
+    print(("applied: " if res.get("ok") else "FAILED: ") + ", ".join(
+        [x for x in ("outline" if any(o["op"] == "outline" for o in ops) else "", "areas on Dwgs.User" if any(o["op"] == "floorplan" for o in ops) else "",
+                     f"moved {', '.join(moved)}" if moved else "") if x]) + f" ({res.get('via')})")
+    if not res.get("ok"):
+        print(json.dumps(res.get("results"), indent=1))
+        return 1
+    print("Turn each connector so its opening faces off its edge; place the rest of each block inside its area.")
+    return 0
+
+
 def cmd_nets(a):
     """The net model: list it, declare a net's facts, or size net classes from them."""
     from tw import netmodel
@@ -374,6 +405,9 @@ def main(argv=None):
     nt.add_argument("args", nargs="*")
     nt.add_argument("--apply", action="store_true")
     nt.add_argument("--json", action="store_true")
+    fpp = sub.add_parser("floorplan", help="the guided start's floorplan: show (board coordinates) | apply (outline, areas, connectors, holes)")
+    fpp.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
+    fpp.add_argument("--outline", action="store_true", help="replace the board's outline with the floorplan's")
     st = sub.add_parser("style")
     st.add_argument("style", nargs="?", choices=["flat", "hierarchical"])
     st.add_argument("--dry-run", action="store_true")

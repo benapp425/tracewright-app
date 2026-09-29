@@ -4,6 +4,7 @@
 import { h, clear, api, toast, btn } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
+import { FloorplanView } from "./floorplan.js";
 
 const COL = {
   "F.Cu": [226, 64, 64], "B.Cu": [64, 110, 232], "In1.Cu": [214, 170, 48], "In2.Cu": [70, 180, 100], "In3.Cu": [180, 100, 210],
@@ -192,12 +193,25 @@ export class BoardView {
     this.reloadT = setTimeout(() => this.load(), 150);
   }
 
-  showBanner() {
+  // No board yet: the floorplan from the start when there is one (still draggable), else a plain note.
+  async showBanner() {
+    const seq = (this.bannerSeq = (this.bannerSeq || 0) + 1);
+    const start = h("button.btn.primary", { onclick: () => this.ws.ask("Create the board from the schematic (sync_board), then lay it out as the floorplan says (./tw floorplan apply) or, without one, propose an outline, mounting holes and connector positions.") }, "Start the layout");
+    let cv = null;
+    try { cv = await api(`/api/projects/${encodeURIComponent(this.pid)}/canvas`); } catch (e) { /* no canvas */ }
+    if (seq !== this.bannerSeq) return;
     clear(this.banner);
     this.banner.style.display = "flex";
+    const fp = cv && cv.floorplan;
+    if (fp && fp.board) {
+      const v = new FloorplanView(fp, { pid: this.pid, editable: true, width: Math.max(360, Math.min(760, (this.w || 900) - 120)),
+        maxHeight: Math.max(240, Math.min(440, (this.h || 700) - 230)), maxSize: (cv.constraints || {}).max_size_mm || null });
+      this.banner.appendChild(h("div.vb-fp", h("h3", "No board yet: the floorplan"),
+        h("p", "The board as agreed at the start. Drag to change it; Claude lays the board out from it."), v.el, start));
+      return;
+    }
     this.banner.appendChild(h("div", h("div.eicon", icon("circuit-board", 22)), h("h3", "No board yet"),
-      h("p", "Claude creates the board from the schematic."),
-      h("button.btn.primary", { onclick: () => this.ws.ask("Create the board from the schematic (sync_board), then propose an outline, mounting holes and connector positions.") }, "Start the layout")));
+      h("p", "Claude creates the board from the schematic."), start));
   }
 
   // ------------------------------------------------------------------ geometry caches

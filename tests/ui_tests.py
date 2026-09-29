@@ -248,6 +248,101 @@ async def attachments_paste_drop_and_take_back(t):
     check(not any(e["name"] == "LM7805.pdf" for e in docs), f"the taken-back PDF is still there: {docs}")
 
 
+DEMO_FLOORPLAN = {
+    "board": {"w": 50, "h": 35, "radius": 1},
+    "holes": [{"id": "H1", "ref": "H1", "x": 3.5, "y": 3.5, "d": 3.2}, {"id": "H2", "ref": "H2", "x": 46.5, "y": 3.5, "d": 3.2},
+              {"id": "H3", "ref": "H3", "x": 3.5, "y": 31.5, "d": 3.2}, {"id": "H4", "ref": "H4", "x": 46.5, "y": 31.5, "d": 3.2}],
+    "items": [{"id": "usb", "ref": "J1", "label": "USB-C", "kind": "connector", "edge": "left", "at": 17.5, "w": 9.6, "h": 6.3},
+              {"id": "qwiic", "ref": "J2", "label": "Qwiic", "kind": "connector", "edge": "right", "at": 17.5, "w": 6.8, "h": 5.6},
+              {"id": "mcu", "label": "MCU", "kind": "mcu", "x": 30, "y": 16, "w": 12, "h": 10, "note": "ATtiny85"},
+              {"id": "power", "label": "Power", "kind": "power", "x": 16, "y": 26, "w": 13, "h": 9, "note": "AMS1117 3.3 V"}],
+    "keepouts": [{"label": "logo", "x": 40, "y": 29, "w": 8, "h": 5}], "note": ""}
+
+
+async def fp_drag(page, target, to_mm):
+    """Drag a floorplan item (data-id, or the board's corner) to a spot given in board millimetres, once the
+    drawing has stopped moving (it redraws when its column settles)."""
+    last = None
+    for _ in range(30):
+        pts = await page.js("""((id, tx, ty) => { const v = document.querySelector('.fp').__fp, r = v.svg.getBoundingClientRect(), vb = v.svg.viewBox.baseVal;
+        const g = id === 'corner' ? v.svg.querySelector('.fp-corner') : v.svg.querySelector(`[data-id="${id}"] rect, [data-id="${id}"] circle:not(.ring)`);
+        const b = g.getBoundingClientRect();
+        return { from: [b.x + b.width / 2, b.y + b.height / 2],
+                 to: [r.left + (v.ox + tx * v.S) * r.width / vb.width, r.top + (v.oy + ty * v.S) * r.height / vb.height] }; })(%s, %s, %s)"""
+                        % (json.dumps(target), to_mm[0], to_mm[1]))
+        if pts == last:
+            break
+        last = pts
+        await asyncio.sleep(0.15)
+    (x0, y0), (x1, y1) = pts["from"], pts["to"]
+    await page.call("Input.dispatchMouseEvent", type="mouseMoved", x=x0, y=y0)
+    await page.call("Input.dispatchMouseEvent", type="mousePressed", x=x0, y=y0, button="left", clickCount=1)
+    for i in range(1, 9):
+        await page.call("Input.dispatchMouseEvent", type="mouseMoved", x=x0 + (x1 - x0) * i / 8, y=y0 + (y1 - y0) * i / 8, button="left", buttons=1)
+    await page.call("Input.dispatchMouseEvent", type="mouseReleased", x=x1, y=y1, button="left", clickCount=1)
+    await asyncio.sleep(0.4)
+
+
+@test
+async def floorplan_drag_to_place(t):
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg["start"] = {"mode": "guided", "phase": "ready"}
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    with open(os.path.join(root, ".tracewright", "canvas.json"), "w") as f:
+        json.dump({"requirements": {"items": [{"label": "Board", "value": "50 × 35 mm, 2 layers"}]}, "floorplan": DEMO_FLOORPLAN,
+                   "plan": {"summary": "The demo board.", "steps": ["Schematic", "Board"]}}, f)
+    try:
+        await t.page.goto(t.s.url + f"#/p/{t.pid}")
+        await t.page.wait("document.querySelector('.fp-svg .fp-board')", 20)
+        n = await t.page.js("({conn: document.querySelectorAll('.fp-item.conn').length, blk: document.querySelectorAll('.fp-item.blk').length, "
+                            "holes: document.querySelectorAll('.fp-hole').length, dims: [...document.querySelectorAll('.fp-dim')].map((e) => e.textContent)})")
+        check(n["conn"] == 2 and n["blk"] == 2 and n["holes"] == 4 and n["dims"] == ["50 mm", "35 mm"], n)
+        await t.shot("floorplan")
+        cv = lambda: t.s.get(f"api/projects/{t.pid}/canvas")["floorplan"]
+        # the Qwiic connector from the right edge to the top edge, 30 mm along it
+        await fp_drag(t.page, "qwiic", (30, 1))
+        q = next(i for i in cv()["items"] if i["id"] == "qwiic")
+        check(q["edge"] == "top" and abs(q["at"] - 30) <= 0.5 and q["moved"], q)
+        # the MCU 5 mm to the right
+        await fp_drag(t.page, "mcu", (35, 16))
+        m = next(i for i in cv()["items"] if i["id"] == "mcu")
+        check(abs(m["x"] - 35) <= 0.5 and abs(m["y"] - 16) <= 0.5 and m["moved"], m)
+        # the board's corner out to 60 x 40
+        await fp_drag(t.page, "corner", (60, 40))
+        got = cv()
+        b = got["board"]
+        check(abs(b["w"] - 60) <= 0.5 and abs(b["h"] - 40) <= 0.5, b)
+        h4 = next(o for o in got["holes"] if o["id"] == "H4")                        # the corner hole kept to its corner
+        check(abs(h4["x"] - (b["w"] - 3.5)) <= 0.01 and abs(h4["y"] - (b["h"] - 3.5)) <= 0.01, h4)
+        check("placed by you" in await t.page.js("document.querySelector('.gd-fpnote').innerText"), "the card does not say what the user placed")
+        await t.shot("floorplan-moved")
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(os.path.join(root, ".tracewright", "canvas.json"))
+
+
+@test
+async def floorplan_shows_on_the_board_until_there_is_one(t):
+    pr = t.s.post("api/projects", {"name": "Floorplan board", "brief": ""})     # no start: nothing goes to Claude
+    check(not pr.get("has_pcb"), f"a new project already has a board: {pr}")
+    os.makedirs(os.path.join(pr["root"], ".tracewright"), exist_ok=True)
+    with open(os.path.join(pr["root"], ".tracewright", "canvas.json"), "w") as f:
+        json.dump({"floorplan": DEMO_FLOORPLAN}, f)
+    await t.page.goto(t.s.url + f"#/p/{pr['id']}/board")
+    await t.page.wait("document.querySelector('.vb-fp .fp-svg .fp-board')", 20)
+    check("Start the layout" in await t.page.js("document.querySelector('.vb-fp').innerText"), "no Start the layout button")
+    await t.shot("board-floorplan")
+    await fp_drag(t.page, "power", (20, 24))
+    pw = next(i for i in t.s.get(f"api/projects/{pr['id']}/canvas")["floorplan"]["items"] if i["id"] == "power")
+    check(abs(pw["x"] - 20) <= 0.5 and abs(pw["y"] - 24) <= 0.5 and pw["moved"], pw)
+
+
 # a speech recognizer the test speaks through (headless Chrome has no microphone or speech service)
 FAKE_SPEECH = """
 window.SpeechRecognition = window.webkitSpeechRecognition = class {

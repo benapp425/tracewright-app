@@ -6,6 +6,7 @@ import { h, clear, api, toast, btn } from "./util.js";
 import { icon } from "./icons.js";
 import { diagramSVG } from "./blockdiagram.js";
 import { limitsPanel, limitsSummary } from "./limits.js";
+import { FloorplanView } from "./floorplan.js";
 
 const enc = encodeURIComponent;
 
@@ -28,7 +29,7 @@ export class GuidedCanvas {
     this.el = h("div.gd");
     this.cv = {};
     this.seen = new Set();
-    new ResizeObserver(() => this.drawDiagram()).observe(this.el);
+    new ResizeObserver(() => { this.drawDiagram(); if (this.fpView && this.el.clientWidth) this.fpView.resize(this.el.clientWidth - 58); }).observe(this.el);
     this.load();
   }
 
@@ -44,7 +45,8 @@ export class GuidedCanvas {
   get hasContent() {
     const c = this.cv;
     return !!((c.requirements && c.requirements.items && c.requirements.items.length) || (c.diagram && c.diagram.blocks && c.diagram.blocks.length) ||
-      (c.connectors && c.connectors.items && c.connectors.items.length) || (c.parts && c.parts.items && c.parts.items.length) || c.phase === "ready");
+      (c.connectors && c.connectors.items && c.connectors.items.length) || (c.parts && c.parts.items && c.parts.items.length) ||
+      (c.floorplan && c.floorplan.board) || c.phase === "ready");
   }
 
   render() {
@@ -53,7 +55,9 @@ export class GuidedCanvas {
     if (c.phase === "ready" && c.plan) cards.push(["plan", this.startCard(c.plan)]);
     if (c.requirements && c.requirements.items && c.requirements.items.length) cards.push(["requirements", this.reqCard(c.requirements)]);
     if (c.diagram && c.diagram.blocks && c.diagram.blocks.length) cards.push(["diagram", this.diagramCard(c.diagram)]);
-    if (c.connectors && c.connectors.items && c.connectors.items.length) cards.push(["connectors", this.connCard(c.connectors)]);
+    if (c.floorplan && c.floorplan.board) cards.push(["floorplan", this.floorplanCard(c.floorplan)]);
+    else this.fpView = null;
+    if (c.connectors && c.connectors.items && c.connectors.items.length) cards.push(["connectors", this.connCard(c.connectors, !!(c.floorplan && c.floorplan.board))]);
     if (c.parts && c.parts.items && c.parts.items.length) cards.push(["parts", this.partsCard(c.parts)]);
     for (const [k, card] of cards) {
       if (!this.seen.has(k)) { card.classList.add("new"); this.seen.add(k); }
@@ -118,8 +122,23 @@ export class GuidedCanvas {
     box.innerHTML = diagramSVG(this.diagram, { width: w, measure });
   }
 
+  // ------------------------------------------------------------------ floorplan
+  // The board to scale: drag blocks, holes and connectors (along the edges) into place, or the corner to size it.
+  floorplanCard(fp) {
+    const opts = { pid: this.pid, editable: this.cv.phase !== "done", width: Math.max(320, (this.el.clientWidth || 600) - 58),
+      maxSize: (this.cv.constraints || {}).max_size_mm || null };
+    if (this.fpView) { Object.assign(this.fpView.opts, opts); this.fpView.set(fp); }
+    else this.fpView = new FloorplanView(fp, opts);
+    const n = (fp.items || []).length, moved = [...(fp.items || []), ...(fp.holes || [])].filter((o) => o.moved).length;
+    const bad = this.fpView.bad ? this.fpView.bad.size : 0;
+    return this.card("layout-grid", "Floorplan", `${fp.board.w} × ${fp.board.h} mm`, this.fpView.el,
+      h("div.gd-fpnote", bad ? h("span.bad", `${bad} overlap${bad === 1 ? "s" : ""} or run${bad === 1 ? "s" : ""} off the board`) : null,
+        h("span", opts.editable ? `Drag to move${moved ? ` · ${moved} placed by you` : ""}. Claude follows what you place.` : `${n} items`)),
+      fp.note ? h("div.gd-fpnote", fp.note) : null);
+  }
+
   // ------------------------------------------------------------------ connectors
-  connCard(c) {
+  connCard(c, planned) {
     const list = h("div.gd-conns", c.items.map((k) => {
       const pins = k.pins || [];
       const open = h("details.gd-conn", h("summary", h("b", k.ref ? `${k.ref} · ${k.name}` : k.name), h("span", k.type || ""),
@@ -127,7 +146,7 @@ export class GuidedCanvas {
         pins.length ? h("div.gd-pins", pins.map((p) => h("div.gd-pin", h("span", p.n), h("b", p.signal || "—")))) : null);
       return open;
     }));
-    return this.card("plug", "Connectors", `${c.items.length}`, h("div.gd-sketch", { html: boardSketch(c) }), list);
+    return this.card("plug", "Connectors", `${c.items.length}`, planned ? null : h("div.gd-sketch", { html: boardSketch(c) }), list);
   }
 
   // ------------------------------------------------------------------ live BOM

@@ -288,3 +288,49 @@ def pcb_antenna(ctx):
                                             "clear of copper around it.", key=f"ant:edge:{fp.ref}"))
     examined(ctx, plural(len(mods), "radio module"))
     return out
+
+
+@check("placement.floorplan", "Connectors and holes where the floorplan put them", "Placement", needs=("pcb",))
+def placement_floorplan(ctx):
+    """The guided start's floorplan (what the user agreed to, or dragged into place): each connector on its
+    planned edge, each mounting hole within a millimetre of its planned spot. Measured from the board's own
+    outline corner, so a board drawn elsewhere on the sheet still lines up."""
+    from .. import floorplan
+    fp = floorplan.load(ctx.p)
+    b = ctx.board
+    if not fp:
+        raise NotApplicable("no floorplan (only a guided start draws one)")
+    if not b.outline:
+        raise NotApplicable("the board has no outline yet")
+    pl = floorplan.placed(fp, floorplan.origin_for(b))
+    x0, y0, x1, y1 = pl["outline"]
+    refs = {f.ref: f for f in b.fp_list}
+    out, seen = [], 0
+    for c in pl["connectors"]:
+        f = refs.get(c["ref"])
+        if not f:
+            continue
+        seen += 1
+        bx = geom.bbox([q for p in f.pads for q in p.poly] or [(f.x, f.y)])
+        gap = {"left": bx[0] - x0, "right": x1 - bx[2], "top": bx[1] - y0, "bottom": y1 - bx[3]}[c["edge"]]
+        if gap > 3.0:
+            near = min(("left", bx[0] - x0), ("right", x1 - bx[2]), ("top", bx[1] - y0), ("bottom", y1 - bx[3]), key=lambda e: e[1])
+            where = f"on the {near[0]} edge" if near[1] <= 3.0 else f"{gap:.1f} mm in from it"
+            out.append(Finding("placement.floorplan", "warning", f"{f.ref} ({c['label'] or 'connector'}) was planned on the {c['edge']} edge; it is {where}",
+                               {"ref": f.ref, "x": f.x, "y": f.y},
+                               hint="Move it to the edge the floorplan gives (./tw floorplan), or change the floorplan with the user.",
+                               key=f"placement.floorplan:{f.ref}"))
+    for h in pl["holes"]:
+        f = refs.get(h["ref"])
+        if not f:
+            continue
+        seen += 1
+        d = math.hypot(f.x - h["x"], f.y - h["y"])
+        if d > 1.0:
+            out.append(Finding("placement.floorplan", "warning", f"{f.ref} is {d:.1f} mm from where the floorplan puts the hole",
+                               {"ref": f.ref, "x": f.x, "y": f.y}, hint=f"Planned at ({h['x']:g}, {h['y']:g}).",
+                               key=f"placement.floorplan:{f.ref}"))
+    if not seen:
+        raise NotApplicable("none of the floorplan's connectors or holes carry a reference that is on the board")
+    examined(ctx, plural(seen, "connector or hole", "connectors and holes") + " against the floorplan")
+    return out

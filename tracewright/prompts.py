@@ -142,7 +142,10 @@ def turn_context(runtime, extra=None):
         lines.append("Guided start, intake: the user sees this chat beside a live canvas. Ask what changes the design "
                      "(question tool: up to four per call, recommended option first), and as the picture forms draw it "
                      "with the canvas tool: requirements first, then the block diagram, the connectors with their "
-                     "pinouts and board edges, and the key parts with LCSC codes (look them up with parts). Do not draw "
+                     "pinouts and board edges, the floorplan (the board to scale: its size, the mounting holes, each "
+                     "connector on its edge, the main blocks where they will go -- ask about the choices that decide it, "
+                     "such as which edge a connector faces or how big the board may be; what the user drags on it is "
+                     "theirs to keep), and the key parts with LCSC codes (look them up with parts). Do not draw "
                      "the schematic or touch the board yet. When the requirements are settled, fill in docs/requirements.md "
                      "(read it first: it has the headings), then call ready_to_start with a two-sentence summary and "
                      "the plan, and stop.")

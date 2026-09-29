@@ -5,8 +5,11 @@ description: Place the footprints on the board with intent - outline and mountin
 # Placement
 
 1. `sync_board` (update the board from the schematic): new parts appear parked right of the board.
-2. Outline and mounting holes (ask the user about size and shape if it is not in the requirements).
-3. Connectors on the edges where their cables go, facing out (check the footprint's "PCB edge" mark).
+2. Outline and mounting holes (ask the user about size and shape if it is not in the requirements). With a
+   floorplan from a guided start (`./tw floorplan`), `./tw floorplan apply` does this and step 3's positions:
+   the outline, each block's area on Dwgs.User, the connectors and holes where the user agreed or dragged them.
+3. Connectors on the edges where their cables go, facing out (check the footprint's "PCB edge" mark). Place
+   each block's parts inside its floorplan area; `placement.floorplan` checks connectors and holes against it.
 4. The processor / main IC, then power stages: switcher, inductor and input capacitors in the tightest loop;
    regulator input and output capacitors at their pins.
 5. Decoupling capacitors at the supply pins they serve, same side, short ground return.

@@ -652,6 +652,20 @@ def make_app():
         from tw import constraints
         return jresp({**cv, "phase": p.start_phase(), "run_mode": p.run_mode(), "constraints": constraints.get(p.cfg)})
 
+    @routes.patch("/api/projects/{pid}/canvas/floorplan")
+    async def move_on_floorplan(request):
+        """The user dragged something on the floorplan (a block, hole or connector, or the board's corner): saved,
+        drawn again for every window, and told to Claude at its next turn."""
+        from . import canvas
+        rt = app.rt(request.match_info["pid"])
+        try:
+            cv, line = await asyncio.to_thread(canvas.move, rt.p.root, await request.json())
+        except ValueError as e:
+            return err(str(e))
+        rt.user_changes.append(line)
+        rt.hub.emit("canvas.update", canvas=canvas.enrich(rt.p.root, cv))
+        return jresp({"floorplan": cv.get("floorplan")})
+
     @routes.post("/api/projects/{pid}/start")
     async def start_design(request):
         """The guided start's Start button: the intake is over, the design begins."""
@@ -666,7 +680,8 @@ def make_app():
         rt.hub.emit("project.start", phase="done")
         rt.hub.emit("stages", stages=p.stages())
         a = app.agent(pid)
-        text = start_text(p.run_mode())
+        from . import canvas as cvs
+        text = start_text(p.run_mode(), floorplan=bool((cvs.load(p.root).get("floorplan") or {}).get("board")))
         if a.busy:
             await a.steer(text)
         else:
@@ -2128,18 +2143,25 @@ def guided_kickoff_text():
             "sees the chat beside a live canvas. Run the intake (skill new-design): read the brief, fill in the canvas's requirements from "
             "what it says, then ask me now every question whose answer changes the design -- with your question tool, up "
             "to four per call, your recommended option first. As the answers come in, draw the block diagram, the "
-            "connectors with their pinouts and board edges, and the key parts with LCSC codes. When the requirements "
+            "connectors with their pinouts and board edges, the floorplan (the board to scale with its holes, "
+            "connectors and main blocks), and the key parts with LCSC codes. When the requirements "
             "are settled, write docs/requirements.md and call ready_to_start; then wait for the user to press Start.")
 
 
-def start_text(mode):
+FLOORPLAN_NOTE = (" Lay the board out as the floorplan on the canvas says (./tw floorplan shows it in board coordinates; "
+                  "once the board exists, ./tw floorplan apply draws the outline and the blocks' areas and puts the "
+                  "connectors and holes in their places): what I placed there is what I want.")
+
+
+def start_text(mode, floorplan=False):
     """What Claude hears when the user presses Start."""
+    fp = FLOORPLAN_NOTE if floorplan else ""
     if mode == "check_in":
         return ("I pressed Start. Begin the design from the agreed requirements, stage by stage, and check in with me at "
-                "the end of each stage.")
+                "the end of each stage." + fp)
     return ("I pressed Start. Carry the design through from the agreed requirements to a checked board that is ready to "
             "order, without waiting on me: record each assumption in docs/decisions.md, keep the agenda up to date, and "
-            "tell me what needs the built board.")
+            "tell me what needs the built board." + fp)
 
 
 def kickoff_text(mode):

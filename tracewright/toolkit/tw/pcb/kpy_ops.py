@@ -17,6 +17,8 @@ Ops (coordinates in board mm, KiCad axes: y down, angles CCW in degrees):
                       "no_pour": true, "no_footprints": false}
   {"op": "outline", "rect": [x0, y0, x1, y1], "radius": 1.0}  |  {"op": "outline", "polygon": [[x, y], ...]}
   {"op": "text", "text": "REV A", "x": 1, "y": 2, "layer": "F.SilkS", "size": 1.0, "thickness": 0.15, "rot": 0}
+  {"op": "floorplan", "rects": [{"rect": [x0, y0, x1, y1], "label": "MCU"}, ...], "layer": "Dwgs.User"}
+      the guided start's plan, drawn as one group named "Floorplan" (drawn again each time)
   {"op": "value", "ref": "R1", "value": "10k"}
   {"op": "lock", "refs": [...], "locked": true}
   {"op": "layers", "copper": 4}
@@ -295,6 +297,47 @@ def do_text(b, op, changes):
     changes.append({"kind": "text", "text": op["text"]})
 
 
+def do_floorplan(b, op, changes):
+    """The floorplan's areas (each block where it is meant to go, the keep-outs) as outlined rectangles with
+    their names on a drawing layer, grouped as "Floorplan" so the next plan replaces them and nothing else."""
+    groups = [g for g in list(b.Groups()) if g.GetName() == "Floorplan"]
+    for g in groups:
+        items = list(g.GetItems())
+        for it in items:
+            g.RemoveItem(it)
+            b.Remove(it)
+        b.Remove(g)
+        GRAVE.extend(items)
+        GRAVE.append(g)
+    grp = pcbnew.PCB_GROUP(b)
+    grp.SetName("Floorplan")
+    b.Add(grp)
+    lid = layer_id(b, op.get("layer", "Dwgs.User"))
+    for r in op.get("rects", []):
+        x0, y0, x1, y1 = [float(v) for v in r["rect"]]
+        s = pcbnew.PCB_SHAPE(b)
+        s.SetShape(pcbnew.SHAPE_T_RECT)
+        s.SetStart(P(min(x0, x1), min(y0, y1)))
+        s.SetEnd(P(max(x0, x1), max(y0, y1)))
+        s.SetLayer(lid)
+        s.SetWidth(MM(0.1))
+        b.Add(s)
+        grp.AddItem(s)
+        if r.get("label"):
+            t = pcbnew.PCB_TEXT(b)
+            t.SetText(str(r["label"])[:40])
+            sz = MM(min(1.2, max(0.6, (abs(y1 - y0)) / 6)))
+            t.SetTextSize(pcbnew.VECTOR2I(sz, sz))
+            t.SetTextThickness(MM(0.12))
+            t.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
+            t.SetVertJustify(pcbnew.GR_TEXT_V_ALIGN_TOP)
+            t.SetPosition(P(min(x0, x1) + 0.4, min(y0, y1) + 0.4))
+            t.SetLayer(lid)
+            b.Add(t)
+            grp.AddItem(t)
+    changes.append({"kind": "floorplan", "rects": len(op.get("rects", []))})
+
+
 def do_fill(b, changes):
     b.BuildConnectivity()
     zones = [z for z in b.Zones()]
@@ -347,6 +390,9 @@ def main():
                 r = True
             elif kind == "text":
                 do_text(b, op, changes)
+                r = True
+            elif kind == "floorplan":
+                do_floorplan(b, op, changes)
                 r = True
             elif kind == "ref_text":
                 fp = find_fp(b, op["ref"])
