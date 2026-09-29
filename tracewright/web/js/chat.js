@@ -120,6 +120,7 @@ export class Chat {
     this.el = el; this.ws = ws; this.pid = ws.pid;
     el.__chat = this;                                  // for debugging from the console, and the browser tests
     this.cards = {}; this.cur = null; this.busy = false; this.sel = []; this.kicadSel = []; this.pending = 0; this.files = [];
+    this.mentions = new Map();
     this.agenda = null; this.agOpen = localStorage.getItem("tw.agenda.open") !== "0";
     this.build();
     this.load();
@@ -145,10 +146,12 @@ export class Chat {
     this.filesEl = h("div.attachrow");
     this.input = h("textarea", { placeholder: "Message Claude", rows: 1,
       onkeydown: (e) => {
+        if (this.mentionKey(e)) return;
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.send(); }
         else if (e.key === "Escape" && this.dict && this.dict.on) { e.preventDefault(); e.stopPropagation(); this.cancelDictation(); }
       },
-      oninput: () => this.grow(),
+      oninput: () => { this.grow(); this.mentionQuery(); },
+      onblur: () => setTimeout(() => this.closeMentions(), 150),
       onpaste: (e) => {                                   // a screenshot or copied files: attached, not pasted as text
         const files = [...((e.clipboardData && e.clipboardData.files) || [])];
         if (!files.length) return;
@@ -162,8 +165,99 @@ export class Chat {
     this.sendBtn = h("button.sendbtn.idle", { onclick: () => this.send(), "data-tip": "Send", "data-kbd": "enter" }, icon("arrow-up", 16));
     this.modelEl = h("span.model");
     this.hintEl = h("span.tiny.faint", "⇧↩ new line");
-    this.el.append(this.agendaEl, this.msgs, this.status, this.dock, h("div.composer", h("div.composer-box", this.filesEl, this.chips, this.input,
+    this.mentionBox = h("div.mentions", { style: { display: "none" } });
+    this.el.append(this.agendaEl, this.msgs, this.status, this.dock, h("div.composer", this.mentionBox, h("div.composer-box", this.filesEl, this.chips, this.input,
       h("div.composer-bar", this.clipBtn, this.micBtn, this.modelEl, h("div.grow"), this.hintEl, this.stopBtn, this.sendBtn))));
+  }
+
+  // ------------------------------------------------------------------ @-mentions
+  // "@" in the message box: parts, nets, sheets and files to point Claude at. What is mentioned goes with the
+  // message (Claude is told what and where it is), and each mention in the conversation shows it when clicked.
+  async mentionIndex() {
+    const now = Date.now();
+    if (this.mIdx && now - this.mIdx.t < 30000) return this.mIdx.items;
+    const d = await api(`/api/projects/${encodeURIComponent(this.pid)}/mentions`).catch(() => null);
+    if (!d) return this.mIdx ? this.mIdx.items : [];
+    const items = [
+      ...d.parts.map((x) => ({ type: "part", token: x.ref, desc: [x.val, x.fp, x.sheet_name && x.sheet_name !== "root" ? x.sheet_name : null].filter(Boolean).join(" · "), item: x })),
+      ...d.nets.map((x) => ({ type: "net", token: x.name.split("/").pop(), desc: x.kind && x.kind !== "signal" ? x.kind : "net", item: x })),
+      ...d.sheets.filter((x) => x.path !== "/").map((x) => ({ type: "sheet", token: x.name, desc: "sheet", item: x })),
+      ...d.files.map((x) => ({ type: "file", token: x, desc: "file", item: { path: x } }))];
+    this.mIdx = { t: now, items };
+    return items;
+  }
+
+  async mentionQuery() {
+    const pre = this.input.value.slice(0, this.input.selectionStart);
+    const m = /(^|\s)@([^\s@]*)$/.exec(pre);
+    if (!m) { this.closeMentions(); return; }
+    const q = m[2].toLowerCase(), seq = (this.mSeq = (this.mSeq || 0) + 1);
+    const items = await this.mentionIndex();
+    if (seq !== this.mSeq) return;
+    const TYPE = { part: 0, net: 1, sheet: 2, file: 3 };
+    const rank = (x) => { const t = x.token.toLowerCase(); return t === q ? 0 : t.startsWith(q) ? 1 : t.includes(q) ? 2 : (x.desc || "").toLowerCase().includes(q) ? 3 : 9; };
+    const list = items.map((x) => [rank(x), x]).filter(([r]) => r < 9)
+      .sort((a, b) => a[0] - b[0] || TYPE[a[1].type] - TYPE[b[1].type] || a[1].token.length - b[1].token.length).slice(0, 8).map(([, x]) => x);
+    if (!list.length) { this.closeMentions(); return; }
+    this.mList = list; this.mAt = 0; this.mStart = pre.length - m[2].length - 1;
+    this.drawMentions();
+  }
+
+  drawMentions() {
+    const ICON = { part: "microchip", net: "cable", sheet: "waypoints", file: "file" };
+    clear(this.mentionBox).append(...this.mList.map((x, i) => h("div.mrow" + (i === this.mAt ? ".on" : ""),
+      { onmousedown: (e) => { e.preventDefault(); this.pickMention(x); } },
+      icon(ICON[x.type], 13), h("b", x.token), h("span.mdesc", x.desc || ""))));
+    this.mentionBox.style.display = "";
+  }
+
+  closeMentions() { if (this.mentionBox) this.mentionBox.style.display = "none"; this.mList = null; }
+
+  mentionKey(e) {
+    if (!this.mList || this.mentionBox.style.display === "none") return false;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      this.mAt = (this.mAt + (e.key === "ArrowDown" ? 1 : -1) + this.mList.length) % this.mList.length;
+      this.drawMentions();
+      return true;
+    }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); this.pickMention(this.mList[this.mAt]); return true; }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); this.closeMentions(); return true; }
+    return false;
+  }
+
+  pickMention(x) {
+    const v = this.input.value, end = this.input.selectionStart;
+    const ins = "@" + x.token + " ";
+    this.input.value = v.slice(0, this.mStart) + ins + v.slice(end);
+    const caret = this.mStart + ins.length;
+    this.input.setSelectionRange(caret, caret);
+    this.mentions.set(x.token, x);
+    this.closeMentions(); this.grow(); this.input.focus();
+  }
+
+  // the mentions still in the message, as attachments Claude reads ("The user points at: ...")
+  takeMentions(text) {
+    const out = [];
+    for (const [token, x] of this.mentions) {
+      if (!new RegExp(`(^|\\s)@${token.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(?=\\s|$|[,.;:!?)])`).test(text)) continue;
+      const it = x.item;
+      const label = x.type === "part" ? `part ${it.ref}${it.val ? ` (${it.val}${it.fp ? ", " + it.fp : ""})` : ""}${it.sheet_name ? ` on the ${it.sheet_name} sheet` : ""}` +
+          (it.x != null ? `, at (${it.x}, ${it.y}) mm on the ${it.side === "B" ? "bottom" : "top"} of the board` : "")
+        : x.type === "net" ? `net ${it.name}${it.kind ? ` (${it.kind})` : ""}`
+        : x.type === "sheet" ? `the ${it.name} sheet${it.file ? ` (${it.file})` : ""}` : `the file ${it.path}`;
+      out.push({ kind: "mention", mtype: x.type, token, label, ...it });
+    }
+    this.mentions.clear();
+    return out;
+  }
+
+  // a mention in the conversation: show what it points at
+  probe(a) {
+    if (a.mtype === "part") this.ws.locate({ ref: a.ref });
+    else if (a.mtype === "net") { this.ws.show("board"); this.ws.view("board").highlight({ nets: [a.name] }); }
+    else if (a.mtype === "sheet") { this.ws.show("schematic"); const v = this.ws.view("schematic"); v.showSheet ? v.showSheet(a.path) : null; }
+    else if (a.mtype === "file") this.ws.showFile && this.ws.showFile(a.path);
   }
 
   // ------------------------------------------------------------------ dictation
@@ -557,15 +651,30 @@ export class Chat {
       return;
     }
     const files = (attachments || []).filter((a) => a && a.kind === "file");
-    const other = (attachments || []).filter((a) => a && a.kind !== "flag" && a.kind !== "file");
+    const ment = (attachments || []).filter((a) => a && a.kind === "mention");
+    const other = (attachments || []).filter((a) => a && a.kind !== "flag" && a.kind !== "file" && a.kind !== "mention");
     const pics = files.filter((f) => f.ftype === "image"), docs = files.filter((f) => f.ftype !== "image");
-    this.put(h("div.msg.user", text || null,
+    this.put(h("div.msg.user", text ? this.withMentions(text, ment) : null,
       pics.length ? h("div.apics", pics.map((f) => h("img", { src: f.thumb && f.thumb.startsWith("blob:") ? f.thumb : fileUrl(this.pid, f.path), alt: f.name,
         "data-tip": f.path, onclick: () => lightbox(fileUrl(this.pid, f.path)) }))) : null,
       docs.length ? h("div.att", docs.map((f) => h("span.ctx.afile", { "data-tip": f.path, onclick: () => this.ws.showFile && this.ws.showFile(f.path) },
         icon((FILE_KIND[f.ftype] || FILE_KIND.file)[0], 12), f.name))) : null,
       other.length ? h("div.att", other.map((a) => h("span.ctx", a.label || a.ref || a))) : null));
     this.scroll(true);
+  }
+
+  // the message's text with each @mention a link to what it points at
+  withMentions(text, ment) {
+    if (!ment || !ment.length) return text;
+    const by = new Map(ment.map((a) => ["@" + a.token, a]));
+    const esc = (t) => t.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+    const re = new RegExp(`(${[...by.keys()].sort((a, b) => b.length - a.length).map(esc).join("|")})`, "g");
+    const frag = document.createDocumentFragment();
+    for (const part of text.split(re)) {
+      const a = by.get(part);
+      frag.append(a ? h("span.mention", { "data-tip": a.label, onclick: () => this.probe(a) }, part) : part);
+    }
+    return frag;
   }
 
   assistantBlock() {
@@ -983,9 +1092,14 @@ export class Chat {
     await this.finishDictation();
     const text = this.input.value.trim();
     if (!text && !this.files.length) return;
-    if (this.busy) { this.input.value = ""; this.grow(); this.steer(text, await this.takeFiles()); return; }
+    if (this.busy) {
+      const ment = this.takeMentions(text);
+      const note = text + (ment.length ? `\nPointing at: ${ment.map((m) => m.label).join("; ")}` : "");
+      this.input.value = ""; this.grow(); this.steer(note, await this.takeFiles()); return;
+    }
     native.askNotify();
-    const attachments = this.sel.map((it) => ({ label: (it.ref ? it.ref : it.net ? "net " + it.net : it.label) + (it.source ? ` (${it.source})` : ""), ...it }));
+    const attachments = [...this.sel.map((it) => ({ label: (it.ref ? it.ref : it.net ? "net " + it.net : it.label) + (it.source ? ` (${it.source})` : ""), ...it })),
+      ...this.takeMentions(text)];
     this.input.value = ""; this.grow();
     const files = await this.takeFiles();
     this.lastSent = text || "(Attached with no message.)";

@@ -583,7 +583,8 @@ class AgentManager:
             starting = False
             if self.stop_asked:                           # stopped while connecting: the message never goes out
                 raise _Stopped()
-            extra = [f"Attached by the user: {a.get('label') or a}" for a in attachments
+            extra = [(f"The user points at: {a.get('label')}" if isinstance(a, dict) and a.get("kind") == "mention"
+                      else f"Attached by the user: {a.get('label') or a}") for a in attachments
                      if not (isinstance(a, dict) and a.get("kind") == "flag")] if attachments else None
             if hidden:
                 extra = (extra or []) + [hidden]

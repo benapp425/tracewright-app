@@ -2607,6 +2607,43 @@ def stage_gates_waivers_and_sign_off():
     asyncio.run(go())
 
 
+@test(needs=("kicad",))
+def mentions_list_what_can_be_pointed_at():
+    """The message box's @-mentions: the parts from the schematic (each with its sheet and where it is on the
+    board), the nets with their kind, the sheets and the project's files; a mention sent with a message reaches
+    Claude as what the user points at."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import fakeclaude as fc
+    pid = ProjectStore().import_copy(FIXTURE, "Mentions demo").id
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            d = await (await c.get(f"/api/projects/{pid}/mentions")).json()
+            u2 = next(x for x in d["parts"] if x["ref"] == "U2")
+            assert u2["sheet_name"] == "MCU" and "x" in u2 and u2["side"] == "F" and "SOIC" in u2["fp"], u2
+            assert not any(x["ref"].startswith("#") for x in d["parts"])
+            kinds = {x["name"].split("/").pop(): x.get("kind") for x in d["nets"]}
+            assert kinds.get("USB_D_P") == "pair" and kinds.get("GND") == "ground", kinds
+            assert {"MCU", "Power"} <= {x["name"] for x in d["sheets"]}, d["sheets"]
+            assert "tracewright.json" in d["files"] and not any(f.startswith(("build/", "tools/", ".")) for f in d["files"])
+            fake = fc.FakeClaude([fc.reply("Looking at U2.")])
+            a = app.agent(pid)
+            fake.plug(a)
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Why is @U2 hot?", "attachments": [
+                {"kind": "mention", "mtype": "part", "token": "U2", "ref": "U2", "label": "part U2 (ATtiny85-20SU) on the MCU sheet"}]})
+            assert r.status == 200, await r.text()
+            await fake.settle(a)
+            assert "The user points at: part U2 (ATtiny85-20SU) on the MCU sheet" in fake.prompts[-1].text, fake.prompts[-1].text[-600:]
+            await a.disconnect()
+            app.rt(pid).stop()
+    asyncio.run(run())
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

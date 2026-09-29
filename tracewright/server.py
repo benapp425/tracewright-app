@@ -929,6 +929,56 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.get("/api/projects/{pid}/mentions")
+    async def mentions(request):
+        """What the message box can @-mention: the parts (from the schematic, with where each is on the board),
+        the nets (with their kind), the sheets and the project's files."""
+        rt = app.rt(request.match_info["pid"])
+
+        def build():
+            out = {"parts": [], "nets": [], "sheets": [], "files": []}
+            pos = {}
+            if rt.p.tw.has_pcb():
+                try:
+                    b = rt.board()
+                    pos = {f.ref: {"x": round(f.x, 2), "y": round(f.y, 2), "side": f.side, "fp": f.lib_id.split(":")[-1]} for f in b.fp_list}
+                    board_nets = list(b.nets)
+                except Exception:
+                    board_nets = []
+            else:
+                board_nets = []
+            seen = set()
+            js = rt.schematic_json() if rt.p.tw.has_sch() else None
+            for sh in (js or {}).get("sheets", []):
+                out["sheets"].append({"name": sh.get("name") or "root", "path": sh.get("name_path"), "file": sh.get("file")})
+                for y in sh.get("symbols", []):
+                    ref = y.get("ref") or ""
+                    if y.get("power") or not ref or ref.startswith("#") or ref in seen:
+                        continue
+                    seen.add(ref)
+                    out["parts"].append({"ref": ref, "val": y.get("val") or "", "sheet": sh.get("name_path"), "sheet_name": sh.get("name") or "root", **pos.get(ref, {})})
+            for ref, pp in pos.items():
+                if ref not in seen:
+                    out["parts"].append({"ref": ref, "val": "", **pp})
+            try:
+                from tw import netmodel
+                m = netmodel.for_project(rt.p.tw)
+                out["nets"] = [{"name": n, "kind": r.get("kind")} for n, r in m.records.items() if n]
+            except Exception:
+                out["nets"] = [{"name": n} for n in board_nets if n]
+            root = rt.p.root
+            for d, dirs, files in os.walk(root):
+                dirs[:] = [x for x in dirs if not x.startswith(".") and x not in ("build", "tools", "node_modules", "__pycache__", "backups")]
+                for f in files:
+                    if f.startswith(".") or f.endswith((".pyc", "-bak", ".lck")):
+                        continue
+                    out["files"].append(os.path.relpath(os.path.join(d, f), root))
+                    if len(out["files"]) >= 400:
+                        break
+            out["parts"].sort(key=lambda x: (re.sub(r"\d+", "", x["ref"]), int(re.sub(r"\D", "", x["ref"]) or 0)))
+            return out
+        return jresp(await asyncio.to_thread(build))
+
     @routes.get("/api/projects/{pid}/schematic/svg")
     async def schematic_svg(request):
         rt = app.rt(request.match_info["pid"])

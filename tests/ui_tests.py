@@ -380,6 +380,33 @@ async def sign_off_before_ordering(t):
     await t.shot("order-locked")
 
 
+@test
+async def mentions_point_claude_at_parts_and_nets(t):
+    await t.open_project("board")
+    await t.page.wait("document.querySelector('.viewer canvas').__view.data", 20)
+    ta = "document.querySelector('.composer textarea')"
+    await t.page.js(f"{ta}.focus(); 1")
+    await t.page.type("Check @U")
+    rows = await t.page.wait("[...document.querySelectorAll('.mentions .mrow b')].map((b) => b.textContent).join(',') || null", 10)
+    check(rows.split(",")[0].startswith("U"), rows)
+    await t.shot("mentions")
+    await t.page.key("ArrowDown", code="ArrowDown")
+    await t.page.key("Enter", code="Enter")
+    val = await t.page.js(f"{ta}.value")
+    pick = rows.split(",")[1]
+    check(val == f"Check @{pick} ", f"{val!r} (picked {pick})")
+    check(await t.page.js("document.querySelector('.mentions').style.display") == "none", "the list stayed open")
+    # what the message would carry: the part, where it is, which sheet
+    ment = await t.page.js(f"(() => {{ const c = [...document.querySelectorAll('*')].find((e) => e.__chat).__chat; return c.takeMentions({ta}.value); }})()")
+    check(len(ment) == 1 and ment[0]["mtype"] == "part" and ment[0]["ref"] == pick and "on the top of the board" in ment[0]["label"], ment)
+    # a sent message's mention shows the part when clicked
+    await t.page.js("(() => { const c = [...document.querySelectorAll('*')].find((e) => e.__chat).__chat; c.userMsg('Check @%s now', %s); return 1; })()"
+                    % (pick, json.dumps(ment)))
+    await t.page.click(".msg.user .mention")
+    hl = await t.page.wait("(() => { const v = document.querySelector('.viewer canvas').__view; return v.hl && [...v.hl.refs]; })()", 5)
+    check(hl == [pick], hl)
+
+
 # a speech recognizer the test speaks through (headless Chrome has no microphone or speech service)
 FAKE_SPEECH = """
 window.SpeechRecognition = window.webkitSpeechRecognition = class {

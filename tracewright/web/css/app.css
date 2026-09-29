@@ -624,6 +624,17 @@ a.brand:hover { text-decoration: none; }
 .composer-bar .micbtn.rec:not([style*="--lvl"])::after { animation: micpulse 1.4s ease-in-out infinite; }
 @keyframes micpulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--err) 25%, transparent); } }
 @media (prefers-reduced-motion: reduce) { .composer-bar .micbtn.rec::after { animation: none; transition: none; } }
+/* @-mentions: the list above the message box, and the links in sent messages */
+.composer { position: relative; }
+.mentions { position: absolute; left: 12px; right: 12px; bottom: calc(100% - 4px); z-index: 20; background: var(--surface); border: 1px solid var(--line-2);
+  border-radius: 10px; box-shadow: var(--shadow); padding: 4px; max-height: 280px; overflow: auto; }
+.mentions .mrow { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 12.5px; color: var(--text-2); }
+.mentions .mrow b { font-weight: 600; color: var(--text); white-space: nowrap; }
+.mentions .mrow .mdesc { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mentions .mrow.on, .mentions .mrow:hover { background: var(--surface-3); }
+.mentions .mrow svg.ic { color: var(--text-3); flex: none; }
+.msg.user .mention { color: var(--accent); font-weight: 500; cursor: pointer; border-radius: 4px; }
+.msg.user .mention:hover { background: var(--accent-soft); }
 /* attachments waiting to go with the message */
 .attachrow { display: none; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
 .attachrow.on { display: flex; }
