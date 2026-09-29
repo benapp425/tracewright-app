@@ -231,6 +231,15 @@ export class Workspace {
       else if (this.guided) this.guided.set({ phase: e.phase });
     });
     ev.on("stages", (e) => this.renderStages(e.stages));
+    ev.on("stock.alert", (e) => {                       // the stock watch: a part has just run short
+      const parts = e.parts || [];
+      if (!parts.length) return;
+      const what = { out: "out of stock", low: "running low", gone: "discontinued" };
+      const text = parts.length === 1 ? `${parts[0].refs.slice(0, 3).join(", ")} (${parts[0].lcsc}) is ${what[parts[0].state]}`
+        : `${parts.length} parts are short for the planned order`;
+      toast(text, "warn", 9000, { label: "BOM", run: () => this.show("bom") });
+      native.notify("Stock watch", text, this.pid);
+    });
     ev.on("project.changed", (e) => { if (e.summary) { this.p = { ...this.p, ...e.summary }; this.renderStages(this.p.stages); this.nameEl.textContent = this.p.name; } });
     ev.on("live.status", (e) => this.renderLive(e));
     ev.on("highlight", (e) => {

@@ -75,7 +75,7 @@ def check_count():
         return 0
 
 
-def next_steps(p, board, bom, checks, sourcing):
+def next_steps(p, board, bom, checks, sourcing, stock=None):
     """Up to four things to do now, most useful first: {title, detail, action: {kind: chat | tab | command, ...}}."""
     tw = p.tw
     out = []
@@ -111,9 +111,31 @@ def next_steps(p, board, bom, checks, sourcing):
     if bom and sourcing == "jlc" and bom.get("no_lcsc"):
         out.append({"icon": "microchip", "title": f"Find LCSC codes for {bom['no_lcsc']} part{'s' if bom['no_lcsc'] != 1 else ''}", "detail": "Needed for JLC assembly.",
                     "action": ask("Find in-stock LCSC codes (JLC Basic parts where possible) for every assembled part that has none, and add them to the schematic.")})
+    if stock and (stock.get("out") or stock.get("gone")):
+        n = stock.get("out", 0) + stock.get("gone", 0)
+        out.append({"icon": "package", "title": f"{n} part{'s' if n != 1 else ''} short for {stock['boards']} boards",
+                    "detail": "Out of stock or discontinued: find stand-ins in the BOM.", "action": {"kind": "tab", "tab": "bom"}})
     if checks and not c.get("error") and tw.has_pcb():
-        out.append({"icon": "shopping-cart", "title": "Order the board", "detail": "Generate the files and send them to the fab.", "action": {"kind": "tab", "tab": "outputs"}})
+        from . import signoff
+        so = signoff.current(p)
+        if so and so["valid"]:
+            out.append({"icon": "shopping-cart", "title": "Order the board", "detail": "Generate the files and send them to the fab.", "action": {"kind": "tab", "tab": "outputs"}})
+        else:
+            out.append({"icon": "badge-check", "title": "Sign the design off" if not so else "Sign it off again",
+                        "detail": "Approve or reject the waivers, then sign off: ordering needs it." if not so else "The design changed after the sign-off.",
+                        "action": {"kind": "tab", "tab": "signoff"}})
     return out[:4]
+
+
+def _stock(rt):
+    try:
+        from . import stock
+        if not rt.p.tw.has_sch():
+            return None
+        st = stock.status(rt.p.tw, rt.board() if rt.p.tw.has_pcb() else None)
+        return {k: st[k] for k in ("boards", "out", "low", "gone")}
+    except Exception:
+        return None
 
 
 def overview(app, rt):
@@ -131,5 +153,5 @@ def overview(app, rt):
             est = None
     return {"project": p.summary(), "board": board, "bom": bom, "checks": checks, "sourcing": sourcing, "estimate": est,
             "estimate_parts": bool(bom and bom.get("cost") is not None),
-            "next": next_steps(p, board, bom, checks, sourcing), "activity": _activity(rt, app), "check_count": check_count(),
+            "next": next_steps(p, board, bom, checks, sourcing, _stock(rt)), "activity": _activity(rt, app), "check_count": check_count(),
             "has_sch": p.tw.has_sch(), "has_pcb": p.tw.has_pcb()}

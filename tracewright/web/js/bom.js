@@ -2,7 +2,7 @@
 // dated parts cache and what the checks say about each part. Click a line (or one designator) and the
 // parts light up on the board and in the schematic beside the table, and in the Board, Schematic and
 // 3D tabs; click a part in either preview and its line is selected.
-import { h, clear, api, toast, btn, menu, fmtTime, debounce } from "./util.js";
+import { h, clear, api, toast, btn, menu, fmtTime, debounce, modal } from "./util.js";
 import { icon } from "./icons.js";
 import { native } from "./native.js";
 import { PAPER } from "./schematic.js";
@@ -21,11 +21,14 @@ const FILTERS = [
   ["dnp", "Not placed", (r) => !r.assembled],
 ];
 
+// short for the planned order (the stock watch: stock.py), or on the old rough rule before it has run
 function lowStock(r) {
+  if (r.stock_state) return ["out", "low", "gone"].includes(r.stock_state);
   const s = r.source || {};
   const st = s.jlc_stock ?? s.lcsc_stock;
   return r.assembled && st !== undefined && st !== null && st < Math.max(50, r.qty * 20);
 }
+const STOCK_WORD = { out: "short", low: "low", gone: "discontinued" };
 
 function fmtStock(n) {
   if (n === undefined || n === null) return null;
@@ -192,7 +195,10 @@ export class BomView {
     const stat = (v, label, cls, tip) => h("div.bstat" + (cls ? "." + cls : ""), tip ? { "data-tip": tip } : {}, h("b", v), h("span", label));
     head.append(
       h("div.bom-title", h("div.vic", icon("package", 18)), h("div", h("div.vt", "Bill of materials"),
-        h("div.vs", `${t.lines} lines · ${t.parts} parts${t.dnp ? ` · ${t.dnp} not placed` : ""}${d.checked ? ` · checked ${fmtTime(d.checked)}` : ""}`))),
+        h("div.vs", `${t.lines} lines · ${t.parts} parts${t.dnp ? ` · ${t.dnp} not placed` : ""}${d.checked ? ` · checked ${fmtTime(d.checked)}` : ""}`),
+        d.stock && (d.stock.out || d.stock.low || d.stock.gone) ? h("div.vs.bom-short", icon("triangle-alert", 12),
+          [d.stock.out ? `${d.stock.out} short` : null, d.stock.low ? `${d.stock.low} low` : null, d.stock.gone ? `${d.stock.gone} discontinued` : null].filter(Boolean).join(", ") +
+          ` for ${d.stock.boards} boards${d.stock.oldest ? ` · stock asked ${fmtTime(d.stock.oldest)}` : ""}`) : null)),
       h("div.grow"),
       h("div.bom-actions",
         busy ? h("div.bom-look", h("span.spinner"), h("span", this.lookup.total ? `Looking up ${this.lookup.done} of ${this.lookup.total}` : "Looking up…"),
@@ -261,12 +267,39 @@ export class BomView {
       h("div.c-mpn", { title: s.name || r.description || "" }, h("div.ellipsis", r.mpn || h("span.muted", "no MPN")), r.mfr || s.brand ? h("div.sub.ellipsis", r.mfr || s.brand) : null),
       h("div.c-lcsc", r.lcsc ? h("a.mono", { href: lcscURL(r.lcsc), onclick: (e) => { e.stopPropagation(); e.preventDefault(); native.openURL(lcscURL(r.lcsc)); }, "data-tip": s.name || "Open on LCSC" }, r.lcsc)
         : (r.assembled ? h("span.badge.err", "no code") : h("span.muted", "-")), lib ? h("div.sub", lib) : null),
-      h("div.c-stock" + (lowStock(r) ? ".low" : ""), { "data-tip": stockTip },
-        h("div", fmtStock(stock) || h("span.muted", "-")), h("div.sub", fmtPrice(price) || "")),
-      h("div.c-iss", r.issues.length ? h("span.iss." + worst, { "data-tip": r.issues.slice(0, 6).map((i) => `${i.ref}: ${i.message}`).join("\n") + (r.issues.length > 6 ? `\n+ ${r.issues.length - 6} more` : ""),
+      h("div.c-stock" + (lowStock(r) ? ".low" : ""), { "data-tip": stockTip + (r.need ? ` · ${r.need} needed for the planned order` : "") },
+        h("div", fmtStock(stock) || h("span.muted", "-"), STOCK_WORD[r.stock_state] ? h("span.stk." + r.stock_state, STOCK_WORD[r.stock_state]) : null),
+        h("div.sub", fmtPrice(price) || "")),
+      h("div.c-iss", STOCK_WORD[r.stock_state] && r.lcsc ? h("button.btn.sm.ghost.alt", { "data-tip": "In-stock parts that can stand in",
+        onclick: (e) => { e.stopPropagation(); this.alternates(r); } }, icon("repeat", 12)) : null,
+        r.issues.length ? h("span.iss." + worst, { "data-tip": r.issues.slice(0, 6).map((i) => `${i.ref}: ${i.message}`).join("\n") + (r.issues.length > 6 ? `\n+ ${r.issues.length - 6} more` : ""),
         onclick: (e) => { e.stopPropagation(); this.ws.show("checks"); } }, icon(worst === "err" ? "circle-x" : "triangle-alert", 13), String(r.issues.length)) : null));
     el.__row = r;
     return el;
+  }
+
+  // In-stock parts for one that runs short: exact equivalents for resistors and capacitors, the same part
+  // number from other makers otherwise (to check against the data sheet); Claude makes the swap.
+  async alternates(r) {
+    const body = h("div.alts", h("div.small.muted", "Looking at JLC's stock…"));
+    const m = modal({ title: `Stand-ins for ${r.refs.slice(0, 4).join(", ")}`, icon: "repeat", cls: "wide",
+      sub: `${r.value} · ${r.lcsc} is ${STOCK_WORD[r.stock_state] || "short"}${r.need ? `: ${r.need} needed` : ""}`, body,
+      actions: [h("button.btn", { onclick: () => m.close() }, "Close")] });
+    let d;
+    try { d = await api(`/api/projects/${enc(this.pid)}/stock/alternates`, { body: { lcsc: r.lcsc } }); }
+    catch (e) { clear(body).appendChild(h("div.notice.err", icon("circle-alert", 14), h("div", e.message))); return; }
+    clear(body);
+    if (!d.items.length) { body.appendChild(h("div.small.muted", "Nothing in stock that is the same part. Claude can look further, or the design can change around it.")); return; }
+    for (const it of d.items) {
+      body.appendChild(h("div.alt",
+        h("div.grow", h("div", h("b", it.mpn || it.lcsc), it.brand ? h("span.muted", ` · ${it.brand}`) : null, it.lib ? h("span.lib" + (it.lib === "Extended" ? ".ext" : ".basic"), it.lib) : null),
+          h("div.sub", it.describe), h("div.sub", it.why + (it.check ? ` — ${it.check}` : ""))),
+        h("div.alt-n", h("b", fmtStock(it.stock) || "-"), h("div.sub", fmtPrice(it.price) || "")),
+        btn("arrow-right", "Swap", { onclick: () => {
+          m.close();
+          this.ws.chat.prefill(`Swap ${r.refs.join(", ")} (${r.value}, ${r.lcsc}, ${STOCK_WORD[r.stock_state] || "short"} for the planned order) for ${it.lcsc} (${it.mpn}${it.brand ? ", " + it.brand : ""}: ${it.describe}). ${it.check ? "First " + it.check + "." : ""} Update the LCSC and MPN fields, then run the BOM checks.`);
+        } }, "sm")));
+    }
   }
 
   // Basic-part equivalents for the Extended resistors and capacitors; Claude makes the swaps

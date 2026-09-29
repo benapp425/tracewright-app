@@ -30,7 +30,7 @@ class Server:
         self.home, self.ws = os.path.join(self.tmp, "home"), os.path.join(self.tmp, "projects")
         os.makedirs(self.home), os.makedirs(self.ws)
         with open(os.path.join(self.home, "settings.json"), "w") as f:
-            json.dump({"update_check": False, "open_browser": False, "workspace": self.ws}, f)
+            json.dump({"update_check": False, "open_browser": False, "workspace": self.ws, "stock_watch": False}, f)
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}/"
         env = dict(os.environ, TRACEWRIGHT_HOME=self.home, TW_WORKSPACE=self.ws, TW_ACCOUNTS="0", PYTHONUNBUFFERED="1")

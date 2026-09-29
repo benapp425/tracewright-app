@@ -14,7 +14,7 @@ TMP = tempfile.mkdtemp(prefix="tw-tests-")
 os.environ["TRACEWRIGHT_HOME"] = os.path.join(TMP, "home")
 os.makedirs(os.environ["TRACEWRIGHT_HOME"], exist_ok=True)
 with open(os.path.join(os.environ["TRACEWRIGHT_HOME"], "settings.json"), "w") as f:
-    json.dump({"workspace": os.path.join(TMP, "workspace"), "snapshot_each_turn": False, "accounts_required": False}, f)
+    json.dump({"workspace": os.path.join(TMP, "workspace"), "snapshot_each_turn": False, "accounts_required": False, "stock_watch": False}, f)
 
 import tracewright  # noqa: E402  (puts the toolkit on sys.path as `tw`)
 from tw import env  # noqa: E402
@@ -2778,6 +2778,112 @@ def firmware_starter_from_the_schematic():
         f.write("// my change\n")
     out = firmware.write(p, nl, p.name)
     assert "firmware/bringup/bringup.ino" not in out and open(ino).read().endswith("// my change\n")
+
+
+@test()
+def web_modules_import_what_they_use():
+    """Every page module imports the helpers it calls from the others (a missing import only fails when that
+    button is pressed: the BOM's Save money dialog did, with modal)."""
+    import glob
+    web = os.path.join(ROOT, "tracewright", "web", "js")
+    mods = {}
+    for f in glob.glob(os.path.join(web, "*.js")):
+        src = open(f).read()
+        exp = set(re.findall(r"export (?:async )?function (\w+)", src)) | set(re.findall(r"export (?:const|let|class) (\w+)", src))
+        mods[os.path.basename(f)] = (src, exp)
+    owner = {n: f for f, (_, exp) in mods.items() for n in exp}
+    bad = []
+    for f, (src, _) in mods.items():
+        have = set()
+        for m in re.finditer(r"import\s*\{([^}]*)\}\s*from|const\s*\{([^}]*)\}\s*=\s*await\s+import\(", src):
+            have |= {x.strip().split(" as ")[-1].split(":")[-1].strip() for x in (m.group(1) or m.group(2)).split(",") if x.strip()}
+        have |= set(re.findall(r"(?:function|const|let|var|class)\s+(\w+)", src))
+        have |= set(re.findall(r"^\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{", src, re.M))            # methods
+        for name, where in owner.items():
+            if where == f or name in have:
+                continue
+            if re.search(r"(?<![\w.$])" + re.escape(name) + r"\s*\(", src) or re.search(r"new\s+" + re.escape(name) + r"\b", src):
+                bad.append(f"{f} calls {name} ({where}) without importing it")
+    assert not bad, bad
+
+
+@test(needs=("kicad",))
+def stock_watch_and_stand_ins():
+    """The stock watch: each placed part's stock against the planned order (its count x the boards, plus spares),
+    out below that, low below three times it; a part that has just run short is reported once (and told to
+    Claude), again only after it recovered; a resistor's stand-ins are exact equivalents in stock."""
+    import time as _t
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import stock, bom as bomlib, overview
+    from tw.jlc import Parts
+    pid = ProjectStore().import_copy(FIXTURE, "Stock demo").id
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        rt = app.rt(pid)
+        tw = rt.p.tw
+        rows = [r for r in bomlib.bom_data(tw, rt.board())["rows"] if r["assembled"] and r["lcsc"]]
+        assert len(rows) >= 4, rows
+        a, b, c = rows[0], rows[1], rows[2]
+        assert stock.need(1, 5) == 7 and stock.need(10, 20) == 210
+        cache = os.path.join(tw.root, "sourcing", "cache")
+        os.makedirs(cache, exist_ok=True)
+
+        def jlc(levels):
+            items = [{"lcsc": r["lcsc"], "jlc_stock": levels.get(r["lcsc"], 100000), "lib": "base", "price_1": 0.01} for r in rows]
+            with open(os.path.join(cache, "jlc_zz_test.json"), "w") as f:
+                json.dump({"items": items, "_epoch": _t.time(), "_utc": "2026-09-29T10:00:00"}, f)
+        n_a = stock.need(a["qty"], 5)
+        jlc({a["lcsc"]: n_a - 1, b["lcsc"]: n_a * 2 if a["qty"] == b["qty"] else stock.need(b["qty"], 5) * 2})
+        st = stock.status(tw)
+        by = {x["lcsc"]: x for x in st["rows"]}
+        assert by[a["lcsc"]]["state"] == "out" and by[b["lcsc"]]["state"] == "low" and by[c["lcsc"]]["state"] == "ok", {k: v["state"] for k, v in by.items()}
+        news = stock.record(tw, st)
+        assert {x["lcsc"] for x in news} == {a["lcsc"], b["lcsc"]}, news
+        assert not stock.record(tw)                                             # said once
+        jlc({})                                                                   # back in stock, then short again
+        stock.record(tw)
+        jlc({a["lcsc"]: 0})
+        again = stock.record(tw)
+        assert [x["lcsc"] for x in again] == [a["lcsc"]] and again[0]["state"] == "out", again
+        assert len(stock.history(tw, a["lcsc"])) >= 3
+        rt.p.cfg["constraints"] = {"quantity": 50}
+        rt.p.save()
+        assert stock.status(env.Project(rt.p.root))["boards"] == 50
+        rt.p.cfg["constraints"] = {}
+        rt.p.save()
+        # stand-ins for a resistor: the same value, package, tolerance and power, in stock
+        r10 = next((r for r in rows if r["refs"][0].startswith("R") and savings_value(r["value"])), None)
+        orig = Parts.search
+        pkg = next(x for x in ("0402", "0603", "0805", "1206") if x in r10["footprint"])
+        val = r10["value"].split()[0]
+        Parts.search = lambda self, q, n=25: {"items": [
+            {"lcsc": "C900001", "mpn": "GOOD", "describe": f"{val}Ω ±1% 100mW {pkg}", "package": pkg, "jlc_stock": 50000, "lib": "base", "price_1": 0.001},
+            {"lcsc": "C900002", "mpn": "WRONGVAL", "describe": f"1.23kΩ ±1% 100mW {pkg}", "package": pkg, "jlc_stock": 50000, "lib": "base", "price_1": 0.001},
+            {"lcsc": "C900003", "mpn": "NOSTOCK", "describe": f"{val}Ω ±1% 100mW {pkg}", "package": pkg, "jlc_stock": 3, "lib": "base", "price_1": 0.001}]}
+        try:
+            alt = stock.alternates(tw, {"refs": r10["refs"], "value": r10["value"], "footprint": r10["footprint"], "qty": r10["qty"], "lcsc": r10["lcsc"]})
+            assert [x["lcsc"] for x in alt["items"]] == ["C900001"], alt
+            async with TestClient(TestServer(webapp)) as cl:
+                jlc({r10["lcsc"]: 0})
+                d = await (await cl.get(f"/api/projects/{pid}/bom")).json()
+                row = next(x for x in d["rows"] if x.get("lcsc") == r10["lcsc"])
+                assert row["stock_state"] == "out" and d["stock"]["out"] >= 1, (row.get("stock_state"), d.get("stock"))
+                r = await cl.post(f"/api/projects/{pid}/stock/alternates", json={"lcsc": r10["lcsc"]})
+                assert r.status == 200 and [x["lcsc"] for x in (await r.json())["items"]] == ["C900001"], await r.text()
+                ov = overview.overview(app, rt)
+                assert any("short for 5 boards" in x["title"] for x in ov["next"]), ov["next"]
+        finally:
+            Parts.search = orig
+        rt.stop()
+
+    def savings_value(v):
+        from tracewright import savings
+        return savings.ohms(v.split()[0]) if v else None
+    asyncio.run(run())
 
 
 @test(needs=("node",))

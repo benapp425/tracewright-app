@@ -103,6 +103,59 @@ def _query(kind, value, pkg):
     return f"{s} {pkg}"
 
 
+def equivalents(found, kind, value, pkg, stock_needed, need_tol=None, need_w=None, need_v=None, diel=None, basic=False, stock_key="jlc_stock"):
+    """The search results that are the same resistor or capacitor: the same value and package, at least the
+    tolerance, power and voltage, a dielectric at least as good (C0G stays C0G), and stock_needed in stock.
+    basic: JLC Basic parts only."""
+    good = []
+    for it in found:
+        d = it.get("describe") or ""
+        if basic and _lib(it) != "Basic":
+            continue
+        if (it.get(stock_key) or 0) < stock_needed or pkg not in (it.get("package") or "") + d:
+            continue
+        if kind == "R" and not _same(_desc_ohms(d), value):
+            continue
+        t = _tolerance(d)
+        if need_tol and (t is None or t > need_tol):
+            continue
+        if need_w:
+            w = _watts(d)
+            if w is None or w < need_w:
+                continue
+        if kind == "C":
+            if not _same(_desc_farads(d), value):
+                continue
+            v = _volts(d)
+            if need_v and (v is None or v < need_v):
+                continue
+            dd = _dielectric(d)
+            if diel == "C0G" and dd != "C0G":
+                continue
+            if diel in ("X7R", "X7S", "X8R") and dd not in ("X7R", "X7S", "X8R", "C0G"):
+                continue
+            if dd in ("Y5V", "Z5U"):
+                continue
+        good.append(it)
+    return good
+
+
+def requirements(r, src):
+    """What an equivalent of a BOM row must match: (kind, value, package, tolerance, watts, volts, dielectric)."""
+    kind = r["refs"][0].rstrip("0123456789").upper()[:1]
+    pkg = package_of(r["footprint"])
+    now_desc = (src or {}).get("describe") or (src or {}).get("name") or ""
+    if kind not in ("R", "C") or not pkg:
+        return None
+    value = ohms(r["value"].split()[0]) if kind == "R" else farads(r["value"])
+    if value is None:
+        return None
+    return (kind, value, pkg, _tolerance(r["value"]) or _tolerance(now_desc),
+            (_watts(r["value"]) or _watts(now_desc)) if kind == "R" else None,
+            (_volts(r["value"]) or _volts(now_desc)) if kind == "C" else None,
+            (_dielectric(r["value"]) or _dielectric(now_desc)) if kind == "C" else None)
+
+
 def suggestions(tw, board=None, boards=5, budget=90.0, progress=None, stop=None):
     """[{refs, value, footprint, qty, now: {...}, instead: {...}, saving, why}] best first, plus what
     could not be matched and why."""
@@ -140,34 +193,7 @@ def suggestions(tw, board=None, boards=5, budget=90.0, progress=None, stop=None)
             skipped.append({"refs": r["refs"], "why": f"JLC did not answer ({e})"})
             continue
         need = r["qty"] * boards
-        good = []
-        for it in found:
-            d = it.get("describe") or ""
-            if _lib(it) != "Basic" or (it.get("jlc_stock") or 0) < need * 1.2 or pkg not in (it.get("package") or "") + d:
-                continue
-            if kind == "R" and not _same(_desc_ohms(d), value):
-                continue
-            t = _tolerance(d)
-            if need_tol and (t is None or t > need_tol):
-                continue
-            if need_w:
-                w = _watts(d)
-                if w is None or w < need_w:
-                    continue
-            if kind == "C":
-                if not _same(_desc_farads(d), value):
-                    continue
-                v = _volts(d)
-                if need_v and (v is None or v < need_v):
-                    continue
-                dd = _dielectric(d)
-                if diel == "C0G" and dd != "C0G":
-                    continue
-                if diel in ("X7R", "X7S", "X8R") and dd not in ("X7R", "X7S", "X8R", "C0G"):
-                    continue
-                if dd in ("Y5V", "Z5U"):
-                    continue
-            good.append(it)
+        good = equivalents(found, kind, value, pkg, need * 1.2, need_tol, need_w, need_v, diel, basic=True)
         if not good:
             skipped.append({"refs": r["refs"], "why": "no Basic part with the same value and package in stock"})
             continue

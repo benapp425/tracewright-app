@@ -2068,3 +2068,16 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .in-prow.mismatch { background: var(--warn-soft); } .in-prow.mismatch svg.ic { color: var(--warn); }
 .in-prow.critical { background: var(--err-soft); } .in-prow.critical svg.ic { color: var(--err); }
 .in-prow.unknown svg.ic, .in-prow.missing svg.ic { color: var(--text-3); }
+
+/* stock watch: short parts in the BOM, and their stand-ins */
+.bom-short { color: var(--warn); display: flex; align-items: center; gap: 4px; }
+.stk { display: inline-block; margin-left: 6px; font-size: 10.5px; padding: 0 5px; border-radius: 4px; vertical-align: 1px; }
+.stk.out, .stk.gone { background: var(--err-soft); color: var(--err); }
+.stk.low { background: var(--warn-soft); color: var(--warn); }
+.c-iss .alt { height: 22px; min-width: 22px; padding: 0 5px; margin-right: 4px; }
+.alts { display: flex; flex-direction: column; }
+.alt { display: flex; gap: 14px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.alt:first-child { border-top: 0; }
+.alt .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.alt .lib { margin-left: 8px; }
+.alt-n { text-align: right; min-width: 70px; font-variant-numeric: tabular-nums; }

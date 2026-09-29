@@ -51,6 +51,7 @@ DEFAULTS = {
     "google_client_id": "",                # Google sign-in: an OAuth client (Desktop app, or Web on a server)
     "google_client_secret": "",
     "update_check": True,                  # look for a newer release on GitHub once a day
+    "stock_watch": True,                   # once a day, when a project opens: ask again about its parts' stock
 }
 
 _lock = threading.Lock()

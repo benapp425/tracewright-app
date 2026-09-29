@@ -95,7 +95,43 @@ class App:
             r = ProjectRuntime(self, p)
             self.runtimes[p.id] = r
             r.start()
+            self.watch_stock(r)
         return r
+
+    def watch_stock(self, rt, delay=25.0):
+        """Once a day, when a project opens: its placed parts' stock is asked again (the ones last asked more than a
+        day ago), the readings logged, and a word when a part has just run short for the planned order."""
+        if not self.settings.get("stock_watch", True) or not self.settings.get("allow_web", True) or os.environ.get("TW_OFFLINE"):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def go():
+            await asyncio.sleep(delay)
+            from . import stock, bom as bomlib
+            try:
+                codes = await asyncio.to_thread(stock.stale_codes, rt.p.tw, 24.0)
+                if not codes or getattr(rt, "bom_stop", None) or self.agent_busy(rt.p.id):
+                    return
+                await asyncio.to_thread(bomlib.lookup, rt.p.tw, codes, None, None, 90.0)
+                news = await asyncio.to_thread(stock.record, rt.p.tw)
+            except Exception as e:
+                self.log(f"{rt.p.id}: stock watch: {type(e).__name__}: {e}")
+                return
+            rt.hub.emit("bom.changed")
+            if news:
+                self.stock_news(rt, news)
+        loop.create_task(go())
+
+    def stock_news(self, rt, news):
+        """Parts that have just run short: the windows are told, and so is Claude at its next turn."""
+        rt.hub.emit("stock.alert", parts=news)
+        for x in news[:6]:
+            what = {"out": "is out of stock", "low": "is running low", "gone": "is discontinued"}[x["state"]]
+            rt.user_changes.append(f"stock watch: {', '.join(x['refs'][:4])} ({x['lcsc']}) {what}"
+                                   + (f": {x['stock']} left, {x['need']} needed for the planned order" if x["stock"] is not None else ""))
 
     def agent(self, pid):
         from .agent import AgentManager
@@ -1529,9 +1565,39 @@ def make_app():
     async def bom_get(request):
         rt = app.rt(request.match_info["pid"])
         from . import bom as bomlib
-        d = await asyncio.to_thread(lambda: bomlib.bom_data(rt.p.tw, rt.board()))
+        from . import stock
+
+        def build():
+            d = bomlib.bom_data(rt.p.tw, rt.board())
+            if not d.get("empty"):
+                st = stock.status(rt.p.tw, data=d)
+                by = {x["lcsc"]: x for x in st["rows"]}
+                for r in d.get("rows", []):
+                    x = by.get(r.get("lcsc"))
+                    if x and r.get("assembled"):
+                        r["stock_state"], r["need"] = x["state"], x["need"]
+                d["stock"] = {k: st[k] for k in ("boards", "mode", "out", "low", "gone", "unknown", "oldest")}
+            return d
+        d = await asyncio.to_thread(build)
         d["looking_up"] = bool(getattr(rt, "bom_stop", None))
         return jresp(d)
+
+    @routes.post("/api/projects/{pid}/stock/alternates")
+    async def stock_alternates(request):
+        """In-stock parts that can stand in for a placed part that runs short: {lcsc}."""
+        from . import stock
+        from tw.jlc import LookupFailed
+        rt = app.rt(request.match_info["pid"])
+        code = str((await request.json()).get("lcsc") or "")
+        st = await asyncio.to_thread(stock.status, rt.p.tw)
+        row = next((x for x in st["rows"] if x["lcsc"] == code), None)
+        if not row:
+            return err(f"no placed part with {code}", 404)
+        try:
+            res = await asyncio.to_thread(stock.alternates, rt.p.tw, row, st["boards"])
+        except LookupFailed as e:
+            return err(f"JLC did not answer: {e}", 502)
+        return jresp({**res, "part": row})
 
     @routes.get("/api/projects/{pid}/bom.csv")
     async def bom_csv(request):
@@ -1584,6 +1650,10 @@ def make_app():
                 bad = {k: v for k, v in res.items() if v != "ok"}
                 rt.hub.emit("bom.lookup", done=len(codes), total=len(codes), finished=True, failed=len(bad),
                             stopped=stop.is_set(), note=next(iter(bad.values()), "") if bad else "")
+                from . import stock
+                news = await asyncio.to_thread(stock.record, rt.p.tw)
+                if news:
+                    app.stock_news(rt, news)
             except Exception as e:
                 traceback.print_exc()
                 rt.hub.emit("bom.lookup", finished=True, error=f"{type(e).__name__}: {e}")
