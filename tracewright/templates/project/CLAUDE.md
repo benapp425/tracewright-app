@@ -17,3 +17,7 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
   rather than editing it here (edits here are set aside, not kept, at the next update).
 - `build/` -- generated reports, plots and fab files (not in git; regenerate with `./tw check`, `./tw outputs`).
 - `.claude/knowledge/` -- lessons learned on earlier boards. `.claude/skills/` -- how-tos for each stage.
+- Stages have gates: the `stage` tool only marks a stage done (or moves on past it) when its gate holds -- the
+  requirements written, the checks run on the design as it is now with no errors, nothing unrouted, the
+  user's sign-off for the release -- and says what is missing otherwise. Waive findings with the `waive`
+  tool, never by editing tracewright.json.

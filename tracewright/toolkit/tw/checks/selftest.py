@@ -110,6 +110,15 @@ def plant_cpl(p):
     os.remove(p.path("sourcing", "jlc-placement.json"))          # no corrections: U2 is 90 degrees out
 
 
+def plant_floorplan(p):
+    # the floorplan agreed at the guided start puts J2 (Qwiic) on the top edge; the board has it on the right
+    os.makedirs(p.path(".tracewright"), exist_ok=True)
+    fp = {"board": {"w": 50, "h": 35, "radius": 0}, "holes": [], "keepouts": [],
+          "items": [{"id": "qwiic", "ref": "J2", "label": "Qwiic", "kind": "connector", "edge": "top", "at": 25, "w": 6.8, "h": 5.6}]}
+    with open(p.path(".tracewright", "canvas.json"), "w") as f:
+        json.dump({"floorplan": fp}, f)
+
+
 # ----------------------------------------------------------------------------- in-memory plants
 def _board(p):
     from ..board import Board
@@ -541,6 +550,7 @@ CASES = [
     ("lessons.control_pins", "U2 reset pin left open", ("mem", mem_control), "U2"),
     ("lessons.mechanical", "no mounting holes", ("mem", mem_mechanical), "mounting"),
     ("cpl.jlc", "JLC placement corrections removed", ("file", plant_cpl), "rotate"),
+    ("placement.floorplan", "the floorplan puts J2 on the top edge; the board has it on the right", ("file", plant_floorplan), "planned on the top edge"),
     ("assembly.hand", "R1 an 0201 on a board you solder yourself", ("mem", mem_hand), "too small"),
     ("power.flyback", "a relay coil switched by a MOSFET with no diode", ("mem", mem_flyback), "no flyback diode"),
     ("power.cap_voltage", "C1 on +5V rated 4 V", ("mem", mem_cap_voltage), "rated 4"),

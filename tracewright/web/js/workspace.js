@@ -19,11 +19,12 @@ import { MissionControl } from "./mission.js";
 import { GuidedCanvas } from "./guided.js";
 import { Inspector } from "./inspector.js";
 import { limitsPanel } from "./limits.js";
+import { SignoffView } from "./signoff.js";
 
 const enc = encodeURIComponent;
 export const TABS = [
   ["overview", "Overview", "layout-grid"], ["board", "Board", "circuit-board"], ["schematic", "Schematic", "waypoints"], ["3d", "3D", "box"],
-  ["bom", "BOM", "list"], ["checks", "Checks", "list-checks"], ["outputs", "Order", "shopping-cart"], ["rules", "Rules", "sliders-horizontal"],
+  ["bom", "BOM", "list"], ["checks", "Checks", "list-checks"], ["signoff", "Sign-off", "badge-check"], ["outputs", "Order", "shopping-cart"], ["rules", "Rules", "sliders-horizontal"],
   ["docs", "Docs", "file-text"], ["files", "Files", "folder"], ["history", "History", "history"],
 ];
 // Five places, each holding one or more views (Design: the board, schematic and 3D model ...).
@@ -31,14 +32,14 @@ export const PLACES = [
   ["overview", "Overview", "layout-grid", ["overview"]],
   ["design", "Design", "circuit-board", ["board", "schematic", "3d"]],
   ["parts", "Parts", "list", ["bom", "outputs"]],
-  ["checks", "Checks", "list-checks", ["checks", "rules"]],
+  ["checks", "Checks", "list-checks", ["checks", "signoff", "rules"]],
   ["project", "Project", "folder", ["docs", "files", "history"]],
 ];
-const SUB = { board: "Board", schematic: "Schematic", "3d": "3D", bom: "BOM", outputs: "Order", checks: "Checks", rules: "Design rules",
+const SUB = { board: "Board", schematic: "Schematic", "3d": "3D", bom: "BOM", outputs: "Order", checks: "Checks", signoff: "Sign-off", rules: "Design rules",
   docs: "Docs", files: "Files", history: "History" };
 export const placeOf = (view) => (PLACES.find((p) => p[3].includes(view)) || PLACES[1])[0];
 export const tabKey = (i) => i < 9 ? `mod+${i + 1}` : null;
-const VIEWS = { overview: OverviewPanel, board: BoardView, schematic: SchematicView, "3d": Viewer3D, bom: BomView, checks: ChecksPanel, rules: RulesView,
+const VIEWS = { overview: OverviewPanel, board: BoardView, schematic: SchematicView, "3d": Viewer3D, bom: BomView, checks: ChecksPanel, signoff: SignoffView, rules: RulesView,
   files: FilesPanel, history: HistoryPanel, outputs: OutputsPanel, docs: DocsPanel };
 const STAGE_ICON = { done: "check", blocked: "x", active: null, todo: null, skipped: null };
 

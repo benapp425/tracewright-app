@@ -4,8 +4,10 @@ description: Verify the finished design and produce the fab release - full check
 ---
 # Verification and release
 
-1. `run_checks` with everything, `refresh`. Every error fixed. Every warning either fixed or waived in
-   tracewright.json `checks.waive` with `{"key": ..., "reason": ...}` -- the reason is required.
+1. `run_checks` with everything, `refresh`. Every error fixed. Every warning either fixed or waived with the
+   `waive` tool (action propose, the finding's key and the reason -- the reason is required). An error you
+   cannot fix is only a proposal when you waive it: it keeps counting until the user approves it on the
+   Sign-off page, so tell them in the chat why you propose it.
 2. `./tw selftest` passes (the checks can still catch their planted faults).
 3. `docs/review.md`: verified from the files / needs the built board / open issues. `docs/bring-up.md`: the test
    order for the first board, as `## ` sections of `- [ ]` steps, each naming the value to expect where
@@ -17,3 +19,5 @@ description: Verify the finished design and produce the fab release - full check
    fab.not_assembled.
 6. The release zip is `build/release/<name>-rev<rev>-<date>.zip`. Tell the user what it contains, the check
    verdict, and what only the built board can prove. Never call it ready while problems remain.
+7. Ask the user to sign the design off (Checks > Sign-off): they approve or reject each proposed waiver there,
+   and ordering waits for their sign-off. The release stage only counts as done once they have signed off.

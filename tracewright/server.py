@@ -1665,8 +1665,18 @@ def make_app():
         return jresp({"started": True})
 
     # ------------------------------------------------------------------ ordering (the Order tab)
+    def _signed(rt):
+        """Ordering needs the design signed off as it is now (Checks > Sign-off)."""
+        from . import signoff
+        so = signoff.current(rt.p)
+        if not so:
+            return err("Sign the design off first (Checks > Sign-off): ordering needs it.", 409)
+        if not so["valid"]:
+            return err("The design changed after it was signed off: sign it off again (Checks > Sign-off).", 409)
+        return None
+
     def _order_state(rt, qty):
-        from . import order, bom as bomlib
+        from . import order, bom as bomlib, signoff
         tw = rt.p.tw
         m = order.mode(tw)
         b = rt.board() if tw.has_pcb() else None
@@ -1683,7 +1693,7 @@ def make_app():
                             for f in sorted(os.listdir(d)) if os.path.isfile(os.path.join(d, f))]
         return {"mode": m, "modes": order.MODES, "specs": sp, "estimate": order.estimate(sp, totals, m, qty) if sp else None,
                 "readiness": order.readiness(tw, data, rt.p.checks_summary(), m, fresh), "totals": totals, "fresh": fresh,
-                "files": files, "links": order.LINKS, "has_pcb": tw.has_pcb()}
+                "files": files, "links": order.LINKS, "has_pcb": tw.has_pcb(), "signoff": signoff.current(rt.p)}
 
     @routes.get("/api/projects/{pid}/bringup")
     async def bringup_get(request):
@@ -1778,6 +1788,8 @@ def make_app():
         """The package JLC's quote page takes, and the order sheet; the app opens the page and the folder."""
         from . import order, bom as bomlib
         rt = app.rt(request.match_info["pid"])
+        if (refused := _signed(rt)):
+            return refused
         body = await request.json() if request.can_read_body else {}
         qty = max(1, int(body.get("qty") or 5))
         tw = rt.p.tw
@@ -1806,6 +1818,8 @@ def make_app():
         quote page for the board (the user's browser opens it)."""
         from . import order
         rt = app.rt(request.match_info["pid"])
+        if (refused := _signed(rt)):
+            return refused
         if not rt.p.tw.has_pcb():
             return err("no board yet")
 
@@ -1824,6 +1838,8 @@ def make_app():
         """Self-assembly: the parts in DigiKey's, Mouser's and LCSC's BOM formats, for N boards plus spares."""
         from . import order
         rt = app.rt(request.match_info["pid"])
+        if (refused := _signed(rt)):
+            return refused
         body = await request.json() if request.can_read_body else {}
         boards = max(1, min(500, int(body.get("boards") or 3)))
         if not rt.p.tw.has_sch():
@@ -1920,6 +1936,70 @@ def make_app():
             text = "(Attached with no message.)"
         sid = await a.send(text, body.get("sid"), (body.get("attachments") or []) + files, images=images)
         return jresp({"sid": sid})
+
+    # ------------------------------------------------------------------ sign-off and waivers
+    def _who(request):
+        u = app.user(request)
+        return (u.get("name") or u.get("email")) if u else "you"
+
+    @routes.get("/api/projects/{pid}/signoff")
+    async def signoff_get(request):
+        from . import signoff
+        rt = app.rt(request.match_info["pid"])
+        return jresp(await asyncio.to_thread(signoff.status, rt.p.reload()))
+
+    @routes.post("/api/projects/{pid}/signoff")
+    async def signoff_post(request):
+        """The user signs the design off as it is now (409 with the reasons when it cannot be)."""
+        from . import signoff, turns
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json() if request.can_read_body else {}
+        p = rt.p.reload()
+        try:
+            so = await asyncio.to_thread(signoff.sign, p, _who(request), body.get("note", ""), turns.head(p.root))
+        except ValueError as e:
+            return err(str(e), 409)
+        rt.user_changes.append(f"the user signed the design off ({so['by']}, {so['at']}); ordering is open")
+        rt.hub.emit("signoff", signoff=so)
+        return jresp(await asyncio.to_thread(signoff.status, p))
+
+    @routes.delete("/api/projects/{pid}/signoff")
+    async def signoff_delete(request):
+        from . import signoff
+        rt = app.rt(request.match_info["pid"])
+        p = rt.p.reload()
+        await asyncio.to_thread(signoff.revoke, p)
+        rt.user_changes.append("the user took their sign-off back")
+        rt.hub.emit("signoff", signoff=None)
+        return jresp(await asyncio.to_thread(signoff.status, p))
+
+    @routes.post("/api/projects/{pid}/waivers")
+    async def waivers_post(request):
+        """The user on a waiver: approve (Claude's proposal on an error), reject (it goes), or add their own
+        {key, reason}. Claude hears of it at its next turn."""
+        from . import signoff
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        p, key, act = rt.p.reload(), str(body.get("key") or ""), body.get("action")
+        try:
+            if act == "approve":
+                await asyncio.to_thread(signoff.approve, p, key)
+                rt.user_changes.append(f"the user approved the waiver for {key}")
+            elif act == "reject":
+                await asyncio.to_thread(signoff.remove_waiver, p, key)
+                rt.user_changes.append(f"the user rejected the waiver for {key}: fix the finding instead")
+            elif act == "add":
+                reason = str(body.get("reason") or "").strip()
+                if not reason:
+                    return err("a waiver needs its reason")
+                await asyncio.to_thread(signoff.set_waiver, p, key, reason, "user", str(body.get("severity") or ""), str(body.get("message") or ""))
+                rt.user_changes.append(f"the user waived {key}: {reason}")
+            else:
+                return err("action: approve | reject | add")
+        except KeyError as e:
+            return err(str(e), 404)
+        rt.hub.emit("waivers")
+        return jresp(await asyncio.to_thread(signoff.status, p))
 
     @routes.post("/api/projects/{pid}/turns/undo")
     async def undo_turn(request):

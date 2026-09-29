@@ -493,9 +493,67 @@ def tool_list(rt, app):
          {"type": "object", "properties": {"stage": {"type": "string"}, "status": {"type": "string"}, "note": {"type": "string"}},
           "required": ["stage", "status"]})
     async def stage(args):
-        st = p.set_stage(args["stage"], args["status"], args.get("note", ""))
+        from . import gates
+        sid, status = args["stage"], args["status"]
+        ids = [s["id"] for s in p.stages()]
+        finishing = [sid] if status == "done" else []
+        if status == "active" and sid in ids:              # moving on finishes the stage that was active before it
+            cur = next((s["id"] for s in p.stages() if s["status"] == "active"), None)
+            if cur and cur != sid and ids.index(cur) < ids.index(sid):
+                finishing.append(cur)
+        for f in finishing:
+            ok, miss = await run(gates.gate, p, f)
+            if not ok:
+                title = next(s["title"] for s in p.stages() if s["id"] == f)
+                return _text(f"{title} is not done yet: " + "; ".join(miss) + ". Finish it first (or, if it cannot be "
+                             "done, say why and mark it blocked); the user can mark it done themselves.", error=True)
+        st = p.set_stage(sid, status, args.get("note", ""))
         hub.emit("stages", stages=st)
         return _text("stages: " + ", ".join(f"{s['title']} {s['status']}" for s in st))
+
+    @reg("waive", "Waive a check finding you have reviewed and cannot or should not fix, with the reason (required). "
+         "action: propose (key: the finding's key from the checks, reason) | withdraw (key) | list. A warning or note "
+         "waived no longer counts; an error you waive is only a proposal: it keeps counting until the user approves it "
+         "on the Sign-off page, so say in the chat why you propose it.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["propose", "withdraw", "list"]},
+                                           "key": {"type": "string"}, "reason": {"type": "string"}}, "required": ["action"]})
+    async def waive(args):
+        from . import signoff
+        a = args["action"]
+        if a == "list":
+            items = await run(signoff.waivers, p)
+            return _text("\n".join(f"{w['key']}: {w.get('reason') or '(no reason)'} [{w.get('by') or 'claude'}"
+                                    f"{', approved' if w.get('approved') else ''}]" for w in items) or "no waivers")
+        key = (args.get("key") or "").strip()
+        if not key:
+            return _text("key: the finding's key (from run_checks or build/checks.json)", error=True)
+        if a == "withdraw":
+            w = next((x for x in signoff.waivers(p) if x["key"] == key), None)
+            if not w:
+                return _text(f"no waiver for {key}", error=True)
+            if w.get("by") == "user" or w.get("approved"):
+                return _text("the user approved or wrote that waiver: ask them before taking it back", error=True)
+            await run(signoff.remove_waiver, p, key)
+            hub.emit("waivers")
+            return _text(f"withdrawn: {key}")
+        reason = (args.get("reason") or "").strip()
+        if len(reason) < 8:
+            return _text("a waiver needs its reason: why this finding is acceptable on this board", error=True)
+        found = None
+        try:
+            with open(os.path.join(p.tw.build, "checks.json")) as fh:
+                res = json.load(fh)
+            found = next((f for c in res.get("checks", []) for f in c.get("findings", []) if f.get("key") == key), None)
+        except (OSError, ValueError):
+            pass
+        if not found:
+            return _text(f"no finding {key} in the last checks run (run_checks, then use the key it reports)", error=True)
+        await run(signoff.set_waiver, p, key, reason, "claude", found.get("severity", ""), found.get("message", ""))
+        hub.emit("waivers")
+        if found.get("severity") == "error":
+            return _text(f"proposed: {key}. It is an error, so it keeps counting until the user approves your waiver on "
+                         "the Sign-off page; tell them in the chat why.")
+        return _text(f"waived: {key} ({found.get('severity')}); it no longer counts from the next checks run. The user sees it on the Sign-off page.")
 
     @reg("nets", "The net model: what each net is. The checks, the router's net classes and the user's net list read it, "
          "so declare what names can't say: every supply's voltage and the current it carries, heavy-current lines (an "

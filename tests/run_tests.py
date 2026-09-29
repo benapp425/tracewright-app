@@ -1007,7 +1007,7 @@ def check_runner_time_limits_stop_and_not_applicable():
             self.stop, self.abandoned = threading.Event(), []
         def stopped(self): return self.stop.is_set()
         def setting(self, k, d=None): return d
-        def waivers(self): return set()
+        def waivers(self): return {}
         def available(self, n): return True
         def inputs_summary(self): return {}
     slow = Check("t.slow", "slow", "Test", lambda ctx: time.sleep(5) or [], (), "", timeout=0.4)
@@ -2510,6 +2510,101 @@ def each_turn_says_what_it_changed_and_can_be_undone():
         await a.disconnect()
         rt.stop()
     asyncio.run(run())
+
+
+@test(needs=("kicad",))
+def stage_gates_waivers_and_sign_off():
+    """A stage only counts as done when its gate holds (requirements written, the checks run on the design as it
+    is, nothing unrouted ...), moving on past a stage included. Claude's waiver on an error is a proposal: the
+    error keeps counting until the user approves it; a waiver on a warning holds at once, and Claude cannot take
+    back one the user approved. Signing off needs fresh checks with no errors; ordering needs a sign-off that
+    still matches the design, and the release stage needs it too. The run report splits the run by stage."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools, gates, signoff
+    from tw.checks import runner
+    pid = ProjectStore().import_copy(FIXTURE, "Sign-off demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        rt = app.rt(pid)
+        p = rt.p
+        rt.hub.emit = lambda *a, **k: None
+        a = app.agent(pid)
+        a.session = a.get_session()
+        tools = {t.name: t for t in agent_tools.tool_list(rt, app)}
+        say = lambda r: r["content"][0]["text"]
+        req = os.path.join(p.root, "docs", "requirements.md")
+        os.makedirs(os.path.dirname(req), exist_ok=True)
+        with open(req, "w") as f:
+            f.write("# Requirements\n\n## Function\n\n## Power\n")            # headings only
+        r = await tools["stage"].handler({"stage": "brief", "status": "done"})
+        assert r.get("is_error") and "requirements.md" in say(r), say(r)
+        with open(req, "a") as f:
+            f.write(" ".join(["The board takes 5 V from USB-C and makes 3.3 V for the ATtiny85 and the Qwiic port."] * 8))
+        r = await tools["stage"].handler({"stage": "brief", "status": "done"})
+        assert not r.get("is_error") and next(x for x in p.stages() if x["id"] == "brief")["status"] == "done", say(r)
+        p.set_stage("architecture", "active")                                    # moving on past it without its doc
+        arch = os.path.join(p.root, "docs", "architecture.md")
+        if os.path.exists(arch):
+            os.remove(arch)
+        r = await tools["stage"].handler({"stage": "parts", "status": "active"})
+        assert r.get("is_error") and "architecture.md" in say(r), say(r)
+        assert gates.gate(p, "placement") == (True, []), gates.gate(p, "placement")
+        # an error to waive: the board is bigger than the limit
+        p.cfg["constraints"] = {"max_size_mm": [40, 30]}
+        p.save()
+        res = runner.run_all(p.tw, only=["req.limits"], offline=True, write=True)
+        f = next(x for c in res["checks"] for x in c["findings"] if x["severity"] == "error")
+        r = await tools["waive"].handler({"action": "propose", "key": f["key"], "reason": "short"})
+        assert r.get("is_error"), say(r)                                          # a reason is required
+        r = await tools["waive"].handler({"action": "propose", "key": f["key"], "reason": "the enclosure was changed to take a 50 x 35 board"})
+        assert "proposed" in say(r) and not r.get("is_error"), say(r)
+        res = runner.run_all(p.reload().tw, only=["req.limits"], offline=True, write=True)
+        kept = [x for c in res["checks"] for x in c["findings"] if x["key"] == f["key"]]
+        assert res["counts"]["error"] == 1 and kept and kept[0]["waiver"]["by"] == "claude", (res["counts"], kept)
+        st = signoff.status(p.reload())
+        assert not st["can_sign"] and any("waiting for your approval" in b for b in st["blockers"]), st["blockers"]
+        assert [w["state"] for w in st["waivers"]] == ["proposed"], st["waivers"]
+        assert gates.gate(p, "verification")[0] is False
+        async with TestClient(TestServer(webapp)) as c:
+            r = await c.post(f"/api/projects/{pid}/order/jlc", json={"qty": 5})
+            assert r.status == 409 and "Sign the design off" in (await r.json())["error"], r.status
+            assert (await c.post(f"/api/projects/{pid}/signoff", json={})).status == 409
+            r = await c.post(f"/api/projects/{pid}/waivers", json={"action": "approve", "key": f["key"]})
+            assert r.status == 200, await r.text()
+            res = runner.run_all(env.Project(p.root), only=["req.limits"], offline=True, write=True)
+            assert res["counts"]["error"] == 0 and res["waived"]["error"] == 1, (res["counts"], res["waived"])
+            assert gates.gate(p.reload(), "verification") == (True, [])
+            r = await c.post(f"/api/projects/{pid}/signoff", json={"note": "checked"})
+            assert r.status == 200, await r.text()
+            so = (await r.json())["signoff"]
+            assert so["valid"] and so["by"] == "you" and so["note"] == "checked", so
+            assert gates.gate(p.reload(), "release") == (True, [])
+            r = await c.post(f"/api/projects/{pid}/order/jlc", json={"qty": 5})
+            assert r.status != 409, (r.status, await r.text())                    # the sign-off lets it through
+            with open(p.tw.pro, "a") as fh:                                      # the design changes afterwards
+                fh.write("\n")
+            assert signoff.current(p.reload())["valid"] is False
+            r = await c.post(f"/api/projects/{pid}/order/jlc", json={"qty": 5})
+            assert r.status == 409 and "changed after" in (await r.json())["error"]
+            assert gates.gate(p, "release")[0] is False
+        r = await tools["waive"].handler({"action": "withdraw", "key": f["key"]})
+        assert r.get("is_error") and "ask them" in say(r), say(r)
+        # a waiver on a warning holds at once
+        res = runner.run_all(p.reload().tw, only=["pcb.silk", "pcb.polarity", "req.limits", "pcb.placement"], offline=True, write=True)
+        warn = next((x for c in res["checks"] for x in c["findings"] if x["severity"] == "warning"), None)
+        if warn:
+            await tools["waive"].handler({"action": "propose", "key": warn["key"], "reason": "reviewed: the silk sits beside the pad, readable"})
+            again = runner.run_all(p.reload().tw, only=["pcb.silk", "pcb.polarity", "req.limits", "pcb.placement"], offline=True, write=False)
+            assert not [x for c in again["checks"] for x in c["findings"] if x["key"] == warn["key"]]
+        rep = signoff.run_report(p.reload())
+        assert any(row["stage"] == "brief" for row in rep["stages"]), rep
+        await a.disconnect()
+        rt.stop()
+    asyncio.run(go())
 
 
 @test(needs=("node",))

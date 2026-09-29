@@ -134,9 +134,15 @@ class Context:
         return self._get("fab", lambda: dfm.capabilities(self))
 
     def waivers(self):
+        """{finding key: the waiver} from tracewright.json checks.waive (a key alone is a waiver with no
+        reason, by Claude)."""
         def make():
-            w = self.setting("checks.waive", []) or []
-            return {x["key"] if isinstance(x, dict) else str(x) for x in w}
+            out = {}
+            for x in self.setting("checks.waive", []) or []:
+                w = dict(x) if isinstance(x, dict) else {"key": str(x)}
+                if w.get("key"):
+                    out[str(w["key"])] = w
+            return out
         return self._get("waivers", make)
 
     def inputs_summary(self):

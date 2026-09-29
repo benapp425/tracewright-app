@@ -25,7 +25,7 @@ SEVERITIES = ("error", "warning", "info")
 
 
 class Finding:
-    __slots__ = ("check", "severity", "message", "where", "hint", "key")
+    __slots__ = ("check", "severity", "message", "where", "hint", "key", "waiver")
 
     def __init__(self, check, severity, message, where=None, hint=None, key=None):
         assert severity in SEVERITIES, severity
@@ -33,6 +33,7 @@ class Finding:
         self.where = where or {}
         self.hint = hint
         self.key = key or f"{check}:{message}"
+        self.waiver = None           # a waiver proposed for it and not approved yet: {reason, by, at}
 
     def to_json(self):
         d = {"check": self.check, "severity": self.severity, "message": self.message, "key": self.key}
@@ -40,7 +41,17 @@ class Finding:
             d["where"] = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in self.where.items()}
         if self.hint:
             d["hint"] = self.hint
+        if self.waiver:
+            d["waiver"] = self.waiver
         return d
+
+
+def waiver_holds(w, severity):
+    """A waiver takes a finding out of the results: at once for a warning or a note, and for an error only once
+    the user approved it (or wrote it themselves). Until then the error stands, with the waiver as a proposal."""
+    if severity != "error":
+        return True
+    return bool(w.get("approved") or w.get("by") == "user")
 
     def __repr__(self):
         return f"[{self.severity} {self.check}] {self.message}"
@@ -200,10 +211,13 @@ def run(ctx, checks, progress=None):
             waived = ctx.waivers()
             kept, waived_n, waived_by = [], 0, {}
             for f in found:
-                if f.key in waived:
+                w = waived.get(f.key)
+                if w is not None and waiver_holds(w, f.severity):
                     waived_n += 1
                     waived_by[f.severity] = waived_by.get(f.severity, 0) + 1
                 else:
+                    if w is not None:
+                        f.waiver = {"reason": w.get("reason", ""), "by": w.get("by") or "claude", "at": w.get("at", "")}
                     kept.append(f)
             status = "fail" if any(f.severity == "error" for f in kept) else \
                 ("warn" if any(f.severity == "warning" for f in kept) else "pass")

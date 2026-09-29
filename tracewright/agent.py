@@ -794,8 +794,9 @@ class AgentManager:
             if t is None:                                  # e.g. the tail of an interrupted turn
                 self._save_meta(sess.meta)
                 return
+            active = next((s["id"] for s in self.rt.p.stages() if s["status"] == "active"), None)
             rec = {"kind": "done", "turn": tid, "cost": cost, "duration_ms": m.duration_ms, "turns": m.num_turns,
-                   "is_error": m.is_error, "subtype": m.subtype}
+                   "is_error": m.is_error, "subtype": m.subtype, **({"stage": active} if active else {})}
             sess.append(rec)
             hub.emit("agent.done", sid=sess.sid, **{k: v for k, v in rec.items() if k != "kind"}, session_cost=sess.meta["cost"])
             follow = not self.stopping and any(st["sent"] for st in self.steers)   # an unread note: the CLI runs it next

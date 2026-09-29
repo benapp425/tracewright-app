@@ -2,7 +2,7 @@
 // the order is ready, the board as the fab sees it, a rough price, and the ways to the fab: PCBWay in
 // one click (the upload its own KiCad plugin makes), JLC's quote page with the package ready, and the
 // parts as DigiKey / Mouser / LCSC BOM files for self-assembly.
-import { h, clear, api, toast, btn, modal, confirmDialog, copyText } from "./util.js";
+import { h, clear, api, toast, btn, modal, confirmDialog, copyText, fmtTime } from "./util.js";
 import { icon } from "./icons.js";
 import { native, isNative } from "./native.js";
 import { markdown } from "./markdown.js";
@@ -75,7 +75,16 @@ export class OrderPanel {
           btn("shopping-cart", "DigiKey", { onclick: () => this.parts("digikey") }), btn("shopping-cart", "Mouser", { onclick: () => this.parts("mouser") }),
           btn("shopping-cart", "LCSC", { onclick: () => this.parts("lcsc") }))));
     }
-    if (blockers.length) acts.appendChild(h("div.notice.err", icon("circle-alert", 15), h("div.nb", h("b", "Not ready: "), blockers.map((b) => b.title).join("; ") + ". You can still get a quote.")));
+    // ordering needs the design signed off as it is now (Checks > Sign-off)
+    const so = d.signoff;
+    if (!so || !so.valid) {
+      for (const b of acts.querySelectorAll("button")) b.disabled = true;
+      acts.prepend(h("div.notice.warn.or-lock", icon("badge-check", 15),
+        h("div.nb.grow", h("b", so ? "The design changed after it was signed off. " : "Sign the design off first. "),
+          "Ordering opens once you have checked what the checks found and approved or rejected each waiver."),
+        btn("arrow-right", "Sign-off", { onclick: () => this.ws.show("signoff") }, "sm")));
+    } else if (blockers.length) acts.appendChild(h("div.notice.err", icon("circle-alert", 15), h("div.nb", h("b", "Not ready: "), blockers.map((b) => b.title).join("; ") + ".")));
+    else acts.prepend(h("div.or-signed", icon("badge-check", 13), `Signed off by ${so.by} ${fmtTime(so.at)}`));
     acts.appendChild(this.logEl);
     el.appendChild(acts);
     const files = Object.entries(d.files || {}).flatMap(([t, fs]) => fs.map((f) => ({ ...f, t })));

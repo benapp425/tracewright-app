@@ -131,6 +131,9 @@ class Project:
         with self._lock:
             st = self.cfg.setdefault("stages", {})
             st[sid] = {"status": status, "note": note, "updated": now()}
+            log = self.cfg.setdefault("stage_log", [])          # for the run report: when each stage ran
+            log.append({"s": sid, "st": status, "t": round(time.time(), 1)})
+            del log[:-400]
             if status == "active":                      # one active stage at a time: moving on finishes the
                 i = STAGE_IDS.index(sid)                # earlier stage, going back reopens the later one
                 for k, v in st.items():

@@ -158,7 +158,7 @@ async def five_places_and_the_address_follows(t):
     places = await t.page.js("[...document.querySelectorAll('.tabs .tab[data-place]')].map((e) => e.dataset.place)")
     check(places == ["overview", "design", "parts", "checks", "project"], f"places: {places}")
     for place, views in (("design", ["board", "schematic", "3d"]), ("parts", ["bom", "outputs"]),
-                         ("checks", ["checks", "rules"]), ("project", ["docs", "files", "history"])):
+                         ("checks", ["checks", "signoff", "rules"]), ("project", ["docs", "files", "history"])):
         await t.place(place)
         sub = await t.page.js("[...document.querySelectorAll('.subnav button')].map((b) => b.dataset.view)")
         check(sub == views, f"{place}: sub-views {sub}, wanted {views}")
@@ -174,7 +174,7 @@ async def no_ask_claude_buttons_anywhere(t):
     await t.open_project()
     seen = []
     for place, views in (("overview", [None]), ("design", ["board", "schematic", "3d"]), ("parts", ["bom", "outputs"]),
-                         ("checks", ["checks", "rules"]), ("project", ["docs", "files", "history"])):
+                         ("checks", ["checks", "signoff", "rules"]), ("project", ["docs", "files", "history"])):
         for v in views:
             await t.place(place, v)
             await asyncio.sleep(0.6)
@@ -361,6 +361,23 @@ async def turn_changes_card(t):
     await t.page.js("[...document.querySelectorAll('.changes[data-turn=T2] button')].find((b) => b.textContent.includes('Show on the board')).click(); 1")
     hl = await t.page.wait("(() => { const v = document.querySelector('.viewer canvas').__view; return v.hl && [...v.hl.refs]; })()", 5)
     check(sorted(hl) == ["C12", "J1", "U1"], hl)
+
+
+@test
+async def sign_off_before_ordering(t):
+    await t.open_project()
+    await t.place("checks", "signoff")
+    head = await t.page.wait("document.querySelector('.so .page-head') && document.querySelector('.so .page-head').innerText", 10)
+    check("Sign-off" in head and ("Not ready" in head or "Ready to sign off" in head), head)
+    txt = await t.page.js("document.querySelector('.so').innerText")
+    check("Checks" in txt and "Waivers" in txt and "Needs the built board" in txt, txt[:400])
+    await t.shot("signoff")
+    await t.place("parts", "outputs")
+    lock = await t.page.wait("document.querySelector('.or-lock') && document.querySelector('.or-lock').innerText", 10)
+    check("Sign the design off first" in lock, lock)
+    check(await t.page.js("[...document.querySelectorAll('.or-acts button')].filter((b) => !b.closest('.or-lock')).every((b) => b.disabled)"),
+          "order buttons enabled before sign-off")
+    await t.shot("order-locked")
 
 
 # a speech recognizer the test speaks through (headless Chrome has no microphone or speech service)

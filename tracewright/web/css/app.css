@@ -2004,3 +2004,45 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .lim-pair { display: flex; align-items: center; gap: 4px; }
 .lim-sep { color: var(--text-3); font-size: 11.5px; width: 16px; text-align: center; }
 .lim-u { color: var(--text-3); font-size: 11.5px; }
+
+/* sign-off: the last look before ordering */
+.so .page-head { align-items: flex-start; }
+.so .page-head p { margin: 4px 0 0; }
+.badge.lg { height: 26px; padding: 0 10px; font-size: 12.5px; gap: 6px; }
+.so-sec { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 12px 14px; margin-top: 12px; }
+.so-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.so-h b { font-size: 13.5px; }
+.so-h svg.ic { color: var(--text-3); }
+.so-sub { margin-left: auto; font-size: 12px; color: var(--warn); }
+.so-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--text-2); }
+.so-line .t-err { color: var(--err); } .so-line .t-ok { color: var(--ok); }
+.so-warn { display: inline-flex; align-items: center; gap: 5px; color: var(--warn); font-size: 12.5px; }
+.so-w { display: flex; gap: 12px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--line); }
+.so-w:first-of-type { border-top: 0; }
+.so-w.proposed { background: color-mix(in srgb, var(--warn) 6%, transparent); margin: 0 -14px; padding: 9px 14px; }
+.so-sev { flex: none; width: 78px; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-3); text-transform: capitalize; }
+.so-sev.error { color: var(--err); } .so-sev.warning { color: var(--warn); }
+.so-wm { font-size: 13px; color: var(--text); }
+.so-wr { font-size: 12.5px; color: var(--text-2); margin-top: 2px; line-height: 1.45; }
+.so-act { flex: none; display: flex; gap: 6px; align-items: center; }
+.so-stages { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.so-st { font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--text-3); }
+.so-st.done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.so-st.active { color: var(--accent); border-color: var(--accent-line); }
+.so-st.blocked { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, transparent); }
+.so-report { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.so-report th { text-align: left; font-weight: 500; color: var(--text-3); padding: 4px 8px 6px 0; border-bottom: 1px solid var(--line); }
+.so-report td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); color: var(--text-2); }
+.so-report td.n, .so-report th:nth-child(n+3) { text-align: right; font-variant-numeric: tabular-nums; }
+.so-report tfoot td { font-weight: 600; color: var(--text); border-bottom: 0; }
+.so-sign { margin-top: 14px; border: 1px solid var(--accent-line); border-radius: 12px; padding: 14px; background: var(--accent-soft); display: flex; flex-direction: column; gap: 10px; }
+.so-sign.blocked { border-color: var(--line-2); background: var(--surface); }
+.so-sign .row input { flex: 1; }
+.so-block { margin: 0; padding-left: 18px; font-size: 13px; color: var(--text-2); }
+.so-signed { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ok); flex-wrap: wrap; }
+.so-signed.stale { color: var(--warn); }
+.finding .fwaiver { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; padding: 6px 8px; border-radius: 8px; font-size: 12.5px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent); color: var(--text-2); }
+.finding .fwaiver svg.ic { color: var(--warn); }
+.or-lock { align-items: center; margin-bottom: 10px; }
+.or-signed { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ok); margin-bottom: 8px; }

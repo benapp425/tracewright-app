@@ -2,6 +2,7 @@
 // to add to the review flags or send straight to Claude.
 import { h, clear, api, toast, fmtTime, btn } from "./util.js";
 import { icon } from "./icons.js";
+import { waiveFinding } from "./signoff.js";
 
 const ORDER = ["KiCad", "Schematic", "Parts & BOM", "Placement", "Routing", "Power", "High-speed", "Manufacturing", "Assembly", "Lessons"];
 const ST_ICON = { pass: "circle-check", warn: "triangle-alert", fail: "circle-x", error: "bug", skipped: "circle-dot", na: "circle-minus", notrun: "circle", queued: "clock", running: null };
@@ -127,12 +128,28 @@ export class ChecksPanel {
     const key = `${c.id}|${i}`;
     const loc = [w.ref, w.net && w.net.split("/").pop(), w.sheet, (w.x !== undefined && w.x !== null) ? `(${(+w.x).toFixed(1)}, ${(+w.y).toFixed(1)})` : null].filter(Boolean).join(" · ");
     const chk = h("input.fchk", { type: "checkbox", checked: this.sel.has(key), onchange: (e) => { e.target.checked ? this.sel.set(key, [c, f]) : this.sel.delete(key); this.render(); } });
+    // Claude's waiver on an error waits for the user: approve it, or reject it (Claude fixes the finding instead)
+    const wv = f.waiver ? h("div.fwaiver", icon("shield-check", 12), h("span", h("b", "Claude proposes to waive it: "), f.waiver.reason || "(no reason)"),
+      btn("check", "Approve", { onclick: () => this.waiver("approve", f) }, "sm"), btn("x", "Reject", { onclick: () => this.waiver("reject", f) }, "sm ghost")) : null;
     return h("div.finding" + (this.sel.has(key) ? ".sel" : ""), chk,
       h("span.sev." + f.severity),
-      h("div.m", f.message, f.hint ? h("div.hint", f.hint) : null),
+      h("div.m", f.message, f.hint ? h("div.hint", f.hint) : null, wv),
       loc ? h("span.loc", { "data-tip": "Show on board", onclick: () => this.ws.locate(w) }, icon("target", 12), loc) : null,
       h("div.fa",
+        f.waiver ? null : btn("shield-check", null, { "data-tip": "Waive it (with the reason)", onclick: async () => {
+          try { if (await waiveFinding(this.pid, f)) toast("Waived. It stops counting when the checks run again.", "ok", 4000, { label: "Run checks", run: () => api(`/api/projects/${enc(this.pid)}/checks/run`, { body: {} }) }); }
+          catch (e) { toast(e.message, "error"); }
+        } }, "sm ghost"),
         btn("flag", null, { "data-tip": "Add to review", onclick: async () => { await this.ws.review.fromFinding(c, f); toast("Added to review", "ok", 2500, { label: "Show", run: () => this.ws.toggleReview(true) }); } }, "sm ghost")));
+  }
+
+  async waiver(action, f) {
+    try {
+      await api(`/api/projects/${enc(this.pid)}/waivers`, { body: { action, key: f.key } });
+      toast(action === "approve" ? "Approved. It stops counting when the checks run again." : "Rejected: Claude is told to fix it instead.", "ok", 4000,
+        action === "approve" ? { label: "Run checks", run: () => api(`/api/projects/${enc(this.pid)}/checks/run`, { body: {} }) } : null);
+      f.waiver = null; this.render();
+    } catch (e) { toast(e.message, "error"); }
   }
 
   selectionBar() {
