@@ -30,6 +30,14 @@ TEMPLATES = os.path.join(PKG, "templates", "project")
 IGNORE_COPY = shutil.ignore_patterns("__pycache__", "*.pyc", "libastar.so", ".DS_Store")
 
 
+SF_DATALESS = 0x40000000          # macOS: the file's contents are in iCloud (or another file provider) only
+
+
+def in_cloud_only(st):
+    """A stat result for a file macOS has moved to iCloud only (a placeholder until it is opened)."""
+    return bool(getattr(st, "st_flags", 0) & SF_DATALESS)
+
+
 def slugify(name):
     s = re.sub(r"[^A-Za-z0-9]+", "-", name.strip()).strip("-").lower()
     return s[:48] or "project"
@@ -143,8 +151,19 @@ class Project:
 
     def checks_summary(self):
         f = os.path.join(self.tw.build, "checks.json")
-        if not os.path.exists(f):
+        try:
+            st = os.stat(f)
+        except OSError:
             return None
+        if in_cloud_only(st):                                     # not read just to list the project: that downloads it
+            return None
+        key = (f, st.st_mtime_ns, st.st_size)
+        if getattr(self, "_checks_key", None) == key:
+            return self._checks_val
+        self._checks_key, self._checks_val = key, self._read_checks(f)
+        return self._checks_val
+
+    def _read_checks(self, f):
         try:
             with open(f) as fh:
                 d = json.load(fh)
@@ -163,8 +182,20 @@ class Project:
                 return f
         return None
 
+    def cloud_only(self):
+        """How many of the project's main files (board, schematic, KiCad project, check report, picture) macOS
+        keeps in iCloud only: opening them downloads them first, which is slow."""
+        n = 0
+        for f in (self.tw.pcb, self.tw.sch, self.tw.pro, os.path.join(self.tw.build, "checks.json"), self.thumbnail()):
+            try:
+                n += bool(f and in_cloud_only(os.stat(f)))
+            except OSError:
+                pass
+        return n
+
     def summary(self):
         return {"id": self.id, "name": self.name, "root": self.root, "kind": self.cfg.get("kind", "new"),
+                "cloud_only": self.cloud_only(),
                 "created": self.cfg.get("created", ""), "updated": self.updated(),
                 "has_sch": self.tw.has_sch(), "has_pcb": self.tw.has_pcb(),
                 "kicad_project": os.path.relpath(self.tw.pro, self.root) if self.tw.pro else None,
@@ -264,6 +295,7 @@ class ProjectStore:
     def __init__(self):
         self.reg_path = os.path.join(config.data_dir(), "projects.json")
         self._cache = {}
+        self._ids = {}                  # project id -> folder
 
     # ------------------------------------------------------------------ registry of in-place projects
     def _registry(self):
@@ -290,15 +322,20 @@ class ProjectStore:
         return out
 
     def list(self, include_archived=True):
-        out = []
-        for r in self.roots():
+        """Every project's summary, read side by side (each is a few small files; on a slow or synced disk
+        the waits overlap)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(r):
             try:
                 p = self.get_by_root(r)
-                s = p.summary()
-                if include_archived or not s["archived"]:
-                    out.append(s)
+                self._ids[p.id] = p.root
+                return p.summary()
             except Exception as e:
-                out.append({"id": os.path.basename(r), "name": os.path.basename(r), "root": r, "error": str(e)})
+                return {"id": os.path.basename(r), "name": os.path.basename(r), "root": r, "error": str(e)}
+        roots = self.roots()
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(roots)))) as ex:
+            out = [s for s in ex.map(one, roots) if include_archived or not s.get("archived")]
         out.sort(key=lambda s: s.get("updated", ""), reverse=True)
         return out
 
@@ -312,8 +349,20 @@ class ProjectStore:
         return p
 
     def get(self, pid):
+        """The project with this id. Known ids go straight to their folder (only that project's settings are
+        read again); the other folders are read only when the id is new."""
+        root = self._ids.get(pid)
+        if root and os.path.exists(os.path.join(root, twenv.CONFIG)):
+            p = self.get_by_root(root)
+            if p.id == pid:
+                return p
         for r in self.roots():
-            p = self.get_by_root(r)
+            r = os.path.abspath(r)
+            p = self._cache.get(r) or self.get_by_root(r)
+            self._ids[p.id] = r
+        root = self._ids.get(pid)
+        if root:
+            p = self.get_by_root(root)
             if p.id == pid:
                 return p
         raise KeyError(f"no project {pid}")
@@ -499,6 +548,7 @@ class ProjectStore:
         reg.get("in_place", {}).pop(pid, None)
         self._save_registry(reg)
         self._cache.pop(p.root, None)
+        self._ids.pop(pid, None)
         if delete_files and p.cfg.get("kind") != "in_place":
             trash = os.path.join(config.data_dir(), "trash")
             os.makedirs(trash, exist_ok=True)

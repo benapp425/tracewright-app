@@ -88,6 +88,7 @@ class Page:
         self.errors = []          # console errors and uncaught exceptions, as text
         self.logs = []            # every console message: (type, text)
         self.reader = None
+        self.held = None          # requests held by intercept()
 
     async def open(self):
         self.ws = await self.browser.http.ws_connect(self.target["webSocketDebuggerUrl"], max_msg_size=0)
@@ -117,6 +118,8 @@ class Page:
             elif m == "Runtime.exceptionThrown":
                 e = p.get("exceptionDetails", {})
                 self.errors.append((e.get("exception") or {}).get("description") or e.get("text", "exception"))
+            elif m == "Fetch.requestPaused" and self.held is not None:
+                self.held.put_nowait(p)
             elif m == "Log.entryAdded" and p.get("entry", {}).get("level") == "error":
                 en = p["entry"]
                 self.errors.append(f"{en.get('text', '')} {en.get('url', '')}".strip())
@@ -203,6 +206,28 @@ class Page:
         with open(path, "wb") as f:
             f.write(base64.b64decode(d["data"]))
         return path
+
+    # ---------------------------------------------------------------- holding requests back
+    async def intercept(self, url_pattern):
+        """Hold the requests whose URL matches the pattern (* wildcards); take them with held_request(), then
+        release each with resume() or answer it with fulfill()."""
+        self.held = asyncio.Queue()
+        await self.call("Fetch.enable", patterns=[{"urlPattern": url_pattern, "requestStage": "Request"}])
+
+    async def held_request(self, timeout=15):
+        return await asyncio.wait_for(self.held.get(), timeout)
+
+    async def resume(self, req):
+        await self.call("Fetch.continueRequest", requestId=req["requestId"])
+
+    async def fulfill(self, req, body, status=200, ctype="application/json"):
+        data = body if isinstance(body, bytes) else body.encode()
+        await self.call("Fetch.fulfillRequest", requestId=req["requestId"], responseCode=status,
+                        responseHeaders=[{"name": "Content-Type", "value": ctype}], body=base64.b64encode(data).decode())
+
+    async def stop_intercept(self):
+        await self.call("Fetch.disable")
+        self.held = None
 
     async def close(self):
         try:

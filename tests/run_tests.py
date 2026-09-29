@@ -2160,6 +2160,70 @@ def net_kinds_part_inspector_and_schematic_conventions():
     asyncio.run(go())
 
 
+@test()
+def project_store_is_quick_and_knows_icloud_only_files():
+    """The home screen's list and every request's project lookup stay quick: a known id goes straight to its
+    folder (the other projects' settings are not read again), the list reads projects side by side, a check
+    report is read again only when it changed, and the main files macOS keeps in iCloud only are counted
+    (and not opened just to list the project)."""
+    from tracewright import projects as P
+    st = P.ProjectStore()
+    made = [st.create(f"Store board {i}", "", {"layers": 2}) for i in range(4)]
+    ids = {s["id"] for s in st.list()}
+    assert {p.id for p in made} <= ids
+    reads = []
+    orig = P.Project.reload
+    P.Project.reload = lambda self: (reads.append(self.root), orig(self))[1]
+    try:
+        for _ in range(5):
+            assert st.get(made[2].id).root == made[2].root
+        assert set(reads) == {made[2].root}, f"lookups re-read other projects: {sorted(set(reads))}"
+        try:
+            st.get("no-such-project")
+            raise AssertionError("an unknown id was found")
+        except KeyError:
+            pass
+    finally:
+        P.Project.reload = orig
+    # the check report: read once, again only after it changes
+    p = st.get(made[0].id)
+    os.makedirs(p.tw.build, exist_ok=True)
+    rep = os.path.join(p.tw.build, "checks.json")
+    with open(rep, "w") as f:
+        json.dump({"counts": {"error": 0, "warning": 1, "info": 0, "pass": 3}, "generated": "2026-09-29T10:00:00", "checks": []}, f)
+    opened = []
+    orig_read = P.Project._read_checks
+    P.Project._read_checks = lambda self, f: (opened.append(f), orig_read(self, f))[1]
+    try:
+        a, b = p.checks_summary(), p.checks_summary()
+        assert a == b and a["counts"]["warning"] == 1 and len(opened) == 1, (a, opened)
+        time.sleep(0.01)
+        with open(rep, "w") as f:
+            json.dump({"counts": {"error": 1, "warning": 0, "info": 0, "pass": 3}, "generated": "2026-09-29T10:05:00", "checks": []}, f)
+        assert p.checks_summary()["counts"]["error"] == 1 and len(opened) == 2
+    finally:
+        P.Project._read_checks = orig_read
+    # iCloud only: macOS marks the placeholder with SF_DATALESS; such a report is not opened for the list
+    assert P.in_cloud_only(type("St", (), {"st_flags": P.SF_DATALESS})()) and not P.in_cloud_only(os.stat(rep))
+    real_stat = os.stat
+
+    class Fake:
+        def __init__(self, st):
+            self._st = st
+            self.st_flags = P.SF_DATALESS
+
+        def __getattr__(self, k):
+            return getattr(self._st, k)
+    P.os.stat = lambda f, *a, **k: Fake(real_stat(f, *a, **k)) if str(f).endswith("checks.json") else real_stat(f, *a, **k)
+    try:
+        p._checks_key = None
+        s = p.summary()
+        assert s["cloud_only"] == 1 and s["checks"] is None, (s["cloud_only"], s["checks"])
+    finally:
+        P.os.stat = real_stat
+    assert p.summary()["cloud_only"] == 0
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

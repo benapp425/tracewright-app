@@ -9,6 +9,14 @@ import { limitsForm, limitOptions, limitsSummary } from "./limits.js";
 
 const enc = encodeURIComponent;
 
+// the last project list, so the page can show it at once next time
+function readCachedList() {
+  try { const v = JSON.parse(localStorage.getItem("tw.projects") || "null"); return Array.isArray(v) ? v : null; } catch (e) { return null; }
+}
+function writeCachedList(list) {
+  try { localStorage.setItem("tw.projects", JSON.stringify(list)); } catch (e) { /* full: the page just loads without it */ }
+}
+
 export class ProjectsPage {
   constructor(root) {
     this.root = root;
@@ -56,11 +64,28 @@ export class ProjectsPage {
     try { const s = await api("/api/projects/demo", { body: {} }); go("p/" + enc(s.id)); } catch (e) { toast(e.message, "error"); }
   }
 
+  // The page at once -- from the last list this window saw (or placeholder cards) -- then again with the
+  // server's list when it arrives; a slow disk or a synced folder no longer leaves the page blank.
   async render() {
-    const info = state.info;
-    let list = [];
-    try { list = await api("/api/projects"); } catch (e) { toast(e.message, "error"); }
+    if (!this.all) {
+      this.all = readCachedList();
+      this.draw(!this.all);
+    } else this.draw(false);
+    const seq = (this.seq = (this.seq || 0) + 1);
+    let list;
+    try { list = await api("/api/projects"); } catch (e) { toast(e.message, "error"); list = this.all || []; }
+    if (seq !== this.seq) return;
+    const changed = JSON.stringify(list) !== JSON.stringify(this.all);
     this.all = list;
+    writeCachedList(list);
+    if (changed || this.loading) this.draw(false);
+  }
+
+  draw(loading) {
+    const info = state.info;
+    this.loading = loading;
+    const list = this.all || [];
+    const typing = this.search && document.activeElement === this.search ? [this.search.selectionStart, this.search.selectionEnd] : null;
     const inner = h("div.page-inner");
     clear(this.page).appendChild(inner);
     inner.appendChild(h("div.page-head.home-head",
@@ -72,8 +97,15 @@ export class ProjectsPage {
     if (setup) inner.appendChild(setup);
     const live = list.filter((s) => !s.archived && !s.error);
     const archived = list.filter((s) => s.archived);
+    const cloud = this.cloudNote(live);
+    if (cloud) inner.appendChild(cloud);
     this.ideasPanel = this.ideasPanel || new IdeasPanel(this);
     inner.appendChild(this.ideasPanel.el);
+    if (loading) {
+      inner.appendChild(h("div.cards.loading", [0, 1, 2].map(() => h("div.pcard.skel", h("div.pthumb.skeleton"),
+        h("div.pbody", h("div.skeleton.sk-line"), h("div.skeleton.sk-line.short"), h("div.skeleton.sk-line.shorter"))))));
+      return;
+    }
     if (!live.length) { inner.appendChild(this.welcome()); this.footer(inner, archived); return; }
     this.search = h("input", { placeholder: "Filter", value: this.q, oninput: (e) => { this.q = e.target.value; this.drawGrid(); } });
     const sort = h("div.seg", [["recent", "Recent"], ["name", "Name"]].map(([v, t]) => h("button" + (this.sort === v ? ".on" : ""),
@@ -84,6 +116,22 @@ export class ProjectsPage {
     inner.appendChild(this.grid);
     this.drawGrid();
     this.footer(inner, archived);
+    if (typing) { this.search.focus(); this.search.setSelectionRange(...typing); }
+  }
+
+  // macOS keeps some projects' files in iCloud only ("Optimize Mac Storage"): each file downloads when it is
+  // opened, so those projects open slowly. Say so, and how to keep them on this Mac.
+  cloudNote(live) {
+    const n = live.filter((s) => s.cloud_only).length;
+    const hidden = +localStorage.getItem("tw.cloudNote.hidden") || 0;
+    if (!n || Date.now() - hidden < 7 * 864e5) return null;
+    const note = h("div.notice.warn.cloudnote", icon("cloud", 15),
+      h("div.grow", h("b", n === 1 ? "A project is stored in iCloud only" : `${n} projects are stored in iCloud only`),
+        h("div.small", `macOS moved ${n === 1 ? "its" : "their"} files off this Mac to save space, so each file downloads when it is opened and ` +
+          `${n === 1 ? "the project is" : "they are"} slow to load. To keep them here, right-click the projects folder in Finder and choose Keep Downloaded.`)),
+      isNative ? h("button.btn.sm", { onclick: () => native.reveal(state.info.workspace) }, "Show in Finder") : null,
+      h("button.btn.sm.ghost", { "data-tip": "Hide for a week", onclick: () => { localStorage.setItem("tw.cloudNote.hidden", String(Date.now())); note.remove(); } }, icon("x", 13)));
+    return note;
   }
 
   drawGrid() {
@@ -135,6 +183,7 @@ export class ProjectsPage {
     if (s.has_pcb) thumb.style.backgroundImage = `url(/api/projects/${enc(s.id)}/thumb?t=${Date.parse(s.updated) || 0})`;
     if (s.kind === "imported" || s.kind === "in_place" || s.kind === "demo")
       thumb.appendChild(h("span.badge.kind", s.kind === "in_place" ? "in place" : s.kind));
+    if (s.cloud_only) thumb.appendChild(h("span.badge.cloud", { "data-tip": "Stored in iCloud only: its files download when you open it" }, icon("cloud", 12), "iCloud"));
     const stages = s.stages || [];
     const active = stages.find((x) => x.status === "active");
     const more = btn("ellipsis", null, { "data-tip": "More", onclick: (e) => { e.stopPropagation(); this.cardMenu(e.currentTarget, s); } }, "sm pmore");

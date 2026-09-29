@@ -112,6 +112,47 @@ async def home_lists_the_demo(t):
 
 
 @test
+async def home_draws_at_once_while_the_list_loads(t):
+    # no saved list: placeholder cards while the server's list is on its way, then the projects
+    await t.page.js("localStorage.removeItem('tw.projects'); 1")
+    await t.page.intercept("*/api/projects")
+    await t.page.call("Page.navigate", url=t.s.url)
+    req = await t.page.held_request()
+    await t.page.wait("document.querySelector('.pcard.skel') && document.querySelector('.page-head h1')", 10)
+    await t.shot("home-loading")
+    await t.page.resume(req)
+    await t.page.wait("[...document.querySelectorAll('.pcard')].some((c) => c.textContent.includes('Demo'))", 10)
+    check(not await t.page.js("!!document.querySelector('.pcard.skel')"), "placeholders left after the list arrived")
+    # the next visit shows the last list before the server answers
+    await t.page.call("Page.navigate", url=t.s.url)
+    req = await t.page.held_request()
+    await t.page.wait("[...document.querySelectorAll('.pcard')].some((c) => c.textContent.includes('Demo'))", 10)
+    check(not await t.page.js("!!document.querySelector('.pcard.skel')"), "placeholders although the last list was saved")
+    await t.page.resume(req)
+    await t.page.stop_intercept()
+
+
+@test
+async def home_says_when_projects_are_in_icloud_only(t):
+    real = t.s.get("api/projects")
+    await t.page.intercept("*/api/projects")
+    await t.page.call("Page.navigate", url=t.s.url)
+    await t.page.fulfill(await t.page.held_request(), json.dumps([dict(real[0], cloud_only=3)]))
+    txt = await t.page.wait("document.querySelector('.cloudnote') && document.querySelector('.cloudnote').innerText", 10)
+    check("iCloud only" in txt and "Keep Downloaded" in txt, f"note: {txt!r}")
+    check(await t.page.js("!!document.querySelector('.pcard .badge.cloud')"), "no iCloud badge on the card")
+    await t.shot("home-icloud")
+    await t.page.click(".cloudnote button.ghost")                 # hide it: gone, and stays gone on the next visit
+    check(not await t.page.js("!!document.querySelector('.cloudnote')"), "the note did not hide")
+    await t.page.call("Page.navigate", url=t.s.url)
+    await t.page.fulfill(await t.page.held_request(), json.dumps([dict(real[0], cloud_only=3)]))
+    await t.page.wait("document.querySelector('.pcard .badge.cloud')", 10)
+    check(not await t.page.js("!!document.querySelector('.cloudnote')"), "the hidden note came back")
+    await t.page.stop_intercept()
+    await t.page.js("localStorage.removeItem('tw.projects'); localStorage.removeItem('tw.cloudNote.hidden'); 1")
+
+
+@test
 async def five_places_and_the_address_follows(t):
     await t.open_project()
     places = await t.page.js("[...document.querySelectorAll('.tabs .tab[data-place]')].map((e) => e.dataset.place)")

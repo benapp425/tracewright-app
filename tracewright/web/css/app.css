@@ -325,6 +325,14 @@ a.brand:hover { text-decoration: none; }
 .minibar i { flex: 1; height: 4px; border-radius: 2px; background: var(--surface-4); }
 .minibar i.done { background: var(--ok); } .minibar i.active { background: var(--accent); } .minibar i.blocked { background: var(--err); }
 .minibar i.skipped { background: var(--line-3); }
+.pcard.skel { cursor: default; pointer-events: none; }
+.pcard.skel .pthumb { border-bottom: 1px solid var(--line); }
+.pcard .sk-line { height: 11px; border-radius: 6px; width: 72%; }
+.pcard .sk-line.short { width: 92%; height: 9px; }
+.pcard .sk-line.shorter { width: 40%; height: 9px; margin-top: 6px; }
+.pcard .pthumb .badge.cloud { position: absolute; bottom: 10px; left: 10px; gap: 4px; background: var(--hud); color: var(--hud-text); border-color: var(--hud-line); }
+.cloudnote { margin: 0 0 16px; align-items: center; }
+.cloudnote .small { color: var(--text-2); margin-top: 2px; line-height: 1.45; }
 .pcard.new { border-style: dashed; background: transparent; align-items: center; justify-content: center; min-height: 300px; color: var(--text-3); gap: 10px; }
 .pcard.new:hover { color: var(--text); border-color: var(--accent-line); }
 .pcard.new .nicon { width: 44px; height: 44px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; }
