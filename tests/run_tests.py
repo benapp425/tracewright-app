@@ -2886,6 +2886,86 @@ def stock_watch_and_stand_ins():
     asyncio.run(run())
 
 
+@test(needs=("kicad",))
+def schematic_engine_connectors_dividers_power_bars():
+    """The layout engine's newer patterns, through KiCad: a connector that opens a group faces its circuit
+    (mirrored, pin 1 still on top) and one that follows faces back; an IC's supply pins on one side share a bar
+    and one symbol; a divider stands top to bottom with its tap labelled and its filter capacitor beside --
+    KiCad's netlist has exactly what was asked, and nothing overlaps on the plotted sheet."""
+    from tw.sch import Design, finish, Part, stock
+    from tw.sch.auto import Page
+    from tw.sch.kisch import make_ic
+    from tw.sch.auto import LEFT, RIGHT
+    from tw.examples.demo_board import catalog
+    from tw.netlist import Netlist
+    from tw.checks import load_all, REGISTRY
+    from tw.checks.context import Context
+    cat = catalog()
+    cat["SENSOR"] = Part(make_ic("SENSOR3V", [{"left": [("1", "SDA", "bidirectional"), ("2", "SCL", "input"), ("3", "INT", "output")],
+                                               "right": [("9", "NC", "no_connect")],
+                                               "top": [("4", "VDD", "power_in"), ("5", "VDDIO", "power_in"), ("6", "VDDA", "power_in")],
+                                               "bottom": [("7", "GND", "power_in"), ("8", "GNDA", "power_in")], "width": 12.7}],
+                              ref="U", value="SENSOR3V"), "Package_LGA:LGA-8_2x2mm_P0.5mm", "SENSOR3V", "SENSOR3V", "x", "")
+    cat["R100k"] = Part(stock("Device", "R"), "Resistor_SMD:R_0402_1005Metric", "100k", "0402WGF1003TCE", "UNI-ROYAL", "C25741")
+    cat["R33k"] = Part(stock("Device", "R"), "Resistor_SMD:R_0402_1005Metric", "33k", "0402WGF3302TCE", "UNI-ROYAL", "C25779")
+    root = os.path.join(TMP, "engine")
+    hw = os.path.join(root, "hardware", "e")
+    os.makedirs(hw)
+    json.dump({"name": "E", "kicad_project": "hardware/e/e.kicad_pro"}, open(os.path.join(root, "tracewright.json"), "w"))
+    d = Design("e", title="Engine", company="t")
+    top = d.root("Cover", paper="A4")
+    sh = d.sheet("IO", "io.kicad_sch", "IO", paper="A4")
+    top.subsheet(sh, (38.1, 40.64), (50.8, 25.4), [])
+    pg = Page(d, sh, base=100, catalog=cat)
+    g = pg.group("SENSOR PORT")
+    j = g.part("JST4", "J", ref="J101")                        # opens the group: faces right, toward the sensor
+    assert j.mirror == "y" and all(j.pin_dir(n) == RIGHT for n in ("1", "2", "3", "4")), (j.mirror, [j.pin_dir(n) for n in "1234"])
+    assert j.pin("1")[1] < j.pin("4")[1]                       # mirrored, not turned: pin 1 stays on top
+    g.power(j, "1", "GND")
+    g.power(j, "2", "+3V3")
+    g.net(j, "3", "SDA")
+    g.net(j, "4", "SCL")
+    u = g.part("SENSOR", "U", ref="U101")
+    g.power(u, ["4", "5", "6"], "+3V3")                         # three supply pins on top: one bar, one symbol
+    g.power(u, ["7", "8"], "GND")
+    g.net(u, "1", "SDA")
+    g.net(u, "2", "SCL")
+    g.net(u, "3", "SENSE_INT")
+    g.nc(u, "9")
+    j2 = g.part("JST4", "J", ref="J102")                       # after the sensor: faces back, left, as drawn
+    assert j2.mirror is None and all(j2.pin_dir(n) == LEFT for n in "1234")
+    g.power(j2, "1", "GND")
+    g.net(j2, "2", "SENSE_INT")
+    g.nc(j2, "3")
+    g.nc(j2, "4")
+    rt_, rb_, cref = g.divider("+5V", "VIN_SENSE", "R100k", "R33k", cap="C100n", kind="analog")
+    g.finish()
+    pg.layout()
+    d.write(hw)
+    open(os.path.join(hw, "e.kicad_pro"), "w").write("{}")
+    proj = env.Project(root)
+    r = finish(proj)
+    assert r.get("connections") == "as asked", r
+    assert not r.get("crowded"), r.get("crowded")
+    nl = Netlist.load(os.path.join(proj.build, "e.net"))
+    assert {nl.net_of("U101", p_) for p_ in ("4", "5", "6")} == {"+3V3"} and {nl.net_of("U101", p_) for p_ in ("7", "8")} == {"GND"}
+    assert nl.net_of(rt_, "1") == "+5V" and nl.net_of(rt_, "2") == nl.net_of(rb_, "1") == nl.net_of(cref, "1") == "VIN_SENSE"
+    assert nl.net_of(rb_, "2") == nl.net_of(cref, "2") == "GND"
+    text = open(os.path.join(hw, "io.kicad_sch")).read()
+    assert text.count("(mirror y)") == 1, text.count("(mirror y)")
+    # the bar: one +3V3 symbol for the sensor's three pins (another for the connector's pin 2), not four
+    n33 = len(re.findall(r'\(lib_id "[^"]*:\+3V3"\)', text))                  # placed symbols (not the library's)
+    assert n33 == 2, n33
+    load_all()
+    reg_ = {c.id: c for c in REGISTRY} if isinstance(REGISTRY, list) else REGISTRY
+    ctx = Context(proj)
+    for cid in ("sch.render", "sch.text", "sch.wiring"):
+        fs = [f for f in reg_[cid].fn(ctx) if f.severity in ("error", "warning")]
+        assert not fs, (cid, [f.message for f in fs][:5])
+    st = [f.message for f in reg_["sch.style"].fn(ctx) if f.severity in ("error", "warning") and "title block" not in f.message]
+    assert not st, st                                         # the bars' joints: no four-way junctions
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

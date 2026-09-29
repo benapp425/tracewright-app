@@ -64,7 +64,7 @@ def render_findings(doc, rects, sheet_label):
             iy = min(a.box[3], b.box[3]) - max(a.box[1], b.box[1])
             if ix > OVER and iy > OVER and not _same_block(a, b):
                 out.append(("text-text", f"'{a.text}' overlaps '{b.text}'",
-                            ((a.box[0] + b.box[0]) / 2, (a.box[1] + b.box[1]) / 2)))
+                            ((a.box[0] + b.box[0]) / 2, (a.box[1] + b.box[1]) / 2), (a, b)))
     wires = [s for s in doc.segs if s[4] == WIRE]
     body = [s for s in doc.segs if s[4] == BODY and s[5] > 0.2]
     marks = [s for s in doc.segs if (s[4] == BODY and s[5] <= 0.2) or s[4] == NC]
@@ -81,9 +81,25 @@ def render_findings(doc, rects, sheet_label):
                 if max(q[0], q[2]) < s[0] or min(q[0], q[2]) > s[2] or max(q[1], q[3]) < s[1] or min(q[1], q[3]) > s[3]:
                     continue
                 if _through(q, s):
-                    out.append((kind, f"{what} '{t.text}'", (t.box[0], t.box[1])))
+                    out.append((kind, f"{what} '{t.text}'", (t.box[0], t.box[1]), (t,)))
                     break
     return out
+
+
+def _inside_library_symbol(sh, texts):
+    """The symbol whose own pin names these overlapping texts are, both inside its body (the library symbol's
+    drawing, not the sheet's layout), or None."""
+    if sh is None or len(texts) != 2:
+        return None
+    for sym in sh.symbols:
+        if sym.is_power or not sym.bbox:
+            continue
+        x0, y0, x1, y1 = sym.bbox
+        names = {str(nm) for _, nm, _, _, _ in sym.pins if nm and nm != "~"}
+        if all(t.text in names and x0 - 0.3 <= t.box[0] and t.box[2] <= x1 + 0.3 and y0 - 0.3 <= t.box[1] and t.box[3] <= y1 + 0.3
+               for t in texts):
+            return sym
+    return None
 
 
 @check("sch.render", "Schematic readability (plotted sheets)", "Schematic", needs=("svg", "sch"))
@@ -96,10 +112,16 @@ def sch_render(ctx):
     for name_path, (doc, path) in sorted(ctx.svgs.items()):
         sh = sheets.get(name_path)
         rects = sh.sf.rects if sh else []
-        for kind, msg, (x, y) in render_findings(doc, rects, name_path):
-            out.append(Finding("sch.render", "warning", f"{kind}: {msg}",
-                               {"sheet": name_path, "file": sh.filename if sh else "", "x": round(x, 2), "y": round(y, 2)},
-                               key=f"sch.render:{name_path}:{kind}:{msg}"))
+        for kind, msg, (x, y), texts in render_findings(doc, rects, name_path):
+            lib = _inside_library_symbol(sh, texts) if kind == "text-text" else None
+            where = {"sheet": name_path, "file": sh.filename if sh else "", "x": round(x, 2), "y": round(y, 2)}
+            key = f"sch.render:{name_path}:{kind}:{msg}"          # unchanged, so a waiver on it still holds
+            if lib is not None:                                    # the symbol's own drawing: nothing to move on the sheet
+                out.append(Finding("sch.render", "info", f"{kind}: {msg}, two pin names inside {lib.ref}'s symbol ({lib.lib_id})",
+                                   {**where, "ref": lib.ref}, hint="The library symbol draws them this way. A symbol drawn for "
+                                   "the project (wider, or with those pins on other sides) would part them.", key=key))
+                continue
+            out.append(Finding("sch.render", "warning", f"{kind}: {msg}", where, key=key))
     examined(ctx, plural(len(ctx.svgs), "plotted sheet"))
     return out
 

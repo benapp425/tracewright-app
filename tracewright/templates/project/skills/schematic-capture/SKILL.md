@@ -7,12 +7,17 @@ description: Draw or change the schematic - generate it with tw.sch for new desi
 **New design** -- write `design/schematic.py` and let `tw.sch.auto` lay the sheets out (worked example:
 `tools/tw/examples/auto_demo.py`). Say what connects, grouped by function; place no coordinates:
 - `p = Page(d, sheet, base=100, catalog=CAT)`; `g = p.group("3.3 V REGULATOR")` (one titled block per function);
-  `u = g.part("LDO", "U", ref="U1")` -- the group's main part; later parts go to its right.
-- On a part's pins: `g.power(u, pins, "+3V3", flag=False)` (supplies up, ground down; sideways at connectors),
+  `u = g.part("LDO", "U", ref="U1")` -- the group's main part; later parts go to its right. A single-row
+  connector faces its circuit by itself (`face="auto"`: mirrored so its pins point right when it opens the group,
+  left when it follows other parts; pin 1 stays on top) -- no need to rotate connectors by hand.
+- On a part's pins: `g.power(u, pins, "+3V3", flag=False)` (supplies up, ground down; sideways at connectors;
+  several pins of one rail on the same side share a bar and one symbol),
   `g.decouple(u, pin, ["C100n", "C10u"], "+3V3")`, `g.pull(u, pin, "R10k", "+3V3" or "GND", net="RESET")`,
   `g.series(u, pin, "R22", "USB_D_P", before="MCU_D_P")`, `g.indicator(u, pin, "R1k", "LED_G")`,
   `g.crystal(u, "XI", "XO", "Y16M", ["C18p", "C18p"])`, `g.net(u, pins, "I2C_SDA")`, `g.nc(u, pins)`.
-- Alone in a group: `g.led("+3V3", "R1k", "LED_R")`; notes: `g.note("C2 22u keeps the LDO stable.", near="C2")`.
+- Alone in a group: `g.led("+3V3", "R1k", "LED_R")`; a divider: `g.divider("VBAT", "VBAT_SENSE", "R100k", "R33k",
+  cap="C100n", kind="analog")` (rail, resistor, the tap labelled, resistor, ground; the filter capacitor beside);
+  notes: `g.note("C2 22u keeps the LDO stable.", near="C2")`.
 - `p.layout()` per page, then `d.write(hw)` and `tw.sch.finish(project)`: it reports `connections` ("as asked", or
   what KiCad's netlist does differently -- fix those before anything else) and `crowded` (patterns drawn aside
   because there was no room at the pin: give the group more room or split it). Signals leaving a group get

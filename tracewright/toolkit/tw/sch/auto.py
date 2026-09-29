@@ -61,7 +61,8 @@ def _add(p, d, k):
 
 
 def _hit(a, b, gap=0.0):
-    return a[0] < b[2] + gap and b[0] < a[2] + gap and a[1] < b[3] + gap and b[1] < a[3] + gap
+    e = gap - 1e-6                                 # boxes that only touch do not hit (69.85 - 2.54 is 67.30999...)
+    return a[0] < b[2] + e and b[0] < a[2] + e and a[1] < b[3] + e and b[1] < a[3] + e
 
 
 def _label_box(name, pt, d, flag=True):
@@ -86,6 +87,9 @@ def _text_box(s, at, size=1.27):
 
 
 def _gap(k1, k2):
+    if "halo" in (k1, k2):                         # a margin that only text and labels must keep
+        other = k2 if k1 == "halo" else k1
+        return 0.0 if other in ("text", "label") else -99.0
     if k1 == "wire" and k2 == "wire":
         return -0.05                               # wires may touch only where they are meant to
     if k1 == k2 == "label":
@@ -118,6 +122,7 @@ class Group:
                           None, cat.footprint, False, True, True, None)
         inst.ref_at = inst.val_at = None
         inst.hide_value = False
+        inst.mirror = flags.get("mirror")
         inst.fields_left = flags.get("fields_left", False)
         inst.fields_above = flags.get("fields_above", False)
         inst.fields_below = flags.get("fields_below", False)
@@ -155,8 +160,11 @@ class Group:
         probe = kisch.Inst(self.page.sheet, lib, "#PWR?", rail, pt, rot, 1, {}, None, "", False, False, False, None)
         probe.ref_at = probe.val_at = None
         probe.hide_value = probe.fields_left = probe.fields_above = probe.fields_below = False
-        return [("body", probe.bbox(), "#" + rail + str(pt)), ("text", probe.field_boxes()[0] if probe.field_boxes() else probe.bbox(),
-                                                                "#" + rail + str(pt))]
+        body, owner = probe.bbox(), "#" + rail + str(pt)
+        out = [("body", body, owner), ("text", probe.field_boxes()[0] if probe.field_boxes() else body, owner)]
+        if int(rot) % 180 == 90:          # turned sideways its bars fill the pin pitch: the next pin's text keeps off them
+            out.append(("halo", (body[0], body[1] - 0.4, body[2], body[3] + 0.4), owner))
+        return out
 
     def _clear(self, items, anchor=None):
         """Would these items land on anything drawn, or on each other? A wire may leave the anchor's body
@@ -201,28 +209,43 @@ class Group:
         return (min(b[0] for b in bs), min(b[1] for b in bs), max(b[2] for b in bs), max(b[3] for b in bs))
 
     # ------------------------------------------------------------------ parts
-    def part(self, key, prefix, ref=None, value=None, rot=0, unit=1, fields=None, gap=15.24):
+    def part(self, key, prefix, ref=None, value=None, rot=0, unit=1, fields=None, gap=15.24, face="auto"):
         """Place a part: the group's first at its origin, each later one to the right of what is drawn
-        (its pin patterns included), clear of everything."""
+        (its pin patterns included), clear of everything. face: which way a single-row connector's pins point
+        -- "auto" toward the circuit (right when it is the group's first part, left when it comes after
+        others), "left", "right", or None to leave the symbol as it is drawn. The symbol is mirrored, not
+        turned, so pin 1 stays at the top."""
         self.flush()
         ref = ref or self.page.ref(prefix)
+        mirror = self._facing(key, ref, rot, unit, value, fields, face)
         if not self.parts:
-            inst = self._probe(key, ref, (0, 0), rot, unit, value, fields)
+            inst = self._probe(key, ref, (0, 0), rot, unit, value, fields, mirror=mirror)
         else:
-            probe = self._probe(key, ref, (0, 0), rot, unit, value, fields)
+            probe = self._probe(key, ref, (0, 0), rot, unit, value, fields, mirror=mirror)
             x = snap(self.bbox()[2] + gap - probe.bbox()[0])
             inst = None
             for k in range(80):
-                cand = self._probe(key, ref, (snap(x + k * P), 0), rot, unit, value, fields)
+                cand = self._probe(key, ref, (snap(x + k * P), 0), rot, unit, value, fields, mirror=mirror)
                 if self._clear(self._part_items(cand)):
                     inst = cand
                     break
-            inst = inst or self._probe(key, ref, (x, 0), rot, unit, value, fields)
+            inst = inst or self._probe(key, ref, (x, 0), rot, unit, value, fields, mirror=mirror)
         self._fields_clear_of_pins(inst)
         self.parts[ref] = inst
         self.ops.append(("part", inst))
         self._take(self._part_items(inst))
         return inst
+
+    def _facing(self, key, ref, rot, unit, value, fields, face):
+        """'y' when a connector must be mirrored to face the way asked (see part), else None."""
+        if face is None or not _is_connector(ref) or int(rot) % 360 != 0:
+            return None
+        probe = self._probe(key, ref, (0, 0), rot, unit, value, fields)
+        dirs = {probe.pin_dir(p["number"]) for p in probe.lib.pins if p["unit"] in (0, unit)}
+        if len(dirs) != 1 or next(iter(dirs)) not in (LEFT, RIGHT):
+            return None                                           # two rows, or pins on several sides: as drawn
+        want = RIGHT if face == "right" or (face == "auto" and not self.parts) else LEFT
+        return "y" if next(iter(dirs)) != want else None
 
     def _fields_clear_of_pins(self, inst):
         """Reference and value above the body, moved right of the top pins when they would sit over them
@@ -252,8 +275,26 @@ class Group:
         current: what the rail is and carries (the net model: checks, net classes, the app's net list)."""
         if voltage is not None or current is not None:
             self.page.d.net(rail, kind="ground" if is_ground(rail) else "power", voltage=voltage, current=current)
-        for pin in ([pins] if isinstance(pins, (str, int)) else pins):
+        pins = [pins] if isinstance(pins, (str, int)) else list(pins)
+        want = DOWN if is_ground(rail) else UP
+        if len(pins) >= 2 and not flag and all(inst.pin_dir(p) == want for p in pins) and \
+                not (self.page.conv.get("supplies") == "labels" and not is_ground(rail)):
+            self._ask("power_bar", inst, pins[0], pins=[str(p) for p in pins], rail=rail)      # one symbol on a bar
+            return
+        for pin in pins:
             self._ask("power", inst, pin, rail=rail, flag=flag)
+
+    def divider(self, top, mid, rkey_top, rkey_bottom, bottom="GND", refs=(None, None), cap=None, cap_ref=None, **attrs):
+        """A resistor divider, top to bottom: the `top` rail, a resistor, the tap (a short wire to the `mid` net's
+        label), a resistor, and `bottom`. cap: a filter capacitor from the tap to `bottom`, beside the lower
+        resistor. attrs: what the mid net is (kind="analog" ...; see tw.netmodel). Drawn after the pin
+        patterns; returns the references."""
+        refs = (refs[0] or self.page.ref("R"), refs[1] or self.page.ref("R"))
+        cap_ref = (cap_ref or self.page.ref("C")) if cap else None
+        if attrs:
+            self.page.d.net(mid, **attrs)
+        self.later.append(("divider", top, mid, rkey_top, rkey_bottom, bottom, refs, cap, cap_ref))
+        return refs + ((cap_ref,) if cap else ())
 
     def net(self, inst, pins, name, **attrs):
         """A short stub and a label; several pins of one net are joined and labelled once. attrs: what the
@@ -319,6 +360,8 @@ class Group:
             return (0, 0, 0)
         if kind in ("crystal", "indicator"):
             return (1, side, p[1] if d[1] == 0 else p[0])
+        if kind == "power_bar":
+            return (2, side, p[0])
         sideways_ok = kind == "power" and d[1] == 0 and _is_connector(rq["inst"].ref)
         hangs = not sideways_ok and (kind == "decouple" or (kind == "pull" and is_ground(rq["to"])) or
                                      (kind == "power" and is_ground(rq["rail"]) and d != DOWN))
@@ -411,6 +454,41 @@ class Group:
                     return
         self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin]}, record=False)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {rail} as a label (no room for its symbol) {getattr(self, 'why', '')}")
+
+    def _draw_power_bar(self, rq):
+        """Several pins of one rail on one side: a stub from each, a bar joining them, one rail symbol on it
+        (pins that do not line up, or no room: a symbol at each)."""
+        inst, rail, pins = rq["inst"], rq["rail"], rq["pins"]
+        d = inst.pin_dir(pins[0])
+        pts = sorted((inst.pin(p) for p in pins), key=lambda q: q[0])
+        if len({round(q[1], 3) for q in pts}) != 1:
+            for pin in pins:
+                self._draw_power({"inst": inst, "pin": pin, "rail": rail, "flag": False})
+            return
+        for L in (P, 2 * P, 3 * P):
+            ends = [_add(q, d, L) for q in pts]
+            # the symbol on the bar between the middle two stubs, never on a stub's end (four wires would meet)
+            k = (len(ends) - 1) // 2
+            mid_x = snap((ends[k][0] + ends[k + 1][0]) / 2)
+            if any(abs(mid_x - e[0]) < 1e-6 for e in ends):
+                mid_x = snap(ends[k][0] + 1.27)
+            sym = (mid_x, ends[0][1])
+            stubs = [[q, e] for q, e in zip(pts, ends)]
+            bar = [ends[0], ends[-1]]
+            items = [it for s_ in stubs for it in self._wire_items(s_, inst.ref)] + self._wire_items(bar)
+            items += self._power_items(rail, sym, 0)
+            if self._clear(items, anchor=inst.ref):
+                ops = [("wire", s_) for s_ in stubs] + [("wire", bar), ("power", rail, sym, 0)]
+                joins = {tuple(e) for e in ends[1:-1]}                     # stubs meeting the bar mid-way: T joints
+                if mid_x not in (ends[0][0], ends[-1][0]):
+                    joins.add(sym)
+                ops += [("junction", j) for j in sorted(joins)]
+                self._commit(ops, items)
+                for pin in pins:
+                    self._connect(rail, inst.ref, pin)
+                return
+        for pin in pins:
+            self._draw_power({"inst": inst, "pin": pin, "rail": rail, "flag": False})
 
     def _mark(self, name, pt, d, owner, boxes):
         """Remember where a net's label was drawn in this group, so a later pin of the net can be wired to it."""
@@ -880,6 +958,8 @@ class Group:
         for item in self.later:
             if item[0] == "led":
                 self._draw_led(*item[1:])
+            elif item[0] == "divider":
+                self._draw_divider(*item[1:])
         for item in self.later:
             if item[0] == "note":
                 self._draw_note(item[1], item[2])
@@ -906,6 +986,43 @@ class Group:
                 self._connect(gnd, dref, "1")
                 return
         raise RuntimeError(f"no room for {rref} and {dref}")
+
+    def _draw_divider(self, top_rail, mid, rkt, rkb, bottom, refs, cap, cap_ref):
+        """top rail / R / tap -> label / R / bottom, top to bottom; the filter cap from the tap, beside."""
+        r1ref, r2ref = refs
+        bb = self.bbox()
+        x0 = snap(bb[2] + 10.16) if self.boxes else 0
+        for k in range(60):
+            top = (snap(x0 + k * P), snap(bb[1] + 5.08) if self.boxes else 0)
+            r1 = self._two(rkt, r1ref, top, "down", fields_left=True)       # names on the left, the tap goes right
+            tap = _add(r1.pin("2"), DOWN, P)
+            r2 = self._two(rkb, r2ref, _add(tap, DOWN, P), "down", fields_left=True)
+            ops = [("part", r1), ("part", r2), ("power", top_rail, top, 0), ("wire", [r1.pin("2"), tap]), ("wire", [tap, r2.pin("1")]),
+                   ("power", bottom, r2.pin("2"), 0), ("junction", tap)]
+            items = self._part_items(r1) + self._part_items(r2) + self._power_items(top_rail, top) + self._power_items(bottom, r2.pin("2"))
+            items += self._wire_items([r1.pin("2"), tap]) + self._wire_items([tap, r2.pin("1")])
+            if cap:
+                q = _add(tap, RIGHT, 3 * P)
+                c = self._two(cap, cap_ref, _add(q, DOWN, P), "down")
+                end = _add(q, RIGHT, 3 * P)
+                ops += [("wire", [tap, q]), ("wire", [q, c.pin("1")]), ("wire", [q, end]), ("junction", q), ("part", c),
+                        ("power", bottom, c.pin("2"), 0), ("label", mid, end, RIGHT)]
+                items += self._wire_items([tap, q]) + self._wire_items([q, c.pin("1")]) + self._wire_items([q, end]) + self._part_items(c)
+                items += self._power_items(bottom, c.pin("2")) + [("label", _label_box(mid, end, RIGHT), None)]
+            else:
+                end = _add(tap, RIGHT, 4 * P)
+                ops += [("wire", [tap, end]), ("label", mid, end, RIGHT)]
+                items += self._wire_items([tap, end]) + [("label", _label_box(mid, end, RIGHT), None)]
+            if self._clear(items):
+                self._commit(ops, items)
+                self._connect(top_rail, r1ref, "1")
+                for ref, pin in ((r1ref, "2"), (r2ref, "1")) + (((cap_ref, "1"),) if cap else ()):
+                    self._connect(mid, ref, pin)
+                self._connect(bottom, r2ref, "2")
+                if cap:
+                    self._connect(bottom, cap_ref, "2")
+                return
+        raise RuntimeError(f"no room for the divider {r1ref} / {r2ref}")
 
     def _draw_note(self, text, near):
         inst = self.parts.get(near) if isinstance(near, str) else None
@@ -1068,7 +1185,8 @@ class Page:
                     va = (mv(inst.val_at[:2]) + tuple(inst.val_at[2:])) if inst.val_at else None
                     sh.add(inst.lib, inst.ref, inst.value, mv(inst.at), rot=inst.rot, unit=inst.unit,
                            footprint=inst.footprint, fields=inst.fields, fields_left=inst.fields_left,
-                           fields_above=inst.fields_above, fields_below=inst.fields_below, ref_at=ra, val_at=va)
+                           fields_above=inst.fields_above, fields_below=inst.fields_below, ref_at=ra, val_at=va,
+                           mirror=getattr(inst, "mirror", None))
                 elif kind == "wire":
                     sh.wire(*[mv(p) for p in op[1]])
                 elif kind == "junction":

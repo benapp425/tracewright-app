@@ -279,6 +279,8 @@ class Inst:
             raise KeyError(f"{self.ref}: no pin {number} in unit {self.unit} of {self.lib.name}")
         p = cands[0]
         dx, dy = rot_vec(p["x"], -p["y"], self.rot)
+        if getattr(self, "mirror", None) == "y":                 # flipped left to right (unrotated symbols only)
+            dx = -dx
         return (snap(self.at[0] + dx), snap(self.at[1] + dy))
 
     def pin_dir(self, number):
@@ -286,11 +288,15 @@ class Inst:
         p = [q for q in self.lib.pins if q["number"] == str(number) and q["unit"] in (0, self.unit)][0]
         tb = {0: (1, 0), 90: (0, -1), 180: (-1, 0), 270: (0, 1)}[int(p["rot"]) % 360]   # toward body, screen
         dx, dy = rot_vec(-tb[0], -tb[1], self.rot)
+        if getattr(self, "mirror", None) == "y":
+            dx = -dx
         return (int(round(dx)), int(round(dy)))
 
     def bbox(self):
         x0, y0, x1, y1 = self.lib.bbox(self.unit)
         pts = [rot_vec(x, -y, self.rot) for x in (x0, x1) for y in (y0, y1)]
+        if getattr(self, "mirror", None) == "y":
+            pts = [(-a, b) for a, b in pts]
         xs = [self.at[0] + p[0] for p in pts]; ys = [self.at[1] + p[1] for p in pts]
         return (min(xs), min(ys), max(xs), max(ys))
 
@@ -453,7 +459,7 @@ class Sheet:
     # ---- symbols
     def add(self, lib, ref, value, at, rot=0, unit=1, footprint="", fields=None, dnp=False,
             in_bom=None, on_board=None, ref_at=None, val_at=None, hide_value=False,
-            fields_left=False, fields_above=False, fields_below=False):
+            fields_left=False, fields_above=False, fields_below=False, mirror=None):
         """in_bom / on_board default to the library symbol's own flags (a mounting hole is not bought)."""
         if in_bom is None:
             in_bom = find(lib.tree, "in_bom") is None or find(lib.tree, "in_bom")[1] != "no"
@@ -465,6 +471,7 @@ class Sheet:
                     uid(f"sym:{self.filename}:{ref}:{unit}"), footprint, dnp, in_bom, on_board, lib_id)
         inst.ref_at, inst.val_at, inst.hide_value = ref_at, val_at, hide_value
         inst.fields_left, inst.fields_above, inst.fields_below = fields_left, fields_above, fields_below
+        inst.mirror = mirror
         self.insts.append(inst)
         return inst
 
@@ -567,7 +574,8 @@ class Sheet:
     def _inst_sexpr(self, inst):
         lib = inst.lib
         x, y = inst.at
-        node = ["symbol", ["lib_id", Q(inst.lib_id)], ["at", x, y, inst.rot], ["unit", inst.unit], ["body_style", 1],
+        node = ["symbol", ["lib_id", Q(inst.lib_id)], ["at", x, y, inst.rot]] + \
+            ([["mirror", "y"]] if getattr(inst, "mirror", None) == "y" else []) + [["unit", inst.unit], ["body_style", 1],
                 ["exclude_from_sim", "no"], ["in_bom", "yes" if inst.in_bom else "no"],
                 ["on_board", "yes" if inst.on_board else "no"], ["in_pos_files", "yes" if inst.on_board else "no"],
                 ["dnp", "yes" if inst.dnp else "no"],
@@ -579,6 +587,8 @@ class Sheet:
         r = int(inst.rot) % 360
         fang = 90 if r in (90, 270) else 0
         flip = r in (90, 180)
+        if getattr(inst, "mirror", None) == "y":                   # KiCad mirrors the fields' justification too
+            flip = not flip
 
         def fj(j):
             if j is None or not flip:
