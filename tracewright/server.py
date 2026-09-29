@@ -941,19 +941,41 @@ def make_app():
 
     @routes.get("/api/projects/{pid}/nets")
     async def nets_list(request):
-        """Every net with its kind (ground, power with its voltage, pair with its partner, clock, fast,
-        signal) and a short tag, by the checks' own rules."""
+        """Every net's record from the net model (tw.netmodel): its kind (ground, a supply with its voltage
+        and current, one half of a pair, a clock, an RF line...), what was declared and what is inferred,
+        and a short tag for lists."""
         rt = app.rt(request.match_info["pid"])
-        from tw import nettypes
+        from tw import netmodel
 
         def work():
-            nl = _netlist_for(rt)
-            if nl is not None:
-                return nettypes.from_netlist(nl, rt.p.cfg)
-            b = rt.board() if rt.p.tw.has_pcb() else None
-            return nettypes.from_board(b, rt.p.cfg) if b is not None else {}
-        kinds = await asyncio.to_thread(work)
-        return jresp({"nets": kinds})
+            p = rt.p
+            p.reload()
+            m = netmodel.for_project(p.tw)
+            out = {}
+            for n, r in m.records.items():
+                src = r.get("source") or {}
+                out[n] = {**{k: v for k, v in r.items() if k != "source"}, "tag": netmodel.tag(r),
+                          "declared": sorted(k for k, v in src.items() if v != "inferred")}
+            return {"nets": out, "summary": m.summary(), "unused": [k for k, _ in m.unused_keys()]}
+        return jresp(await asyncio.to_thread(work))
+
+    @routes.patch("/api/projects/{pid}/nets/{net}")
+    async def net_declare(request):
+        """Declare what a net is (kind, voltage, current, pair, impedance, class, note); a field sent as
+        null or "" is removed, back to what names and pins say."""
+        rt = app.rt(request.match_info["pid"])
+        from tw import netmodel
+        net = request.match_info["net"]
+        body = await request.json()
+        fields = {k: body[k] for k in netmodel.FIELDS if k in body}
+        try:
+            rec = await asyncio.to_thread(netmodel.declare, rt.p.tw, net, **fields)
+        except ValueError as e:
+            return err(str(e))
+        rt.p.reload()
+        rt.user_changes.append(f"net {net} declared as {json.dumps(rec)}" if rec else f"net {net}: declarations cleared")
+        rt.hub.emit("nets.changed", net=net)
+        return jresp({"net": net, "declared": rec})
 
     @routes.get("/api/projects/{pid}/parts/{ref}")
     async def part_info(request):

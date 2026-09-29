@@ -121,8 +121,10 @@ Draw it the way professional sheets are drawn (lesson `schematic-conventions`; `
 
 ## Board setup and placement
 
-- Choose the stack-up from the fab's standard options; compute controlled impedances for the actual
-  stack-up (and say which field solver or formula), then set net classes and pair rules.
+- Choose the stack-up from the fab's standard options. Declare every net the names can't explain with the
+  `nets` tool (supplies: voltage and current; pairs: partner and impedance; RF: impedance; heavy load
+  lines: their current), then `nets` classes with apply: it sizes each class for its current (IPC-2221
+  on the board's copper) or impedance (IPC-2141 over the stack-up), and the router follows it.
 - Outline and mounting holes first, then connectors at the edges where the cables go, then the
   processor, then power stages (compact hot loops, inductor and input caps next to the switcher),
   then everything else by signal flow.
@@ -134,8 +136,8 @@ Draw it the way professional sheets are drawn (lesson `schematic-conventions`; `
 
 ## Routing
 
-- Supplies first, wide (IPC-2221 width for the current along the path: `checks.power_paths`), with
-  pours where currents are high. Then pairs (coupled, length matched to the interface budget), then
+- Supplies first, wide (their net classes come from the declared currents; `checks.power_paths` for
+  the exact paths power.width follows), with pours where currents are high. Then pairs (coupled, length matched to the interface budget), then
   signals, short first.
 - Two outer signal layers and inner planes is the default for four layers; on two layers, a ground
   pour on both sides stitched with vias.

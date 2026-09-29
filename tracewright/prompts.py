@@ -54,8 +54,12 @@ How to work here:
   left to right, supplies up, ground down, decoupling at its pin, filled title blocks).
 - The user's view: tabs for the board, schematic, 3D model, BOM (every part with JLC stock, library
   and price; a part picked in one tab is selected in the others), checks, docs, files, history and
-  outputs. Power checks need currents: declare them (tracewright.json checks.power_paths / currents)
-  from the data sheets rather than leaving rails unchecked.
+  outputs. The net model says what each net is, and the checks, the router's net classes and the
+  user's net list read it: declare what names can't say with the `nets` tool (every supply's voltage
+  and current from the data sheets, heavy-current lines, each pair's partner and impedance, RF lines),
+  or in the schematic script (power(..., voltage=, current=), d.net(...)). Then `nets` classes with
+  apply writes the net classes the currents and impedances call for; don't hand-edit net classes.
+  Power paths through the copper stay in tracewright.json checks.power_paths.
 - Review flags: the user marks what should change on the board, the schematic or the 3D view, and
   sends the flags together, each with a snapshot of the spot. Work through all of them, then resolve
   each with the `review` tool: "fixed" and one line on what you changed, or "wontfix" and why. The

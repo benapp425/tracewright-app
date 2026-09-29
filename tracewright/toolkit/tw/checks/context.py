@@ -148,15 +148,40 @@ class Context:
         return out
 
     # ------------------------------------------------------------------ helpers for checks
+    @property
+    def nets(self):
+        """The net model (tw.netmodel): each net's kind, voltage, current, pair... declared or inferred."""
+        from .. import netmodel
+        return netmodel.for_context(self)
+
+    def declared(self, *kinds):
+        """Short names of this design's nets declared (tracewright.json nets, the schematic generator, older
+        checks settings) as one of the kinds."""
+        from .. import netmodel
+        def make():
+            names = set(self.netlist.nets_short()) if self.available("netlist") else \
+                {n.rsplit("/", 1)[-1] for n in self.board.nets} if self.available("pcb") else set()
+            by = {}
+            for key, rec, src in netmodel.declared(self.cfg, self.p):
+                if "kind" not in rec:
+                    continue
+                for n in names:
+                    if n not in by and netmodel._matches(key, n):
+                        by[n] = rec["kind"]
+            return by
+        by = self._get("declared_kinds", make)
+        return {n for n, k in by.items() if k in kinds}
+
     def ground_nets(self):
-        """Nets that are ground (by name, or declared in tracewright.json checks.ground)."""
-        declared = set(self.setting("checks.ground", []) or [])
+        """Nets that are ground (by name, or declared: tracewright.json nets kind ground, checks.ground)."""
+        declared = self.declared("ground")
+        other = self.declared(*[k for k in ("power", "pair", "clock", "fast", "rf", "analog", "signal")])
         out = set()
         names = set(self.netlist.nets_short()) if self.available("netlist") else set(self.board.nets)
         for n in names:
             u = n.upper()
-            if n in declared or u in ("GND", "AGND", "DGND", "PGND", "GNDA", "GNDD", "GNDPWR", "VSS", "0V", "EARTH",
-                                     "GND_ISO", "SGND", "CHASSIS", "GNDREF") or u.startswith("GND"):
+            if n in declared or (n not in other and (u in ("GND", "AGND", "DGND", "PGND", "GNDA", "GNDD", "GNDPWR", "VSS", "0V",
+                                                           "EARTH", "GND_ISO", "SGND", "CHASSIS", "GNDREF") or u.startswith("GND"))):
                 out.add(n)
         return out
 
@@ -167,10 +192,14 @@ class Context:
         PWR_EN, VIN_SENSE) are not rails. tracewright.json checks.rails adds, checks.not_rails removes."""
         return self._get("power_nets", self._power_nets)
 
+    _has_cap_to = staticmethod(lambda nl, nodes, grounds: _has_cap_to(nl, nodes, grounds))
+
     def _power_nets(self):
         import re
-        declared = set((self.setting("checks.currents", {}) or {}).keys()) | set(self.setting("checks.rails", []) or [])
-        not_rails = set(self.setting("checks.not_rails", []) or [])
+        loaded = set((self.setting("checks.currents", {}) or {}).keys())     # carry a current: rails only if rail-like
+        declared = set(self.setting("checks.rails", []) or []) | self.declared("power")
+        not_rails = set(self.setting("checks.not_rails", []) or []) | self.declared("ground", "pair", "clock", "fast", "rf",
+                                                                               "analog", "signal")
         grounds = self.ground_nets()
         name = re.compile(r"^[+-]?\d+V\d*|\d+V\d+|\d+V($|_)|(^|_)V(CC|DD|BUS|IN|BAT|SYS|MOT|MOTOR|CORE|IO|SUP|LED|AA|PP|S)"
                           r"[A-Z0-9]*($|_)|(^|_)(AVDD|DVDD|AVCC|DVCC|IOVDD|PVIN|AVIN|PWR|VBUS)($|_)|^\+", re.I)
@@ -179,7 +208,7 @@ class Context:
                              r"CTL|CMD|STBY|STANDBY|SLEEP|WAKE|RUN|RST|RESET|IRQ|ALERT|STAT|STATUS)($|_)", re.I)
         out = set(declared)
         if not self.available("netlist"):
-            return out - grounds
+            return (out | loaded) - grounds
         nl = self.netlist
         by_short = {}
         for full, nodes in nl.nets.items():
@@ -194,6 +223,8 @@ class Context:
             if name.search(label) or any(nl.pin_type(r, p) == "power_out" for r, p in nodes) or \
                     any(nl.pin_type(r, p) == "power_in" and r[:1] in ("U", "I") for r, p in nodes):
                 out.add(s)
+            elif s in loaded and s not in not_rails and self._has_cap_to(nl, nodes, grounds):
+                out.add(s)                   # a loaded net with a bulk / decoupling capacitor on it is a rail
         # through fuses, ferrite beads and 0-ohm links
         links = []
         for ref, part in nl.parts.items():
@@ -217,6 +248,16 @@ class Context:
                         out.add(y)
                         grew = True
         return (out - grounds) - not_rails
+
+
+def _has_cap_to(nl, nodes, grounds):
+    """Is a capacitor on this net whose other side is ground?"""
+    for r, x in nodes:
+        if r.startswith("C") and not r.startswith(("CN", "CON")) and len(nl.pins_of(r)) == 2:
+            other = [nl.net_of(r, y) for y in nl.pins_of(r) if y != x]
+            if other and other[0] in grounds:
+                return True
+    return False
 
 
 def plain_name(net):

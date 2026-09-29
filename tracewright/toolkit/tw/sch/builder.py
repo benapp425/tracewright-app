@@ -301,6 +301,16 @@ class Design:
         self._page = 1
         self.tb = {"company": company, "rev": rev, "comments": tuple(comments)}
         self.described = []            # (page, sheet name, what it holds) for the contents list
+        self.net_attrs = {}            # net -> what the design says it is (tw.netmodel), written with the sheets
+
+    def net(self, name, **attrs):
+        """Say what a net is, for the checks, the router's net classes and the app's net list:
+        d.net("VPYRO", kind="power", voltage=8.4, current=5); d.net("USB_D_P", kind="pair", pair="USB_D_N",
+        impedance=90); d.net("GPS_RF", kind="rf", impedance=50). Fields: see tw.netmodel.FIELDS."""
+        from .. import netmodel
+        rec = netmodel._clean({k: v for k, v in attrs.items() if v is not None})
+        self.net_attrs.setdefault(name, {}).update(rec)
+        return self.net_attrs[name]
 
     @property
     def libname(self):
@@ -344,7 +354,11 @@ class Design:
                 pg.emit(glob)
                 pg.emitted = True
             with open(os.path.join(hw_dir, ".tracewright-nets.json"), "w") as f:
-                json.dump({"nets": auto.intended(self), "crowded": [c for pg in self.pages for c in pg.crowded]}, f, indent=1)
+                json.dump({"nets": auto.intended(self), "crowded": [c for pg in self.pages for c in pg.crowded],
+                           "attrs": self.net_attrs}, f, indent=1)
+        elif self.net_attrs:                           # hand-placed sheets: only what the nets are
+            with open(os.path.join(hw_dir, ".tracewright-nets.json"), "w") as f:
+                json.dump({"attrs": self.net_attrs}, f, indent=1)
         for sh in self.p.sheets:
             sh.write(hw_dir)
         self.p.write_symbol_lib(os.path.join(hw_dir, "lib", f"{self.libname}.kicad_sym"))

@@ -194,6 +194,49 @@ def every_check_says_what_it_examined():
 
 
 @test(needs=("kicad",))
+def net_model_declared_over_inferred():
+    """The net model: names and pins give a first reading (+3V3 a 3.3 V supply, GND ground, USB_D_P/N a
+    pair); declarations in tracewright.json win (a current makes a net loaded, not a supply; a declared
+    supply gets its voltage); the checks follow the model; net classes are sized from currents (IPC-2221)
+    and impedances; a declaration naming no net is reported."""
+    from tw import netmodel
+    from tw.checks import runner
+    from tw.checks.context import Context
+    from tw.pro import ProjectSettings
+    from tw.board import Board
+    p = fixture_copy("netmodel")
+    m = netmodel.for_project(p)
+    assert m.kind("+3V3") == "power" and m.voltage("+3V3") == 3.3 and m.kind("GND") == "ground", m.get("+3V3")
+    assert m.kind("USB_D_P") == "pair" and m.partner("USB_D_P") == "USB_D_N", m.get("USB_D_P")
+    assert m.get("+3V3")["source"]["kind"] == "inferred" and "3 supplies" not in m.summary()
+    netmodel.declare(p, "+5V", kind="power", voltage=5, current=2.5)
+    netmodel.declare(p, "RESET", current=3)                                  # heavy, kind still guessed
+    netmodel.declare(p, "USB_D_P", impedance=90)
+    netmodel.declare(p, "NOT_A_NET", kind="power", voltage=12)
+    p = env.Project(p.root)
+    m = netmodel.for_project(p)
+    r = m.get("+5V")
+    assert r["current"] == 2.5 and r["source"]["current"] == "tracewright.json" and r["kind"] == "power", r
+    assert m.kind("RESET") != "power" and m.current("RESET") == 3.0
+    assert [k for k, _ in m.unused_keys()] == ["NOT_A_NET"]
+    ctx = Context(p, offline=True)
+    assert "RESET" not in ctx.power_nets() and "+5V" in ctx.power_nets()
+    res = runner.run_all(p, only=["nets.model"], offline=True, write=False)
+    msgs = [f["message"] for c in res["checks"] for f in c["findings"]]
+    assert any("NOT_A_NET" in x for x in msgs) and any("RESET carries 3 A" in x for x in msgs), msgs
+    classes, assign = netmodel.suggest_classes(m, Board.load(p.pcb), pro=ProjectSettings.load(p.pro))
+    assert assign.get("+5V") == "Power 2.5 A" and classes["Power 2.5 A"]["track_width"] >= 0.8, (classes, assign)
+    assert assign.get("USB_D_P") == assign.get("USB_D_N") and "diff_pair_gap" in classes[assign["USB_D_P"]]
+    changed = netmodel.apply_classes(p.pro, classes, assign)
+    again = netmodel.apply_classes(p.pro, classes, assign)
+    assert changed and not again, (changed, again)                          # writing it twice changes nothing
+    pro = ProjectSettings.load(p.pro)
+    assert pro.class_of("+5V") == "Power 2.5 A" and pro.cls("Power 2.5 A")["track_width"] >= 0.8
+    netmodel.declare(p, "NOT_A_NET", kind=None, voltage=None)                 # clearing every field removes it
+    assert "NOT_A_NET" not in (json.load(open(os.path.join(p.root, "tracewright.json"))).get("nets") or {})
+
+
+@test(needs=("kicad",))
 def schematic_field_edit_in_place():
     from tw.sch import edit
     from tw import kicad

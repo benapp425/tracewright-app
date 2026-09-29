@@ -17,6 +17,7 @@ Run in the project folder. Everything writes its results to `build/` and prints 
 | `./tw pcb ops.json` | apply board operations (below) |
 | `./tw route [--nets A B] [--clear] [--engine grid|freerouting]` | route (grid router: human style, net by net) |
 | `./tw fill` | refill zones |
+| `./tw nets` / `./tw nets set VPYRO kind=power voltage=8.4 current=5` / `./tw nets classes [--apply]` | the net model: what each net is (declared or inferred); declare a net; net classes sized for the declared currents and impedances |
 | `./tw parts search "AMS1117-3.3"` / `./tw parts code C6186` | JLC / LCSC data, cached with the query date |
 | `./tw cpl [--write]` | CPL against JLC's own footprints; --write stores corrections |
 | `./tw outputs [--no-renders]` | Gerbers, drill, BOM, CPL, PDFs, STEP, renders, release zip |
@@ -49,6 +50,10 @@ Coordinates are board millimetres, KiCad axes (y down), angles counter-clockwise
   `tee`, `block`, `zone`, `note`, `notes`), `Part`, `stock("Device", "R")`, `make_ic(...)` for new ICs,
   `finish(project)`. Drawn to the lesson `schematic-conventions` (theme colours, unfilled titled blocks).
   See `tools/tw/examples/demo_board.py` for a complete worked example.
+- The net model: `Design.net("VPYRO", kind="power", voltage=8.4, current=5)`, `g.power(u, "3", "+3V3", voltage=3.3,
+  current=0.2)`, `g.net(q, "3", "PYRO_MAIN", current=5)` in a schematic script; `tw.netmodel.for_project(p)` reads it
+  (kinds: power, ground, pair, clock, fast, rf, analog, signal; fields: voltage, current, pair, iface, impedance,
+  class, note). A check (`nets.model`) flags declarations that match no net and supplies with no voltage.
 - `tw.sch.edit.set_fields(project, {"R1": {"LCSC": "C25744"}})` -- change fields in an existing schematic,
   keeping the file's formatting.
 - `tw.pcb.client.apply(project, ops)` -- the board operations above (live into KiCad when it has the board open).

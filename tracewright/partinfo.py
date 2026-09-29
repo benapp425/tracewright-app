@@ -59,7 +59,12 @@ def part_info(p, board, ref, fetch=False):
             "dnp": bool(part.get("dnp") or (fp is not None and fp.dnp)),
             "fields": {k: v for k, v in fields.items() if v and k not in ("Reference", "Value", "Footprint", "Datasheet", "Description")
                        and not re.match(r"^(ki_|KiLib|Sim\.|Sheet)", k)}}
-    types = nettypes.from_netlist(nl, p.cfg) if nl else (nettypes.from_board(board, p.cfg) if board is not None else {})
+    try:
+        from tw import netmodel
+        m = netmodel.for_project(p.tw)
+        types = {n: {"kind": r["kind"], "tag": netmodel.tag(r)} for n, r in m.records.items()}
+    except Exception:
+        types = nettypes.from_netlist(nl, p.cfg) if nl else (nettypes.from_board(board, p.cfg) if board is not None else {})
     pins = []
     if nl:
         for pin in nl.pins_of(ref):

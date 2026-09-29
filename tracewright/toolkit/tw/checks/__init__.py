@@ -57,6 +57,8 @@ def examined(ctx, what):
     """Record what the running check looked at ("3 regulators, 7 capacitors"); shown with its result."""
     cid = getattr(_current, "id", None)
     if cid and what:
+        if not isinstance(getattr(ctx, "scopes", None), dict):
+            ctx.scopes = {}
         ctx.scopes[cid] = str(what)
     return what
 
@@ -97,7 +99,7 @@ GROUPS = ["KiCad", "Schematic", "Parts & BOM", "Placement", "Routing", "Power", 
 def load_all():
     """Import every check module (registration happens on import)."""
     from . import kicad_reports, schematic_checks, bom, placement, routing, power, signal, dfm, lessons, cpl, assembly  # noqa: F401
-    from . import integrity, power_layout, si_layout, layout_quality  # noqa: F401
+    from . import integrity, power_layout, si_layout, layout_quality, nets  # noqa: F401
     return REGISTRY
 
 
@@ -152,6 +154,8 @@ def run(ctx, checks, progress=None):
     called when each check starts (status "running") and when it ends."""
     results = []
     t_all = time.time()
+    if not isinstance(getattr(ctx, "scopes", None), dict):
+        ctx.scopes = {}
     base = float(ctx.setting("checks.timeout_s", 0) or 0)
     for c in checks:
         t0 = time.time()

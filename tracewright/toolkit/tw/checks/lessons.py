@@ -93,11 +93,15 @@ def i2c_pullups(ctx):
     ext = set(ctx.setting("checks.external_pullups", []) or [])
     out = []
     bus, external = [], []
+    from .. import netmodel
+    i2c_decl = [k for k, rec, src in netmodel.declared(ctx.cfg, ctx.p) if rec.get("iface") == "i2c"]
+    ext |= {k for k, rec, src in netmodel.declared(ctx.cfg, ctx.p) if rec.get("external_pullup")}
     for full, nodes in nl.nets.items():
         s = nl.short(full)
-        if not re.search(r"(^|_)(SDA|SCL)\d*($|_)|I2C\d*_?(SDA|SCL)", s, re.I):
+        if not re.search(r"(^|_)(SDA|SCL)\d*($|_)|I2C\d*_?(SDA|SCL)", s, re.I) and \
+                not any(netmodel._matches(k, full) for k in i2c_decl):
             continue
-        if s in ext:
+        if s in ext or any(netmodel._matches(k, full) for k in ext if any(c in k for c in "*?[")):
             external.append(s)
             continue
         bus.append(s)

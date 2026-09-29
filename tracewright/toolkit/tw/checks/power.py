@@ -16,7 +16,13 @@ def ipc2221_width(current, rise_c=10.0, copper_mm=0.035, internal=False):
 
 
 def _currents(ctx):
-    return ctx.setting("checks.currents", {}) or {}
+    """{net or pattern: amps}: checks.currents and every current declared in the net model."""
+    from .. import netmodel
+    table = {}
+    for key, rec, src in netmodel.declared(ctx.cfg, ctx.p):
+        if rec.get("current") is not None:
+            table.setdefault(key, rec["current"])
+    return table
 
 
 def _current_for(net, table):
@@ -555,7 +561,13 @@ def rail_voltages(ctx):
             v = 20.0
         if v is not None:
             volts[r] = v
-    volts.update({k: float(v) for k, v in (ctx.setting("checks.rail_voltages", {}) or {}).items()})
+    from .. import netmodel
+    for key, rec, src in reversed(netmodel.declared(ctx.cfg, ctx.p)):        # earliest (most specific source) last
+        if rec.get("voltage") is None:
+            continue
+        for r in rails:
+            if netmodel._matches(key, r):
+                volts[r] = float(rec["voltage"])
     links = []                                            # (from, to): the voltage that can reach `to`
     for ref, part in nl.parts.items():
         pins = nl.pins_of(ref)

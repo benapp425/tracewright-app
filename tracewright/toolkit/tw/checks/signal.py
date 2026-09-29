@@ -96,6 +96,17 @@ def fast_nets(ctx, board):
     out = {}
     pats = [re.compile(p, re.I) for p in (ctx.setting("highspeed.nets", []) or [])]
     grounds = ctx_grounds(ctx, board)
+    try:
+        declared = {k: set() for k in ("pair", "clock", "fast", "rf")}
+        for k in declared:
+            declared[k] = ctx.declared(k)
+    except Exception:
+        declared = {}
+    for n in board.nets:
+        s_ = n.rsplit("/", 1)[-1] if n else ""
+        for k, names in declared.items():
+            if s_ in names:
+                out[n] = {"pair": "declared pair", "clock": "declared clock", "fast": "declared fast", "rf": "declared RF"}[k]
     for p, n in find_pairs(board.nets):
         k = pair_kind(p)
         if k:

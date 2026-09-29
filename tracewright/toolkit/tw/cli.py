@@ -249,6 +249,79 @@ def cmd_style(a):
     return 0 if r["ok"] else 1
 
 
+def cmd_nets(a):
+    """The net model: list it, declare a net's facts, or size net classes from them."""
+    from tw import netmodel
+    p = env.project()
+    if a.action == "set":
+        if not a.args:
+            print("usage: ./tw nets set NET kind=power voltage=3.3 current=0.5 [pair=... impedance=... class=... note=...]")
+            return 1
+        net, fields = a.args[0], {}
+        for kv in a.args[1:]:
+            if "=" not in kv:
+                print(f"not a field=value: {kv}")
+                return 1
+            k, v = kv.split("=", 1)
+            fields[k.strip()] = v.strip()
+        try:
+            rec = netmodel.declare(p, net, **fields)
+        except ValueError as e:
+            print(f"error: {e}")
+            return 1
+        print(f"{net}: {json.dumps(rec) if rec else '(no declarations)'}")
+        return 0
+    m = netmodel.for_project(p)
+    if a.action == "classes":
+        from tw.board import Board
+        board = Board.load(p.pcb) if p.has_pcb() else None
+        from tw.pro import ProjectSettings
+        classes, assign = netmodel.suggest_classes(m, board, pro=ProjectSettings.load(p.pro) if p.pro else None)
+        if not classes and not assign:
+            print("no net needs its own class: declare currents (supplies) or impedances (pairs, RF) first")
+            return 0
+        for name, spec in classes.items():
+            nets = sorted(n for n, c in assign.items() if c == name)
+            dp = f", pair {spec['diff_pair_width']} / gap {spec['diff_pair_gap']} mm" if "diff_pair_width" in spec else ""
+            print(f"{name}: track {spec['track_width']} mm, clearance {spec['clearance']} mm{dp}  <- {', '.join(nets)}")
+            if spec.get("_note"):
+                print(f"    note: {spec['_note']}")
+        if a.apply:
+            if not p.pro:
+                print("no .kicad_pro yet")
+                return 1
+            changed = netmodel.apply_classes(p.pro, classes, assign)
+            print(f"written to {os.path.relpath(p.pro, p.root)}: " + (", ".join(changed) if changed else "nothing changed"))
+        else:
+            print("(preview: add --apply to write them into the KiCad project)")
+        return 0
+    if a.json:
+        print(json.dumps(m.to_json(), indent=1))
+        return 0
+    print(m.summary())
+    order = {k: i for i, k in enumerate(netmodel.KINDS)}
+    for n, r in sorted(m.records.items(), key=lambda t: (order.get(t[1]["kind"], 99), t[0])):
+        bits = []
+        if r.get("voltage") is not None:
+            bits.append(f"{r['voltage']:g} V")
+        if r.get("current") is not None:
+            bits.append(f"{r['current']:g} A")
+        if r.get("pair"):
+            bits.append(f"pair {r['pair']}")
+        if r.get("impedance"):
+            bits.append(f"{r['impedance']:g} ohm")
+        if r.get("iface"):
+            bits.append(r["iface"])
+        if r.get("class"):
+            bits.append(f"class {r['class']}")
+        decl = sorted({v for k, v in r["source"].items() if v != "inferred"})
+        print(f"  {netmodel.short(n):<22} {r['kind']:<8} {', '.join(bits):<34} {'declared: ' + ', '.join(decl) if decl else 'inferred'}")
+    unused = m.unused_keys()
+    if unused:
+        print("declared but matching no net: " + ", ".join(k for k, _ in unused))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tw", description=f"Tracewright toolkit {__version__}")
     sub = ap.add_subparsers(dest="cmd")
@@ -296,6 +369,11 @@ def main(argv=None):
     rt.add_argument("--engine", default="grid", choices=["grid", "freerouting"])
     rt.add_argument("--clear", action="store_true")
     rt.add_argument("--dry-run", action="store_true")
+    nt = sub.add_parser("nets", help="the net model: list, set NET field=value ..., classes [--apply]")
+    nt.add_argument("action", nargs="?", default="list", choices=["list", "set", "classes"])
+    nt.add_argument("args", nargs="*")
+    nt.add_argument("--apply", action="store_true")
+    nt.add_argument("--json", action="store_true")
     st = sub.add_parser("style")
     st.add_argument("style", nargs="?", choices=["flat", "hierarchical"])
     st.add_argument("--dry-run", action="store_true")

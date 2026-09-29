@@ -246,14 +246,20 @@ class Group:
         for pin in ([pins] if isinstance(pins, (str, int)) else pins):
             self._ask("nc", inst, pin)
 
-    def power(self, inst, pins, rail, flag=False):
+    def power(self, inst, pins, rail, flag=False, voltage=None, current=None):
         """A rail at each pin: supplies point up, ground down, on a short stub where the pin does not
-        already point that way. flag: a PWR_FLAG where the rail enters the board (connectors)."""
+        already point that way. flag: a PWR_FLAG where the rail enters the board (connectors). voltage /
+        current: what the rail is and carries (the net model: checks, net classes, the app's net list)."""
+        if voltage is not None or current is not None:
+            self.page.d.net(rail, kind="ground" if is_ground(rail) else "power", voltage=voltage, current=current)
         for pin in ([pins] if isinstance(pins, (str, int)) else pins):
             self._ask("power", inst, pin, rail=rail, flag=flag)
 
-    def net(self, inst, pins, name):
-        """A short stub and a label; several pins of one net are joined and labelled once."""
+    def net(self, inst, pins, name, **attrs):
+        """A short stub and a label; several pins of one net are joined and labelled once. attrs: what the
+        net is (kind="clock", current=2, pair="USB_D_N", impedance=90 ...; see tw.netmodel)."""
+        if attrs:
+            self.page.d.net(name, **attrs)
         pins = [pins] if isinstance(pins, (str, int)) else list(pins)
         self._ask("net", inst, pins[0], name=name, pins=[str(p) for p in pins])
 

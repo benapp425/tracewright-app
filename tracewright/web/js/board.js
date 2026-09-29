@@ -16,13 +16,18 @@ const ease = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 // A net's kind in words, for tooltips and the spotlight card.
 export function netKindText(t, short = (n) => n) {
   if (!t) return "";
+  const amps = t.current != null ? `, ${t.current} A` : "";
+  const src = t.declared && t.declared.length ? "" : " (from its name and pins)";
+  const ohm = t.impedance ? `, ${t.impedance} Ω` : "";
   if (t.kind === "ground") return "Ground";
-  if (t.kind === "power") return t.voltage != null ? `Supply, ${t.voltage} V` : "Supply";
-  if (t.kind === "pair") return `Differential pair${t.iface ? ` (${({ usb: "USB", hdmi: "HDMI", mipi: "MIPI", eth: "Ethernet", lvds: "LVDS", pcie: "PCIe", sata: "SATA", clk: "clock", hs: "high speed" })[t.iface] || t.iface})` : ""}${t.pair ? ` with ${short(t.pair)}` : ""}`;
-  if (t.kind === "clock") return "Clock";
+  if (t.kind === "power") return (t.voltage != null ? `Supply, ${t.voltage} V` : "Supply, voltage unknown") + amps + src;
+  if (t.kind === "pair") return `Differential pair${t.iface ? ` (${({ usb: "USB", hdmi: "HDMI", mipi: "MIPI", eth: "Ethernet", lvds: "LVDS", pcie: "PCIe", sata: "SATA", clk: "clock", hs: "high speed" })[t.iface] || t.iface})` : ""}${t.pair ? ` with ${short(t.pair)}` : ""}${ohm}`;
+  if (t.kind === "clock") return "Clock" + (t.iface ? ` (${t.iface.toUpperCase()})` : "");
   if (t.kind === "fast") return "Fast interface line";
+  if (t.kind === "rf") return "RF line" + ohm;
+  if (t.kind === "analog") return "Analog line";
   if (t.kind === "unconnected") return "Not connected";
-  return "Signal";
+  return "Signal" + (t.iface ? ` (${t.iface.toUpperCase()})` : "") + amps;
 }
 
 export class BoardView {

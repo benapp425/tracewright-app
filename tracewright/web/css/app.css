@@ -1871,6 +1871,9 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .ntag.ground { background: rgba(120, 160, 230, .16); color: #8fb2ee; }
 .ntag.pair { background: rgba(180, 140, 242, .18); color: #c4a6f6; }
 .ntag.clock, .ntag.fast { background: rgba(80, 200, 170, .16); color: #6fd3b8; }
+.ntag.rf { background: rgba(230, 110, 150, .16); color: #ee8fb0; }
+.ntag.analog { background: rgba(200, 190, 90, .16); color: #d8cd7a; }
+.ntag.signal { background: var(--bg-3, rgba(255, 255, 255, .06)); color: var(--text-2); }
 .lchips.nkinds { margin: 2px 0 6px; flex-wrap: wrap; }
 .nkind { color: var(--hud-text); margin-top: 2px; }
 

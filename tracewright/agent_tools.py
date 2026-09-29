@@ -497,6 +497,77 @@ def tool_list(rt, app):
         hub.emit("stages", stages=st)
         return _text("stages: " + ", ".join(f"{s['title']} {s['status']}" for s in st))
 
+    @reg("nets", "The net model: what each net is. The checks, the router's net classes and the user's net list read it, "
+         "so declare what names can't say: every supply's voltage and the current it carries, heavy-current lines (an "
+         "e-match or motor output: kind signal with its current), each pair's partner and impedance, RF lines' "
+         "impedance. action: list (kind?: power | ground | pair | clock | fast | rf | analog | signal) | get (net) | "
+         "declare (items: [{net, kind?, voltage? V, current? A, pair?, iface?, impedance? ohm, class?, note?}]; a field "
+         "set to null is removed) | classes (apply?: true writes the net classes the declarations call for into the "
+         "KiCad project; without it, a preview). Use this rather than editing net classes by hand.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "get", "declare", "classes"]},
+                                           "kind": {"type": "string"}, "net": {"type": "string"}, "apply": {"type": "boolean"},
+                                           "items": {"type": "array", "items": {"type": "object"}}},
+          "required": ["action"]})
+    async def nets(args):
+        from tw import netmodel
+        tw = proj()
+        act = args.get("action", "list")
+        if act == "declare":
+            done, errs = [], []
+            for it in args.get("items") or []:
+                it = dict(it or {})
+                net = str(it.pop("net", "") or "").strip()
+                if not net:
+                    errs.append("an item without a net")
+                    continue
+                try:
+                    rec = await run(netmodel.declare, tw, net, **{k: v for k, v in it.items() if k in netmodel.FIELDS})
+                    done.append(f"{net}: {json.dumps(rec)}")
+                except ValueError as e:
+                    errs.append(f"{net}: {e}")
+            p.reload()
+            hub.emit("nets.changed")
+            m = await run(netmodel.for_project, proj())
+            unused = [k for k, _ in m.unused_keys()]
+            txt = "declared:\n" + "\n".join(done) if done else "nothing declared"
+            if errs:
+                txt += "\nnot declared: " + "; ".join(errs)
+            if unused:
+                txt += "\nno net has these names (check the spelling): " + ", ".join(unused)
+            return _text(txt, error=bool(errs) and not done)
+        m = await run(netmodel.for_project, tw)
+        if act == "get":
+            r = m.get(args.get("net") or "")
+            return _text(_json(r) if r else f"no net named {args.get('net')!r}", error=not r)
+        if act == "classes":
+            from tw.board import Board
+            from tw.pro import ProjectSettings
+            board = await run(Board.load, tw.pcb) if tw.has_pcb() else None
+            classes, assign = await run(netmodel.suggest_classes, m, board, pro=ProjectSettings.load(tw.pro) if tw.pro else None)
+            if not classes and not assign:
+                return _text("no net needs its own class yet (declare currents, or impedances for pairs and RF lines)")
+            lines = [f"{name}: {_json(spec)} <- {', '.join(sorted(n for n, c in assign.items() if c == name))}"
+                     for name, spec in classes.items()]
+            if args.get("apply"):
+                if not tw.pro:
+                    return _text("no KiCad project file yet", error=True)
+                rt.mark_self(10)
+                changed = await run(netmodel.apply_classes, tw.pro, classes, assign)
+                hub.emit("rules.changed")
+                lines.append("written: " + (", ".join(changed) if changed else "nothing changed"))
+            else:
+                lines.append("(preview; apply: true writes them)")
+            return _text("\n".join(lines))
+        kind = args.get("kind")
+        rows = []
+        for n, r in sorted(m.records.items()):
+            if kind and r["kind"] != kind:
+                continue
+            decl = sorted({v for k, v in r["source"].items() if v != "inferred"})
+            rows.append({**{k: v for k, v in r.items() if k != "source"}, "net": netmodel.short(n),
+                         "declared": decl or None})
+        return _text(m.summary() + "\n" + _json(rows[:400]))
+
     @reg("agenda", "Your agenda for the user's current request, shown to them as a live checklist above the chat. "
          "Call it before you start any request that takes more than two steps, with 3-8 concrete steps in order; "
          "then call it again with the whole list whenever you start a step (status active), finish one (done, and "
