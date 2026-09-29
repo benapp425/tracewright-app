@@ -407,6 +407,16 @@ async def mentions_point_claude_at_parts_and_nets(t):
     check(hl == [pick], hl)
 
 
+@test
+async def part_card_without_ask(t):
+    await t.open_project("board")
+    await t.page.wait("document.querySelector('.viewer canvas').__view.data", 20)
+    await t.page.js("document.querySelector('.viewer canvas').__view.ws.select([{ ref: 'U1' }], 'board'); 1")
+    card = await t.page.wait("document.querySelector('.in-acts') && document.querySelector('.in-acts').innerText", 15)
+    check("Ask" not in card and "Open" in card, card)
+    await t.shot("part-card")
+
+
 # a speech recognizer the test speaks through (headless Chrome has no microphone or speech service)
 FAKE_SPEECH = """
 window.SpeechRecognition = window.webkitSpeechRecognition = class {

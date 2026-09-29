@@ -291,7 +291,7 @@ export class BomView {
     }
     if (r.skipped.length) body.appendChild(h("details.sv-skip", h("summary", `${r.skipped.length} unchanged`),
       r.skipped.map((x) => h("div.sv-sk", h("b", x.refs.slice(0, 6).join(", ")), h("span", x.why)))));
-    const go = btn("sparkles", "Swap with Claude", { onclick: () => {
+    const go = btn("repeat", "Swap these parts", { onclick: () => {
       const items = r.items.filter((_, i) => picked.has(i));
       m.close();
       this.ws.ask("");

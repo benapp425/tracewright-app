@@ -63,8 +63,7 @@ export class Inspector {
       findingsLine(info),
       h("div.in-acts",
         h("button.btn.sm.primary", { onclick: () => this.open(info) }, icon("fullscreen", 13), "Open"),
-        info.datasheet && /^https?:/.test(info.datasheet) ? h("a.btn.sm", { href: info.datasheet, target: "_blank", rel: "noopener" }, icon("file-text", 13), "Data sheet") : null,
-        h("button.btn.sm.ghost", { onclick: () => this.ws.ask(`About ${info.ref} (${info.value}): `) }, icon("message-square", 13), "Ask")));
+        datasheetButton(this.ws, info, "sm")));
   }
 
   goNet(p) {
@@ -106,17 +105,48 @@ export class Inspector {
           params(info, 99),
           h("div.inx-sec", `Pins (${info.pins.length})`),
           pinsTable(info, 999, (p) => { m.close(); this.goNet(p); }),
+          info.pin_table ? h("div.inx-sec", `Pin table from the data sheet${info.pin_table.differ ? ` · ${info.pin_table.differ} differ from the symbol` : ""}`) : null,
+          info.pin_table ? h("div.small.muted", info.pin_table.source) : null,
+          pinTable(info),
           info.findings.length ? h("div.inx-sec", `What the checks say (${info.findings.length})`) : null,
           info.findings.length ? h("div.inx-finds", info.findings.map((f) => h("div.inx-find." + f.severity,
             h("span.sev", f.severity), h("div", h("b", f.message), f.hint ? h("div.hint", f.hint) : null)))) : null)),
     ];
     const m = modal({ title: `${info.ref} · ${info.value}`, sub: [info.mpn, info.manufacturer].filter(Boolean).join(" · "), icon: "microchip", cls: "wide",
       body, actions: [
-        info.datasheet && /^https?:/.test(info.datasheet) ? h("a.btn", { href: info.datasheet, target: "_blank", rel: "noopener" }, icon("file-text", 14), "Data sheet") : null,
+        datasheetButton(this.ws, info),
         h("button.btn", { onclick: () => { m.close(); this.ws.select([{ ref: info.ref }], "inspector"); if (this.ws.show) this.ws.show("schematic"); } }, "Show in the schematic"),
         info.board ? h("button.btn", { onclick: () => { m.close(); if (this.ws.show) this.ws.show("board"); this.ws.select([{ ref: info.ref }], "inspector"); } }, "Show on the board") : null,
         h("button.btn.primary", { onclick: () => m.close() }, "Done")].filter(Boolean) });
   }
+}
+
+// the data sheet: the project's copy when there is one (it opens in Files), else the maker's link with Save
+function datasheetButton(ws, info, size = "") {
+  const cls = "a.btn" + (size ? "." + size : "");
+  if (info.datasheet_saved) return h("button.btn" + (size ? "." + size : ""), { onclick: () => ws.showFile && ws.showFile(info.datasheet_saved),
+    "data-tip": info.datasheet_saved }, icon("file-text", 13), "Data sheet");
+  if (!info.datasheet || !/^https?:/.test(info.datasheet)) return null;
+  const save = h("button.btn" + (size ? "." + size : "") + ".ghost", { "data-tip": "Save it into the project (docs/datasheets)", onclick: async () => {
+    save.disabled = true;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(ws.pid)}/datasheets`, { body: { ref: info.ref } });
+      info.datasheet_saved = r.saved;
+      toast(`Saved ${r.saved}`, "ok", 4000, { label: "Open", run: () => ws.showFile(r.saved) });
+      save.replaceWith(h("span.small.muted", "saved"));
+    } catch (e) { toast(e.message, "error"); save.disabled = false; }
+  } }, icon("download", 13));
+  return h("span.in-ds", h(cls, { href: info.datasheet, target: "_blank", rel: "noopener" }, icon("file-text", 13), "Data sheet"), save);
+}
+
+// the pin table read from the data sheet, against the symbol's pins
+function pinTable(info) {
+  const t = info.pin_table;
+  if (!t) return null;
+  const MARK = { match: ["check", "same"], unknown: ["circle", "no name to compare"], mismatch: ["triangle-alert", "named differently"],
+    critical: ["circle-x", "a different pin"], missing: ["circle-dot", "only on one side"] };
+  return h("div.in-ptab", t.rows.map((r) => h("div.in-prow." + r.match, { "data-tip": (MARK[r.match] || MARK.unknown)[1] },
+    h("span.pn", r.pin), h("span.ellipsis", r.sheet || "—"), h("span.ellipsis.sym", r.symbol || "—"), icon((MARK[r.match] || MARK.unknown)[0], 12))));
 }
 
 function chips(info, src) {

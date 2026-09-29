@@ -50,7 +50,7 @@ export class BringUpView {
     if (!d.exists || !d.total) {
       el.appendChild(h("div.empty", h("div.eicon", icon("list-checks", 22)), h("h3", d.exists ? "The bring-up plan has no steps" : "No bring-up plan yet"),
         h("p", "A checklist for testing the built board, with expected values."),
-        btn("sparkles", "Write a plan with Claude", { onclick: () => this.ws.ask("Write docs/bring-up.md: what only the built board can show, in the order to test it, as '- [ ]' steps grouped in '## ' sections, each with the value to expect (for example 'TP3 3V3 = 3.30 V ± 2 %', 'idle current < 50 mA').") }, "primary")));
+        btn("file-text", "Write the bring-up plan", { onclick: () => this.ws.ask("Write docs/bring-up.md: what only the built board can show, in the order to test it, as '- [ ]' steps grouped in '## ' sections, each with the value to expect (for example 'TP3 3V3 = 3.30 V ± 2 %', 'idle current < 50 mA').") }, "primary")));
       return;
     }
     const res = d.results || {};

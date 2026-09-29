@@ -71,7 +71,7 @@ export class ChecksPanel {
         busy ? btn("circle-stop", "Stop", { onclick: () => this.stop(), "data-tip": "Stop after the current step" }) : null,
         busy ? null : btn("refresh-cw", "Re-export and run", { "data-tip": "Export the netlist, ERC, DRC and plots again", onclick: () => api(`/api/projects/${enc(this.pid)}/checks/run`, { body: { refresh: true } }).catch((e) => toast(e.message, "error")) }),
         busy ? null : btn("play", "Run all checks", { onclick: () => this.ws.runChecks(), "data-kbd": "mod+shift+k", "data-tip": "Run all checks" }, counts.error + counts.warning ? "" : "primary"),
-        counts.error + counts.warning && !busy ? btn("sparkles", "Fix with Claude", { onclick: () => this.ws.ask("Go through the check findings, most important first: fix what is clearly wrong, and for each warning either fix it or tell me why it can be waived.") }, "primary") : null)));
+        counts.error + counts.warning && !busy ? btn("wrench", "Fix the findings", { onclick: () => this.ws.ask("Go through the check findings, most important first: fix what is clearly wrong, and for each warning either fix it or tell me why it can be waived.") }, "primary") : null)));
     const checks = d.checks || [];
     const n = (fn) => checks.filter(fn).length;
     const stat = (k, label, count) => h("div.stat" + (this.filter === k ? ".on" : ""), { onclick: () => { this.filter = k; this.render(); } }, h("b", String(count)), label);

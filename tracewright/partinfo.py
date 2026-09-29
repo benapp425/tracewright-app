@@ -108,6 +108,19 @@ def part_info(p, board, ref, fetch=False):
             info["datasheet"] = detail.get("datasheet") or ""
         if not info["description"]:
             info["description"] = detail.get("name") or detail.get("description") or ""
+    # the project's data sheet library: the saved PDF, and the pin table read from it against the symbol's pins
+    from tw import datasheets
+    info["datasheet_saved"] = datasheets.pdf_for(p.tw, info["mpn"], lcsc, info["value"])
+    names, source, pfile = datasheets.pins_for(p.tw, lcsc=lcsc, mpn=info["mpn"], value=info["value"])
+    if names:
+        from tw.checks.integrity import compare_pin
+        sym = {x["pin"]: x["name"] for x in pins}
+        rows = []
+        for n in sorted(set(names) | set(sym), key=lambda k: (len(k), k)):
+            rows.append({"pin": n, "sheet": names.get(n, ""), "symbol": sym.get(n, ""),
+                         "match": compare_pin(sym.get(n, ""), names[n]) if n in names and n in sym else "missing"})
+        info["pin_table"] = {"source": source, "file": pfile, "rows": rows,
+                             "differ": sum(1 for r in rows if r["match"] in ("mismatch", "critical"))}
     info["findings"] = _findings(p, ref)
     return info
 

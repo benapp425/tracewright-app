@@ -2057,3 +2057,14 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .finding .fwaiver svg.ic { color: var(--warn); }
 .or-lock { align-items: center; margin-bottom: 10px; }
 .or-signed { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ok); margin-bottom: 8px; }
+
+/* the part card's data sheet and the pin table read from it */
+.in-ds { display: inline-flex; gap: 2px; }
+.in-ptab { display: grid; grid-template-columns: 1fr; gap: 1px; font-size: 12px; margin-top: 4px; }
+.in-prow { display: grid; grid-template-columns: 38px 1fr 1fr 16px; gap: 8px; align-items: center; padding: 3px 6px; border-radius: 5px; color: var(--text-2); }
+.in-prow .pn { font-family: var(--mono); color: var(--text-3); }
+.in-prow .sym { color: var(--text-3); }
+.in-prow svg.ic { color: var(--ok); }
+.in-prow.mismatch { background: var(--warn-soft); } .in-prow.mismatch svg.ic { color: var(--warn); }
+.in-prow.critical { background: var(--err-soft); } .in-prow.critical svg.ic { color: var(--err); }
+.in-prow.unknown svg.ic, .in-prow.missing svg.ic { color: var(--text-3); }

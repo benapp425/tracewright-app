@@ -2644,6 +2644,75 @@ def mentions_list_what_can_be_pointed_at():
     asyncio.run(run())
 
 
+@test(needs=("kicad",))
+def datasheet_library_and_pin_tables():
+    """The project's data sheet library: a data sheet downloads into docs/datasheets (a viewer page that links
+    to the PDF is followed; anything that is not a PDF is refused); a pin table read from a data sheet is saved
+    beside it; the pinout check trusts it over the parts library (a regulator's table with VIN and GND the other
+    way round flags the symbol), and the part card compares it pin by pin with the symbol."""
+    import threading, http.server, functools
+    from tracewright.projects import ProjectStore
+    from tracewright import partinfo, agent_tools
+    from tracewright.server import App
+    from tw import datasheets
+    from tw.checks import runner
+    pid = ProjectStore().import_copy(FIXTURE, "Datasheet demo").id
+    served = os.path.join(TMP, "served")
+    os.makedirs(served, exist_ok=True)
+    with open(os.path.join(served, "ams1117.pdf"), "wb") as f:
+        f.write(b"%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n")
+    with open(os.path.join(served, "viewer.html"), "w") as f:
+        f.write('<html><a href="http://127.0.0.1:{port}/ams1117.pdf">PDF</a></html>')
+    with open(os.path.join(served, "nope.html"), "w") as f:
+        f.write("<html>no pdf here</html>")
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=served))
+    port = httpd.server_address[1]
+    with open(os.path.join(served, "viewer.html"), "w") as f:
+        f.write(f'<html><a href="http://127.0.0.1:{port}/ams1117.pdf">PDF</a></html>')
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    async def go():
+        app = App()
+        rt = app.rt(pid)
+        tw = rt.p.tw
+        f = datasheets.fetch(tw, f"http://127.0.0.1:{port}/ams1117.pdf", mpn="AMS1117-3.3")
+        assert f == "docs/datasheets/AMS1117-3.3.pdf" and open(os.path.join(tw.root, f), "rb").read(4) == b"%PDF"
+        assert datasheets.fetch(tw, f"http://127.0.0.1:{port}/viewer.html", lcsc="C6186") == "docs/datasheets/C6186.pdf"
+        for bad in (f"http://127.0.0.1:{port}/nope.html", "", "ftp://x/y.pdf"):
+            try:
+                datasheets.fetch(tw, bad, mpn="X")
+                raise AssertionError(f"fetched {bad!r}")
+            except ValueError:
+                pass
+        # the regulator's pin table, VIN and GND the other way round from the symbol (SOT-223: 1 GND, 2 VOUT, 3 VIN)
+        tools = {t.name: t for t in agent_tools.tool_list(rt, app)}
+        r = await tools["parts"].handler({"action": "pins", "mpn": "AMS1117-3.3", "pins": {"1": "VIN", "2": "VOUT", "3": "GND", "4": "VOUT"},
+                                          "source": "AMS1117 data sheet, pin table, page 1"})
+        assert not r.get("is_error"), r
+        names, src, _ = datasheets.pins_for(tw, value="AMS1117-3.3")
+        assert names["1"] == "VIN" and "page 1" in src
+        lib = {d["name"]: d for d in datasheets.library(tw)}
+        assert lib["AMS1117-3.3"]["pdf"].endswith(".pdf") and lib["AMS1117-3.3"]["pins"] == 4, lib
+        res = runner.run_all(tw, only=["sch.pinout"], offline=True, write=False)
+        c = res["checks"][0]
+        msgs = [x["message"] for x in c["findings"] if x["severity"] == "error"]
+        assert any(m.startswith("U1 ") and "on the data sheet" in m for m in msgs), msgs
+        assert "against the pin tables of their data sheets" in c.get("scope", ""), c.get("scope")
+        info = partinfo.part_info(rt.p, rt.board(), "U1")
+        assert info["datasheet_saved"] == "docs/datasheets/AMS1117-3.3.pdf", info["datasheet_saved"]   # by MPN first, then LCSC code
+        rows = {x["pin"]: x["match"] for x in info["pin_table"]["rows"]}
+        assert rows["2"] == "match" and "critical" in (rows["1"], rows["3"]) and info["pin_table"]["differ"] >= 2, rows
+        r = await tools["parts"].handler({"action": "pins", "mpn": "X", "pins": {"1": "A"}, "source": "p1"})
+        assert r.get("is_error"), r                                             # one pin is not a table
+        rt.stop()
+    try:
+        asyncio.run(go())
+    finally:
+        httpd.shutdown()
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

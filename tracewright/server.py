@@ -929,6 +929,33 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.get("/api/projects/{pid}/datasheets")
+    async def datasheets_list(request):
+        """The project's data sheet library (docs/datasheets): the PDFs and the pin tables read from them."""
+        from tw import datasheets
+        rt = app.rt(request.match_info["pid"])
+        return jresp({"items": await asyncio.to_thread(datasheets.library, rt.p.tw)})
+
+    @routes.post("/api/projects/{pid}/datasheets")
+    async def datasheets_save(request):
+        """Save a part's data sheet into the project: {ref} (its link from the part's fields or LCSC)."""
+        from . import partinfo
+        from tw import datasheets
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        ref = str(body.get("ref") or "")
+        info = await asyncio.to_thread(lambda: partinfo.part_info(rt.p, rt.board() if rt.p.tw.has_pcb() else None, ref, True)) if ref else None
+        if body.get("ref") and not info:
+            return err(f"no part {body.get('ref')}", 404)
+        url = str(body.get("url") or (info or {}).get("datasheet") or "")
+        try:
+            f = await asyncio.to_thread(datasheets.fetch, rt.p.tw, url, (info or {}).get("mpn") or str(body.get("mpn") or ""),
+                                        (info or {}).get("lcsc") or str(body.get("lcsc") or ""))
+        except (ValueError, OSError) as e:
+            return err(f"could not save the data sheet: {e}")
+        rt.hub.emit("datasheets")
+        return jresp({"saved": f})
+
     @routes.get("/api/projects/{pid}/mentions")
     async def mentions(request):
         """What the message box can @-mention: the parts (from the schematic, with where each is on the board),

@@ -270,6 +270,19 @@ export class DocsPanel {
       if (e.path === this.current) it.classList.add("on");
       this.list.appendChild(it);
     }
+    // the data sheet library: each part's data sheet, and whether its pin table was read from it
+    const lib = (await api(`/api/projects/${enc(this.pid)}/datasheets`).catch(() => ({ items: [] }))).items || [];
+    if (lib.length) {
+      this.list.appendChild(h("div.listhead", h("b", "Data sheets")));
+      for (const d of lib) {
+        const path = d.pdf || d.pins_file;
+        const it = h("div.fitem", { "data-tip": d.pins ? `Pin table: ${d.pins} pins, from ${d.source}` : "No pin table saved", onclick: () => {
+          this.list.querySelectorAll(".fitem").forEach((x) => x.classList.remove("on")); it.classList.add("on"); this.current = path; viewFile(this.ws, path, this.view); } },
+          icon(d.pdf ? "file-text" : "table-2", 14), h("span.fn", d.name), d.pins ? h("span.sz", `${d.pins} pins`) : h("span.sz", d.size ? fmtSize(d.size) : ""));
+        if (path === this.current) it.classList.add("on");
+        this.list.appendChild(it);
+      }
+    }
     if (!this.current && docs.length) { this.current = docs[0].path; this.list.querySelector(".fitem").classList.add("on"); open(docs[0].path); }
   }
 }

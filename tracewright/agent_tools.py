@@ -472,14 +472,42 @@ def tool_list(rt, app):
         return _img(data, f"{args.get('what')} {args.get('sheet') or ''} {size[0]}x{size[1]} px")
 
     # ------------------------------------------------------------------ parts, stages, lessons, history
-    @reg("parts", "JLC / LCSC lookups (cached with the query date). action: search (query text: MPN or description; "
-         "returns LCSC code, package, JLC stock, Basic/Extended, price) | detail (query: an LCSC code; LCSC stock, "
-         "parameters, data sheet link).",
-         {"type": "object", "properties": {"action": {"type": "string", "enum": ["search", "detail"]}, "query": {"type": "string"},
-                                           "n": {"type": "integer"}}, "required": ["action", "query"]})
+    @reg("parts", "JLC / LCSC lookups (cached with the query date) and the project's data sheet library "
+         "(docs/datasheets). action: search (query text: MPN or description; returns LCSC code, package, JLC stock, "
+         "Basic/Extended, price) | detail (query: an LCSC code; LCSC stock, parameters, data sheet link) | datasheet "
+         "(query: an LCSC code; mpn: its part number) -- save its data sheet into the project, then read the pages you "
+         "need | pins (mpn, query: its LCSC code if it has one, pins: {number: name} from the data sheet's pin table, "
+         "source: the table and page) -- record the part's pinout as its data sheet gives it; the pinout check trusts "
+         "it over the parts library's.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["search", "detail", "datasheet", "pins"]},
+                                           "query": {"type": "string"}, "n": {"type": "integer"}, "mpn": {"type": "string"},
+                                           "pins": {"type": "object"}, "source": {"type": "string"}}, "required": ["action"]})
     async def parts(args):
-        from tw.jlc import Parts
+        from tw.jlc import Parts, LookupFailed
+        from tw import datasheets
         P = Parts(p.root)
+        if args["action"] == "pins":
+            try:
+                f = await run(datasheets.save_pins, p.tw, args.get("pins") or {}, args.get("source") or "", args.get("mpn") or "", args.get("query") or "")
+            except ValueError as e:
+                return _text(str(e), error=True)
+            hub.emit("datasheets")
+            return _text(f"saved the pin table: {f}. sch.pinout compares the symbol with it from the next checks run.")
+        if args["action"] == "datasheet":
+            code = (args.get("query") or "").strip().upper()
+            try:
+                d = await run(P.detail, code) if code else {}
+            except LookupFailed as e:
+                return _text(f"could not look {code} up: {e}", error=True)
+            url = (d or {}).get("datasheet") or ""
+            try:
+                f = await run(datasheets.fetch, p.tw, url, args.get("mpn") or "", code)
+            except (ValueError, OSError) as e:
+                return _text(f"no data sheet saved for {code or args.get('mpn')}: {e}", error=True)
+            hub.emit("datasheets")
+            return _text(f"saved {f} (read it with the Read tool, pages as needed)")
+        if not args.get("query"):
+            return _text("query: what to look up", error=True)
         if args["action"] == "search":
             r = await run(P.search, args["query"], 25)
             rows = [f"{it.get('lcsc')}  {it.get('mpn')}  {it.get('brand')}  {it.get('package')}  JLC stock {it.get('jlc_stock')}  "

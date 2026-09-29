@@ -108,7 +108,7 @@ def sch_pinout(ctx):
     parts are left to the polarity checks."""
     nl = ctx.netlist
     board = ctx.board if ctx.available("pcb") else None
-    out, unverified = [], []
+    out, unverified, checked_by_sheet = [], [], []
     # (1) symbol pins without pads
     if board is not None:
         for ref, part in sorted(nl.parts.items()):
@@ -126,26 +126,35 @@ def sch_pinout(ctx):
                                    {"ref": ref}, hint="Pick the footprint whose pad numbers match the symbol (or fix the "
                                    "symbol's pin numbers); an exposed pad usually needs its own pin in the symbol.",
                                    key=f"pinout:nopad:{ref}:{pin}"))
-    # (2) pin functions against the part's own pinout
+    # (2) pin functions against the part's own pinout: its data sheet's pin table when the project saved one
+    # (docs/datasheets), else the LCSC / EasyEDA library's
     db = None
     from tw.jlc import LookupFailed
+    from tw import datasheets
     for ref, part in sorted(nl.parts.items()):
         pins = nl.pins_of(ref)
         if len(pins) < 3 or not _assembled(nl, ref, part):
             continue
         code = _lcsc(part, board.footprints.get(ref) if board is not None else None)
-        if not code:
-            continue
-        if db is None:
-            db = _parts_db(ctx)
-        try:
-            _, _, names = db.jlc_footprint(code)
-        except LookupFailed as e:
-            unverified.append(f"{ref} ({e})")
-            continue
-        if not names:
-            unverified.append(f"{ref} (no pinout for {code})")
-            continue
+        fields = part.get("fields") or {}
+        mpn = fields.get("MPN") or fields.get("Mfr Part") or fields.get("Part Number") or ""
+        names, src, _ = datasheets.pins_for(ctx.p, lcsc=code, mpn=mpn, value=part.get("value", ""))
+        if names:
+            code = "the data sheet"                      # what the messages compare against
+            checked_by_sheet.append(ref)
+        else:
+            if not code:
+                continue
+            if db is None:
+                db = _parts_db(ctx)
+            try:
+                _, _, names = db.jlc_footprint(code)
+            except LookupFailed as e:
+                unverified.append(f"{ref} ({e})")
+                continue
+            if not names:
+                unverified.append(f"{ref} (no pinout for {code})")
+                continue
         bad, crit, known = [], [], 0
         for pin in pins:
             if pin not in names:
@@ -178,7 +187,8 @@ def sch_pinout(ctx):
         out.append(Finding("sch.pinout", "info", f"pinout not verified for {len(unverified)} part"
                            f"{'s' if len(unverified) != 1 else ''}: {', '.join(unverified[:6])}"
                            f"{' ...' if len(unverified) > 6 else ''}", key="pinout:unverified"))
-    examined(ctx, plural(len(nl.parts), "part"))
+    examined(ctx, plural(len(nl.parts), "part") + (f", {len(checked_by_sheet)} against the pin tables of their data sheets"
+                                                   if checked_by_sheet else ""))
     return out
 
 
