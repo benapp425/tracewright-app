@@ -1,7 +1,7 @@
 """Signal integrity, the layout side: return vias where fast signals change layer, stubs and
 series terminations, length-matched groups, and noisy nets kept away from analog lines and crystals."""
 import math, re, fnmatch, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 from .. import geom
 from .signal import fast_nets, plane_nets, usb_speed, coupling, tokens, ctx_grounds
 
@@ -48,6 +48,7 @@ def si_layer_change(ctx):
                            f"within {reach:g} mm ({near})", {"net": net, "x": x, "y": y},
                            hint="Place a ground via right beside each signal via (for a pair, one beside each, "
                                 "symmetrically), or keep the net on one layer.", key=f"layer_change:{net}"))
+    examined(ctx, plural(len(fast), "fast net"))
     return out
 
 
@@ -158,6 +159,7 @@ def si_stubs(ctx):
                                        f"its driver {dr} pin {dp}", {"ref": ref, "net": nets[i]},
                                        hint=f"Move {ref} within {reach:g} mm of the driver's pin: a series termination "
                                             "works only at the source.", key=f"stubs:series:{ref}"))
+    examined(ctx, plural(len(fast), "fast net"))
     return out
 
 
@@ -210,6 +212,7 @@ def si_length_groups(ctx):
                                f"{skew:.1f} mm (tolerance {tol:g} mm)", {"net": hi},
                                hint="Lengthen the short lines with serpentines (or reroute the long one); declare the "
                                     "group in checks.length_groups to make this exact.", key=f"length_groups:{name}"))
+    examined(ctx, plural(len(groups), "length-matched group"))
     return out
 
 
@@ -271,4 +274,5 @@ def si_noise(ctx):
                                        f"{fp.ref}'s pad {p.num}", {"ref": fp.ref, "net": t.net},
                                        hint="Keep noisy and fast tracks away from the crystal (and off the layer under it).",
                                        key=f"noise:xtal:{t.net}:{fp.ref}"))
+    examined(ctx, plural(len({t.net for t in noisy}), "noisy net") + " against " + ", ".join(x for x in (plural(len({t.net for t in analog}), "analog line") if analog else "", plural(len(crystals), "crystal") if crystals else "") if x))
     return out

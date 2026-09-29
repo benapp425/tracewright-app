@@ -32,6 +32,7 @@ class Context:
         self.notes = []
         self.stop = threading.Event()        # set to stop the run (the app's Stop button, an interrupted turn)
         self.abandoned = []                  # checks whose thread timed out or was left running at a stop
+        self.scopes = {}                     # check id -> what it examined ("3 regulators"), shown with its result
 
     def stopped(self):
         return self.stop.is_set()

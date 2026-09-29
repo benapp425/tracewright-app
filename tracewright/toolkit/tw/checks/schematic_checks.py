@@ -1,7 +1,7 @@
 """Schematic checks that KiCad's ERC does not make: readability of the plotted sheets, wires that
 silently merge nets, and net names that are probably typos."""
 import re, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 
 # KiCad's default schematic theme as plotted (kicad-cli --theme _builtin_default)
 WIRE, NC, BODY = "#009600", "#000084", "#840000"
@@ -100,6 +100,7 @@ def sch_render(ctx):
             out.append(Finding("sch.render", "warning", f"{kind}: {msg}",
                                {"sheet": name_path, "file": sh.filename if sh else "", "x": round(x, 2), "y": round(y, 2)},
                                key=f"sch.render:{name_path}:{kind}:{msg}"))
+    examined(ctx, plural(len(ctx.svgs), "plotted sheet"))
     return out
 
 
@@ -143,6 +144,7 @@ def sch_wiring(ctx):
                                        key=f"sch.wiring:{sh.name_path}:{a}:{b}"))
         if sh.sf is not None:
             pass
+    examined(ctx, plural(sum(len(sh.sf.wires) for sh in ctx.hier.sheets), "wire") + " on " + plural(len(ctx.hier.sheets), "sheet"))
     return out
 
 
@@ -308,6 +310,7 @@ def sch_style(ctx):
                                                 "D diode or LED, Q transistor, U IC, J connector, SW switch, Y crystal, F fuse, "
                                                 "FB ferrite, TP test point, H mounting hole.", key=f"style:ref:{s_.ref}"))
                     break
+    examined(ctx, plural(len(ctx.hier.sheets), "sheet"))
     return out
 
 
@@ -378,6 +381,7 @@ def sch_text(ctx):
                 out.append(Finding("sch.text", "warning", f"{s_.ref} is a box standing in for PWR_FLAG", {**where, "ref": s_.ref},
                                    hint="Use KiCad's power:PWR_FLAG: a small flag on the supply wire it marks.",
                                    key=f"text:flag:{s_.ref}"))
+    examined(ctx, plural(len(seen), "sheet"))
     return out
 
 
@@ -427,6 +431,7 @@ def sch_conventions(ctx):
                 out.append(Finding("sch.conventions", "info", f"{s_.ref} value {v}: the project writes values "
                                    f"{'like 4k7, 100n' if want == 'iec' else 'like 4.7k, 100nF'}", {"sheet": sh.name_path, "ref": s_.ref},
                                    hint="One notation throughout (Schematic settings).", key=f"conv:val:{s_.ref}"))
+    examined(ctx, ", ".join(sorted(set(chosen) & {"active_low", "values"})).replace("active_low", "active-low names") + " on " + plural(len(ctx.netlist.nets), "net"))
     return out
 
 
@@ -484,4 +489,5 @@ def sch_nets(ctx):
             out.append(Finding("sch.nets", "warning", f"net {nl.short(full)} reaches only {r} pin {p}",
                                {"net": nl.short(full), "ref": r}, hint="A label with a typo, or a missing connection.",
                                key=f"sch.nets:single:{full}"))
+    examined(ctx, plural(len(short), "named net"))
     return out

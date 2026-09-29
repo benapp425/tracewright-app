@@ -65,7 +65,8 @@ def cmd_check(a):
         def prog(c, r):
             if r["status"] == "running":
                 return
-            extra = f"  ({r.get('reason')})" if r["status"] == "skipped" and r.get("reason") else ""
+            extra = f"  ({r.get('reason')})" if r["status"] == "skipped" and r.get("reason") else \
+                (f"  {r['scope']}" if r.get("scope") else "")
             print(f"  {'n/a' if r.get('na') else r['status']:<7} {c.id:<24} {len(r['findings']):>3}  "
                   f"{r.get('seconds', 0):5.1f}s{extra}", flush=True)
     res = run_all(p, only=a.ids or None, refresh=a.refresh, offline=a.offline or None, progress=prog)

@@ -8,7 +8,7 @@ DRC pass all of them. Part data comes from the project's sourcing cache (the BOM
 pick-and-place check fill it); a part the data does not cover is reported as not verified, never as a
 pass."""
 import re, time
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 
 # ----------------------------------------------------------------------------- pin functions
 # Names that mean the same terminal, by class. Anything else compares by its own tokens (PB3, IO5, CC1).
@@ -178,6 +178,7 @@ def sch_pinout(ctx):
         out.append(Finding("sch.pinout", "info", f"pinout not verified for {len(unverified)} part"
                            f"{'s' if len(unverified) != 1 else ''}: {', '.join(unverified[:6])}"
                            f"{' ...' if len(unverified) > 6 else ''}", key="pinout:unverified"))
+    examined(ctx, plural(len(nl.parts), "part"))
     return out
 
 
@@ -297,6 +298,7 @@ def bom_package(ctx):
         out.append(Finding("bom.package", "info", f"package not verified for {len(unverified)} part"
                            f"{'s' if len(unverified) != 1 else ''}: {', '.join(unverified[:6])}"
                            f"{' ...' if len(unverified) > 6 else ''}", key="package:unverified"))
+    examined(ctx, plural(len(nl.parts), "part"))
     return out
 
 
@@ -442,4 +444,5 @@ def power_domains(ctx):
                                        f"{ref} ({nl.parts[ref].get('value', '')}) is supplied from {rail} ({v:g} V) but is "
                                        f"rated {rng[0]:g}-{rng[1]:g} V", {"ref": ref},
                                        hint="Supply it from a rail inside its range.", key=f"domains:rating:{ref}:{rail}"))
+    examined(ctx, plural(len(ics), "IC") + " on their supply rails")
     return out

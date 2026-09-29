@@ -1,6 +1,6 @@
 """Power: copper sized for the current, and decoupling next to every supply pin."""
 import math, re, fnmatch, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 from .. import geom
 
 POWER_PIN = re.compile(r"^(VCC|VDD|AVDD|DVDD|VDDA|VDDIO|VDD_IO|VCCIO|VIN|PVIN|AVIN|VBAT|VS|V\+|VCC\d?|VDD\d?|VDDQ|VIO|"
@@ -267,6 +267,14 @@ def power_width(ctx):
                                 '{"power_paths": [{"net": "' + open_[0] + '", "from": "U1.2", "to": "J1", "amps": 2}]} in '
                                 'tracewright.json; waive this finding if the rails are known to be light.',
                            key="power.width:undeclared"))
+    if not paths and not checked and not fused and not rails:
+        raise NotApplicable("no supply rails")
+    parts = [plural(len(checked), "rail") + " with declared currents"]
+    if fused:
+        parts.append(plural(len(fused), "fused net"))
+    if open_:
+        parts.append(f"{len(open_)} undeclared")
+    examined(ctx, ", ".join(parts))
     return out
 
 
@@ -345,6 +353,9 @@ def power_decoupling(ctx):
                                {"ref": ref, "net": net, "x": fp.x, "y": fp.y},
                                hint="Place the small capacitor right at the pin, on the same side, with a short ground return.",
                                key=f"decoup:far:{ref}:{net}"))
+    if not by_ic:
+        raise NotApplicable("no IC supply pins")
+    examined(ctx, f"{plural(sum(len(v) for v in by_ic.values()), 'supply pin')} on {plural(len({r for r, _ in by_ic}), 'part')}")
     return out
 
 
@@ -505,6 +516,9 @@ def power_flyback(ctx):
                                {"net": n, "ref": conns[0]},
                                hint="Put a diode across the load at the connector (cathode to the positive side): SS34 or "
                                     "similar, rated for the load current.", key=f"flyback:out:{n}"))
+    loads = sum(1 for n in nl.nets if INDUCTIVE.search(nl.short(n) or ""))
+    examined(ctx, ", ".join(x for x in (plural(len(relays), "relay") if relays else "", plural(loads, "inductive load net")
+                                        if loads else "") if x))
     return out
 
 
@@ -625,6 +639,7 @@ def power_cap_voltage(ctx):
         lookups = Parts(ctx.p.root, deadline=time.time() + float(ctx.setting("checks.lookup_budget_s", 90) or 90) / 2,
                         stop=ctx.stop)
     out, unknown = [], []
+    compared = []
     for ref, part in sorted(placed_parts(ctx).items()):
         if not ref.startswith("C") or ref.startswith(("CN", "CON")):
             continue
@@ -635,6 +650,7 @@ def power_cap_voltage(ctx):
         rail = a if b in grounds else b if a in grounds else None
         if rail not in volts:
             continue
+        compared.append((ref, rail))
         v = volts[rail]
         rating, src = cap_rating(part)
         if rating is None and lookups is not None:
@@ -665,6 +681,9 @@ def power_cap_voltage(ctx):
                            f"rails: {refs}{' ...' if len(unknown) > 10 else ''}", {"ref": unknown[0][0], "net": unknown[0][1]},
                            hint="Put the rating in the value (\"10uF 25V\") or a Voltage field, or give each an LCSC code "
                                 "so it can be looked up.", key="capv:unknown"))
+    if not compared:
+        raise NotApplicable("no capacitors on a rail of known voltage")
+    examined(ctx, f"{plural(len(compared), 'capacitor')} on {plural(len({r for _, r in compared}), 'rail')}")
     return out
 
 
@@ -728,4 +747,5 @@ def power_gates(ctx):
                            {"ref": q, "net": ctl},
                            hint=f"Add a pull resistor (10k-100k) from the {what} to {src or 'its source'}, the side that keeps "
                                 f"{q} off.", key=f"gate:float:{q}"))
+    examined(ctx, plural(len(qs), "transistor"))
     return out

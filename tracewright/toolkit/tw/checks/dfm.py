@@ -1,5 +1,5 @@
 """Manufacturability against the fab profile (tw/dfm.py): the rules KiCad enforces, and the copper."""
-from . import check, Finding
+from . import check, Finding, examined, plural, NotApplicable
 from .. import geom
 
 
@@ -38,6 +38,7 @@ def dfm_rules(ctx):
         cmp(f"class:{name}:via_drill", vd, "min_via_drill", None, f"net class {name} via drill")
         if vd and vr:
             cmp(f"class:{name}:annular", (vr - vd) / 2, "min_annular", "rec_annular", f"net class {name} via annular ring")
+    examined(ctx, f"{ {'jlcpcb': 'JLCPCB', 'pcbway': 'PCBWay'}.get(fab['_house'], fab['_house'])} {fab['_layers']}-layer limits")
     return out
 
 
@@ -102,4 +103,5 @@ def dfm_copper(ctx):
     if fl and int(fl) != len(b.copper):
         out.append(Finding("dfm.copper", "warning", f"tracewright.json says {fl} layers but the board has {len(b.copper)}",
                            key="dfm.copper:layers"))
+    examined(ctx, plural(len(b.tracks), "track") + ", " + plural(len(b.vias), "via") + ", " + plural(len(b.fp_list), "footprint"))
     return out

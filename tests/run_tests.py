@@ -172,6 +172,28 @@ def fixture_passes_its_checks():
 
 
 @test(needs=("kicad",))
+def every_check_says_what_it_examined():
+    """A pass means something was checked: on the demo board every built-in check either names what it
+    looked at ("1 regulator (U1)") or is n/a with the reason; waived findings are counted by severity."""
+    from tw.checks import runner, load_all, REGISTRY
+    p = fixture_copy("scopes")
+    res = runner.run_all(p, offline=True, write=True)
+    builtin = {c.id for c in load_all()}
+    bare = [c["id"] for c in res["checks"] if c["id"] in builtin and c["status"] in ("pass", "warn", "fail") and not c.get("scope")]
+    assert not bare, f"checks that pass without saying what they examined: {bare}"
+    silent = [c["id"] for c in res["checks"] if c["status"] == "skipped" and not c.get("reason")]
+    assert not silent, silent
+    by = {c["id"]: c for c in res["checks"]}
+    assert by["lessons.usb_c"]["scope"].startswith("1 USB-C receptacle"), by["lessons.usb_c"]
+    assert by["lessons.rpi_ffc"].get("na") and "camera" in by["lessons.rpi_ffc"]["reason"], by["lessons.rpi_ffc"]
+    assert set(res["waived"]) == {"error", "warning", "info"}
+    md = open(os.path.join(p.build, "readiness.md")).read()
+    assert "n/a: Raspberry Pi camera FFC numbering (no 15- or 22-pin camera FFC connector)" in md, md[:800]
+    txt = runner.summary_text(res)
+    assert "USB-C receptacle" in txt
+
+
+@test(needs=("kicad",))
 def schematic_field_edit_in_place():
     from tw.sch import edit
     from tw import kicad

@@ -1,7 +1,7 @@
 """Checks learned the hard way: each one caught (or would have caught) a real board mistake that
 passed ERC and DRC. The lesson behind each is in the Tracewright knowledge base."""
 import re, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 from .. import geom
 
 
@@ -17,10 +17,12 @@ def usb_c(ctx):
     breaks orientation detection and some chargers give no power at all."""
     nl = ctx.netlist
     out = []
+    seen = []
     for ref, p in nl.parts.items():
         pins = set(nl.pins_of(ref))
         if not {"A6", "A7", "B6", "B7"} <= pins:
             continue
+        seen.append(ref)
         a6, b6, a7, b7 = (nl.net_of(ref, x) for x in ("A6", "B6", "A7", "B7"))
         w = {"ref": ref}
         if a6 != b6 and "NC" not in (a6, b6):
@@ -52,6 +54,9 @@ def usb_c(ctx):
                 if net in (None, "NC"):
                     out.append(Finding("lessons.usb_c", "warning", f"{ref}: {pin} (CC) is not connected -- a USB-C source "
                                        "gives no VBUS without the 5.1 k pull-down", w, key=f"usbc:ccfloat:{ref}:{pin}"))
+    if not seen:
+        raise NotApplicable("no USB-C receptacle")
+    examined(ctx, plural(len(seen), "USB-C receptacle") + f" ({', '.join(seen[:4])})")
     return out
 
 
@@ -87,10 +92,15 @@ def i2c_pullups(ctx):
     power = ctx.power_nets()
     ext = set(ctx.setting("checks.external_pullups", []) or [])
     out = []
+    bus, external = [], []
     for full, nodes in nl.nets.items():
         s = nl.short(full)
-        if not re.search(r"(^|_)(SDA|SCL)\d*($|_)|I2C\d*_?(SDA|SCL)", s, re.I) or s in ext:
+        if not re.search(r"(^|_)(SDA|SCL)\d*($|_)|I2C\d*_?(SDA|SCL)", s, re.I):
             continue
+        if s in ext:
+            external.append(s)
+            continue
+        bus.append(s)
         ok = False
         for r, pin in nodes:
             if not r.startswith("R") or r.startswith("RN"):
@@ -109,6 +119,9 @@ def i2c_pullups(ctx):
                         "and note where they are; otherwise add 2.2k-10k to the bus supply.")
             out.append(Finding("lessons.i2c", "warning", f"{s} has no pull-up resistor to a supply", {"net": s},
                                hint=hint, key=f"i2c:{s}"))
+    if not bus and not external:
+        raise NotApplicable("no I2C lines (no SDA / SCL nets)")
+    examined(ctx, plural(len(bus), "I2C line") + (f", {len(external)} pulled up off the board" if external else ""))
     return out
 
 
@@ -120,10 +133,12 @@ def led_resistor(ctx):
     nl = ctx.netlist
     rails = ctx.power_nets() | ctx.ground_nets()
     out = []
+    leds = []
     for ref, p in nl.parts.items():
         is_led = ref.startswith("LED") or (ref.startswith("D") and ("LED" in p["part"].upper() or "LED" in p["footprint"].upper()))
         if not is_led or p["dnp"]:
             continue
+        leds.append(ref)
         pins = nl.pins_of(ref)
         nets = [nl.net_of(ref, x) for x in pins]
         if all(n in rails for n in nets):
@@ -141,6 +156,9 @@ def led_resistor(ctx):
         if not ok:
             out.append(Finding("lessons.led", "warning", f"{ref} has no series resistor or driver on its private side",
                                {"ref": ref}, key=f"led:{ref}"))
+    if not leds:
+        raise NotApplicable("no LEDs")
+    examined(ctx, plural(len(leds), "LED"))
     return out
 
 
@@ -153,12 +171,14 @@ def rpi_ffc(ctx):
     nl = ctx.netlist
     grounds, power = ctx.ground_nets(), ctx.power_nets()
     out = []
+    ffc = []
     for ref, p in nl.parts.items():
         fpn = p["footprint"].upper()
         pins = nl.pins_of(ref)
         n = len([x for x in pins if x.isdigit()])
         if not (("FH12" in fpn or "FFC" in fpn or "CSI" in p["value"].upper() or "CAM" in p["value"].upper()) and n in (15, 22)):
             continue
+        ffc.append(ref)
         first, last = nl.net_of(ref, "1"), nl.net_of(ref, str(n))
         if first in power and last in grounds:
             out.append(Finding("lessons.rpi_ffc", "error", f"{ref}: pin 1 is {first} and pin {n} is {last} -- reversed against "
@@ -169,6 +189,9 @@ def rpi_ffc(ctx):
             out.append(Finding("lessons.rpi_ffc", "info", f"{ref}: pin 1 GND / pin {n} {last} matches the Raspberry Pi pinout; "
                                "also confirm the footprint's pad 1 is where the cable's pin 1 lands", {"ref": ref},
                                key=f"ffc:ok:{ref}"))
+    if not ffc:
+        raise NotApplicable("no 15- or 22-pin camera FFC connector")
+    examined(ctx, plural(len(ffc), "camera connector"))
     return out
 
 
@@ -180,6 +203,7 @@ def crystal_gap(ctx):
     b = ctx.board
     out = []
     fills = [(z, l, pl) for z in b.zones if not z.is_rule_area for l, pls in z.fills.items() for pl in pls]
+    xtals = []
     for fp in b.fp_list:
         lib = fp.lib_id.lower()
         if not (fp.ref.startswith(("Y", "X")) and ("crystal" in lib or "xtal" in lib or "osc" not in lib)):
@@ -189,6 +213,7 @@ def crystal_gap(ctx):
         pads = [p for p in fp.pads if p.net]
         if len(pads) < 2:
             continue
+        xtals.append(fp.ref)
         layer = "F.Cu" if fp.side == "F" else "B.Cu"
         a, c = pads[0], pads[1]
         pts = [(a.x + (c.x - a.x) * t, a.y + (c.y - a.y) * t) for t in (0.4, 0.5, 0.6)]
@@ -212,6 +237,9 @@ def crystal_gap(ctx):
                                {"ref": fp.ref, "x": fp.x, "y": fp.y},
                                hint="Add a rule area in the footprint (no tracks, vias or pour) over the pad gap.",
                                key=f"crystal:{fp.ref}"))
+    if not xtals:
+        raise NotApplicable("no crystals")
+    examined(ctx, plural(len(xtals), "crystal") + f" ({', '.join(xtals[:4])})")
     return out
 
 
@@ -225,8 +253,9 @@ def thermal_pad(ctx):
     no heat away; regulators and drivers overheat. Counts vias inside the pad outline."""
     b = ctx.board
     if len(b.copper) < 2:
-        return []
+        raise NotApplicable("a one-layer board: no other layer for thermal vias to reach")
     out = []
+    eps = []
     for fp in b.fp_list:
         if not EP_PKG.search(fp.lib_id) or not fp.pads:
             continue
@@ -234,6 +263,7 @@ def thermal_pad(ctx):
         others = [p for p in fp.pads if p is not big]
         if not others or big.w * big.h < 3 * max(p.w * p.h for p in others) or not big.net:
             continue
+        eps.append(fp.ref)
         n = sum(1 for v in b.vias if v.net == big.net and geom.inside((v.x, v.y), big.poly))
         pad_layer = "F.Cu" if fp.side == "F" else "B.Cu"
         other_copper = big.net in ctx.ground_nets() or any(
@@ -244,6 +274,9 @@ def thermal_pad(ctx):
                                "has no thermal vias", {"ref": fp.ref, "x": big.x, "y": big.y},
                                hint="Add a grid of 0.3 mm vias (tented or plugged) into the pad to the ground plane.",
                                key=f"thermal:{fp.ref}"))
+    if not eps:
+        raise NotApplicable("no exposed pads")
+    examined(ctx, plural(len(eps), "exposed pad") + f" ({', '.join(eps[:5])})")
     return out
 
 
@@ -255,6 +288,7 @@ def control_pins(ctx):
     nl = ctx.netlist
     out = []
     pat = re.compile(r"^(~?\{?)(N?RST|N?RESET|RESETN|RST_?N|MCLR|EN|CE|CHIP_?EN|CHIP_?PU|RUN|SHDN|~\{SHDN\}|PWRKEY|nSLEEP)(\}?)$", re.I)
+    seen = 0
     for (ref, pin), full in nl.pin.items():
         if not ref.startswith(("U", "IC")):
             continue
@@ -263,11 +297,15 @@ def control_pins(ctx):
             continue                         # names carry alternate functions: "~{RESET}/PB5"
         if nl.pin_type(ref, pin) in ("output", "open_collector", "open_emitter", "power_out", "tri_state"):
             continue                         # a reset / power-good *output* may be left open
+        seen += 1
         net = nl.short(full)
         others = [n for n in nl.nets.get(full, []) if n != (ref, pin)]
         if net == "NC" or not others:
             out.append(Finding("lessons.control_pins", "warning", f"{ref} pin {pin} ({name}) is not connected to anything",
                                {"ref": ref}, key=f"ctl:{ref}:{pin}"))
+    if not seen:
+        raise NotApplicable("no reset or enable inputs")
+    examined(ctx, plural(seen, "reset or enable input"))
     return out
 
 
@@ -287,6 +325,7 @@ def mechanical(ctx):
     if not tps and len(b.fp_list) > 15:
         out.append(Finding("lessons.mechanical", "info", "no test points: add pads on the rails and key signals for bring-up",
                            key="mech:tp"))
+    examined(ctx, f"{plural(len(holes), 'mounting hole')}, {plural(len(tps), 'test point')}")
     return out
 
 
@@ -363,11 +402,13 @@ def strapping(ctx):
     grounds, rails = ctx.ground_nets(), ctx.power_nets()
     out = []
     found = False
+    chips = []
     for ref, part in sorted(nl.parts.items()):
         fam = _esp_family(part)
         pins = nl.pins_of(ref)
         if fam:
             found = True
+            chips.append(ref)
             rules = {g: (lvl, what, sev) for g, lvl, what, sev in STRAPS[fam]}
             for x in pins:
                 name = nl.pin_name(ref, x)
@@ -422,6 +463,7 @@ def strapping(ctx):
             if not ref.startswith(("U", "IC")) or fam:
                 continue
             found = True
+            chips.append(ref)
             full = nl.pin.get((ref, x))
             net = nl.short(full) if full else "NC"
             if net == "NC" or len(nl.nets.get(full, [])) < 2:
@@ -436,6 +478,7 @@ def strapping(ctx):
                                    "the ROM bootloader", {"ref": ref, "net": net}, key=f"strap:boot0hi:{ref}"))
     if not found:
         raise NotApplicable("no ESP32 or chip with a BOOT0 pin")
+    examined(ctx, "strap pins of " + ", ".join(sorted(set(chips))[:4]))
     return out
 
 
@@ -451,6 +494,7 @@ def open_drain(ctx):
     ext = set(ctx.setting("checks.external_pullups", []) or [])
     out = []
     seen = False
+    lines = 0
     for full, nodes in sorted(nl.nets.items()):
         s = nl.short(full)
         if not s or s == "NC" or s in grounds or s in rails or s in ext:
@@ -459,6 +503,7 @@ def open_drain(ctx):
         if not od:
             continue
         seen = True
+        lines += 1
         if any(not r.startswith(("U", "IC")) for r, _ in nodes):      # a resistor, coil, LED or connector is there
             continue
         mcu = [f"{r}.{nl.pin_name(r, x)}" for r, x in nodes if (r, x) not in od and
@@ -474,4 +519,5 @@ def open_drain(ctx):
                                key=f"od:none:{s}"))
     if not seen:
         raise NotApplicable("no open-drain outputs in the netlist (their pins' types)")
+    examined(ctx, plural(lines, "open-drain line"))
     return out

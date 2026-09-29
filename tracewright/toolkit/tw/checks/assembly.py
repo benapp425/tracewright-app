@@ -2,7 +2,7 @@
 that are hard or impossible to solder with an iron, what to order to make it easier (a stencil, a
 hotplate), and roughly how long the soldering takes."""
 import re
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 
 TOO_SMALL = re.compile(r"(?<!\d)(0201|01005|008004)(?!\d)")
 SMALL = re.compile(r"(?<!\d)0402(?!\d)")
@@ -86,4 +86,5 @@ def hand_assembly(ctx):
     if smd_pads + tht_pads:
         out.append(Finding("assembly.hand", "info", f"about {smd_pads + tht_pads} joints ({smd_pads} SMD, {tht_pads} through-hole): "
                            f"roughly {max(0.25, round(minutes / 60 * 4) / 4):g} h of soldering per board", key="assembly:time"))
+    examined(ctx, plural(len(b.fp_list), "footprint"))
     return out

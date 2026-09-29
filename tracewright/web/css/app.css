@@ -581,6 +581,7 @@ a.brand:hover { text-decoration: none; }
 .noteline { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
 .noteline svg.ic { width: 13px; height: 13px; color: var(--text-3); flex: none; }
 .noteline.waiting { color: var(--text); }
+.crow .ch .t .scope { margin-left: 8px; font-size: 12px; color: var(--text-3); font-weight: 400; }
 .noteline.waiting svg.ic { color: var(--accent); }
 .errline { font-size: 12px; color: var(--err); display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 9px; background: var(--err-soft); }
 /* what Claude is doing now */

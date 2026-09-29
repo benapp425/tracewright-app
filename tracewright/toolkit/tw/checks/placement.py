@@ -1,6 +1,6 @@
 """Placement: every part is on the board, nothing collides, polarity is marked, silk is readable."""
 import math, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 from .. import geom
 
 POLARISED_PREFIX = ("D", "LED", "BT", "CR", "ZD")
@@ -69,6 +69,7 @@ def pcb_placement(ctx):
     if bottom and ctx.setting("fab.assembly", True):
         out.append(Finding("pcb.placement", "info", f"{len(bottom)} SMD parts on the bottom (two-sided assembly): "
                            + ", ".join(bottom[:10]), key="pcb.placement:bottom"))
+    examined(ctx, plural(len(b.fp_list), "footprint"))
     return out
 
 
@@ -100,9 +101,11 @@ def pcb_polarity(ctx):
     nearer one pad; a symmetric silk outline cannot tell an assembler which way round."""
     b = ctx.board
     out = []
+    polarized = []
     for fp in b.fp_list:
         if not _is_polarized(fp) or len(fp.pads) < 2 or fp.dnp:
             continue
+        polarized.append(fp.ref)
         silk = "F.SilkS" if fp.side == "F" else "B.SilkS"
         pts = []
         for s in fp.shapes:
@@ -134,6 +137,9 @@ def pcb_polarity(ctx):
                                {"ref": fp.ref, "x": fp.x, "y": fp.y},
                                hint="Use a footprint with a cathode bar / '+' mark, or add one on the silkscreen.",
                                key=f"pcb.polarity:sym:{fp.ref}"))
+    if not polarized:
+        raise NotApplicable("no polarized parts")
+    examined(ctx, plural(len(polarized), "polarized part"))
     return out
 
 
@@ -164,6 +170,7 @@ def pcb_silk(ctx):
                            {"ref": refs[0] if refs else "", "x": small[0][1].x, "y": small[0][1].y},
                            hint="They may print blurred; enlarge them or accept it (waive this finding).",
                            key=f"pcb.silk:small:{len(small)}"))
+    examined(ctx, plural(len(b.fp_list), "footprint") + ", " + plural(len(b.texts), "board text"))
     return out
 
 
@@ -279,4 +286,5 @@ def pcb_antenna(ctx):
                                        {"ref": fp.ref, "x": fp.x, "y": fp.y},
                                        hint="Put the antenna end of the module at the board edge (or over it), or keep 15 mm "
                                             "clear of copper around it.", key=f"ant:edge:{fp.ref}"))
+    examined(ctx, plural(len(mods), "radio module"))
     return out

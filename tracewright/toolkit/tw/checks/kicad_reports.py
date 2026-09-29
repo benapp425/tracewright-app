@@ -1,5 +1,5 @@
 """KiCad's own checks: ERC, DRC (with zone refill) and schematic <-> board parity."""
-from . import check, Finding
+from . import check, Finding, examined, plural, NotApplicable
 
 # DRC types that are style advice rather than defects (reported as info)
 INFO_TYPES = {"lib_footprint_issues", "lib_footprint_mismatch", "footprint_symbol_field_mismatch",
@@ -33,6 +33,7 @@ def erc(ctx):
             out.append(Finding("erc", sev, msg, _where(items[0] if items else {}, {"sheet": sh.get("path", "/"),
                                                                                   "type": v.get("type")}),
                                key=f"erc:{v.get('type')}:{desc}"))
+    examined(ctx, plural(len(ctx.erc.get("sheets", [])), "sheet"))
     return out
 
 
@@ -81,4 +82,5 @@ def drc(ctx):
                            _where(items[0] if items else {}, {"type": "parity"}),
                            hint="Update the board from the schematic (Tools > Update PCB, or ./tw sync).",
                            key=f"drc:parity:{v.get('description', '')}:{desc}"))
+    examined(ctx, plural(len(ctx.board.nets), "net") + ", " + plural(len(ctx.board.fp_list), "footprint"))
     return out

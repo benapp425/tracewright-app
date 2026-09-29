@@ -2,7 +2,7 @@
 capacity along the current paths, switching converters laid out around their hot loop, and pours that
 are connected and stitched."""
 import math, re, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 from .. import geom
 from .power import (ipc2221_width, _currents, _current_for, copper_thickness, _cap_between, rail_voltages,
                     _pads_for, _terminals, _source)
@@ -134,6 +134,7 @@ def power_regulators(ctx):
                                        {"ref": ref, "net": net}, hint="Check the data sheet's minimum output capacitance "
                                        "(and its ESR range): too little makes an LDO oscillate.",
                                        key=f"regulators:bulk:{ref}:{net}"))
+    examined(ctx, plural(len(regs), "regulator") + " (" + ", ".join(r["ref"] for r in regs[:4]) + ")")
     return out
 
 
@@ -211,6 +212,7 @@ def power_thermal(ctx):
         out.append(Finding("power.thermal", "info", f"temperature not verified for {', '.join(unverified[:6])}"
                            f"{' ...' if len(unverified) > 6 else ''}", key="thermal:unverified",
                            hint='Declare the load, e.g. "checks": {"currents": {"+3V3": 0.3}} in tracewright.json.'))
+    examined(ctx, plural(len(lin), "linear regulator"))
     return out
 
 
@@ -305,6 +307,7 @@ def power_drop(ctx):
                                    hint=f"Put {math.ceil(amps / max(_via_amps(drill), 1e-6))} or more vias side by side "
                                         "where the current changes layer.", key=f"drop:vias:{short}:{x:.1f}:{y:.1f}"))
                 break
+    examined(ctx, plural(len(jobs), "supply path"))
     return out
 
 
@@ -376,6 +379,7 @@ def power_switcher(ctx):
                                        {"ref": ref, "net": fnet, "x": close[1], "y": close[2]},
                                        hint="Route the feedback away from the SW node and the inductor, from the output "
                                             "capacitor, on the quiet side.", key=f"switcher:fb:{ref}:{fnet}"))
+    examined(ctx, plural(len(sws), "switching converter"))
     return out
 
 
@@ -500,4 +504,5 @@ def power_pours(ctx):
                                "through thermal-relief spokes only", {"ref": r, "net": pad.net},
                                hint="Connect this pad to the pour solid (zone or pad setting), or add a wide track.",
                                key=f"pours:spokes:{r}.{n}"))
+    examined(ctx, plural(len(zones), "pour") + " on " + plural(len({z.net for z in zones}), "net"))
     return out

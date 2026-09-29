@@ -2,7 +2,7 @@
 it -- detours, needless vias, dangling copper, tracks squeezed between fine-pitch pads. The score is
 also what the router is benchmarked on."""
 import math, re, collections, statistics
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 from .. import geom
 
 ESD = re.compile(r"tvs|esd|usblc|pesd|tpd\d|smaj|smbj|smcj|sm712|prtr|srv05|rclamp|sp05\d|nup\d|lesd|cdsot|sesd|"
@@ -64,6 +64,7 @@ def pcb_esd(ctx):
                 out.append(Finding("pcb.esd", "info", f"{closer[0].ref} sits on {_short(p.net)} between {c.ref} and its "
                                    f"protection {fp.ref}", {"ref": closer[0].ref, "net": p.net},
                                    key=f"esd:order:{fp.ref}:{p.net}"))
+    examined(ctx, plural(len(prot), "protection part") + ", " + plural(len(conns), "connector"))
     return out
 
 
@@ -224,4 +225,5 @@ def route_quality(ctx):
     med = f"{total['detour_median']:.2f}x" if total["detour_median"] else "-"
     out.append(Finding("route.quality", "info", f"scorecard: {total['nets']} routed signal nets, {total['length']:.0f} mm of track, "
                        f"{total['signal_vias']} signal vias, median detour {med}", key="quality:score"))
+    examined(ctx, plural(len(nets), "routed net"))
     return out

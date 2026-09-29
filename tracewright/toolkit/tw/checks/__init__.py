@@ -11,7 +11,9 @@ Severity:
   info      worth knowing; never blocks a release
 
 A check that has nothing to look at on this board (no USB-C receptacle, no relays) raises
-NotApplicable(reason): it is reported as skipped with the reason, never as a pass. A check that
+NotApplicable(reason): it is reported as skipped with the reason, never as a pass. A check that does
+look says what it looked at with examined(ctx, "3 regulators"), shown beside its result, so a pass
+means something was checked. A check that
 cannot tell whether the board is right (no currents declared, a lookup that did not answer) says so
 with a warning or an error, again never a silent pass. Each check runs with a time limit
 (@check(timeout=...), tracewright.json checks.timeout_s) and a run can be stopped between checks.
@@ -46,6 +48,22 @@ class Finding:
 
 class NotApplicable(Exception):
     """Raised by a check that has nothing to look at on this board; the reason is shown."""
+
+
+_current = threading.local()                 # the check running on this thread
+
+
+def examined(ctx, what):
+    """Record what the running check looked at ("3 regulators, 7 capacitors"); shown with its result."""
+    cid = getattr(_current, "id", None)
+    if cid and what:
+        ctx.scopes[cid] = str(what)
+    return what
+
+
+def plural(n, noun, many=None):
+    """'1 net', '3 nets', '2 buses' (many= for irregular plurals)."""
+    return f"{n} {noun if n == 1 else (many or noun + 's')}"
 
 
 class Stopped(Exception):
@@ -106,6 +124,7 @@ def _call(c, ctx, limit):
     box = {}
 
     def work():
+        _current.id = c.id
         try:
             box["found"] = c.fn(ctx) or []
         except BaseException as e:                                  # noqa: B902 - reported, never swallowed
@@ -152,8 +171,12 @@ def run(ctx, checks, progress=None):
         if progress:
             progress(c, {**row, "status": "running", "findings": []})
         limit = max(base, c.timeout or DEFAULT_TIMEOUT)
+        ctx.scopes.pop(c.id, None)
         found, err = _call(c, ctx, limit)
         secs = round(time.time() - t0, 2)
+        scope = ctx.scopes.pop(c.id, None)
+        if scope:
+            row["scope"] = scope
         if isinstance(err, NotApplicable):
             results.append({**row, "status": "skipped", "reason": str(err) or "not applicable", "findings": [],
                             "seconds": secs, "na": True})
@@ -171,21 +194,25 @@ def run(ctx, checks, progress=None):
                                                  hint=getattr(err, "tb", "")[-1200:]).to_json()]})
         else:
             waived = ctx.waivers()
-            kept, waived_n = [], 0
+            kept, waived_n, waived_by = [], 0, {}
             for f in found:
                 if f.key in waived:
                     waived_n += 1
+                    waived_by[f.severity] = waived_by.get(f.severity, 0) + 1
                 else:
                     kept.append(f)
             status = "fail" if any(f.severity == "error" for f in kept) else \
                 ("warn" if any(f.severity == "warning" for f in kept) else "pass")
             results.append({**row, "status": status, "findings": [f.to_json() for f in kept], "waived": waived_n,
-                            "seconds": secs})
+                            **({"waived_by": waived_by} if waived_by else {}), "seconds": secs})
         if progress:
             progress(c, results[-1])
     counts = {s: 0 for s in SEVERITIES}
+    waived_counts = {s: 0 for s in SEVERITIES}
     for r in results:
         for f in r["findings"]:
             counts[f["severity"]] += 1
+        for sev, n in (r.get("waived_by") or {}).items():
+            waived_counts[sev] += n
     return {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"), "seconds": round(time.time() - t_all, 1),
-            "counts": counts, "checks": results, "inputs": ctx.inputs_summary()}
+            "counts": counts, "waived": waived_counts, "checks": results, "inputs": ctx.inputs_summary()}

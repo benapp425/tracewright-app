@@ -1,6 +1,6 @@
 """Parts and BOM: every part that gets bought or placed can be ordered and identified."""
 import re, collections
-from . import check, Finding
+from . import check, Finding, examined, plural, NotApplicable
 
 LCSC_RE = re.compile(r"^C\d{2,9}$")
 
@@ -69,6 +69,7 @@ def bom_fields(ctx):
         if len(fps) > 1:
             out.append(Finding("bom.fields", "warning", f"MPN {m} is used with different footprints: {', '.join(sorted(fps))}",
                                key=f"bom:mpnfp:{m}"))
+    examined(ctx, plural(len(placed_parts(ctx)), "part"))
     return out
 
 
@@ -107,4 +108,5 @@ def bom_board(ctx):
         if ref not in on_board:
             out.append(Finding("bom.board", "error", f"{ref} ({p['value']}) is in the schematic but not on the board",
                                {"ref": ref}, hint="Update the board from the schematic.", key=f"bom.board:missing:{ref}"))
+    examined(ctx, plural(len(b.fp_list), "footprint") + " against " + plural(len(nl.parts), "schematic part"))
     return out

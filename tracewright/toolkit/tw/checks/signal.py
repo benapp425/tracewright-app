@@ -7,7 +7,7 @@ clocks (CLK, SCK, MCLK, XTAL...), and tracewright.json highspeed.nets (name patt
 beside a fast one is a victim; a fast net over a gap in its plane is an antenna.
 """
 import math, re, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 from .. import geom
 from ..raster import Raster
 
@@ -278,6 +278,7 @@ def return_path(ctx):
                                {"net": s, "x": v.x, "y": v.y},
                                hint="Put a ground via next to each signal via so the return current can follow it between "
                                     "the planes.", key=f"si:retvia:{s}"))
+    examined(ctx, plural(len(fast), "fast net"))
     return out
 
 
@@ -372,6 +373,7 @@ def crosstalk(ctx):
                            {"net": fs, "layer": layer, "x": where[0], "y": where[1]},
                            hint="Spread them apart, route them on different layers with a plane between, or put a ground "
                                 "track (with vias) between them.", key=f"si:xtalk:{fs}:{os_}"))
+    examined(ctx, plural(len(fast), "fast net"))
     return out
 
 
@@ -562,4 +564,5 @@ def hs_pairs(ctx):
                                hint="Adjust the width and gap (JLC's impedance calculator gives exact values for its "
                                     "stackups), or order the board with impedance control.",
                                key=f"hs:z:{sp}"))
+    examined(ctx, plural(len(pairs), "differential pair"))
     return out

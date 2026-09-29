@@ -84,6 +84,29 @@ def run_all(project=None, only=None, skip=None, refresh=False, offline=None, pro
     return res
 
 
+def waived_text(res):
+    """'63 waived: 4 errors, 52 warnings, 7 notes' (or '')."""
+    w = res.get("waived") or {}
+    n = sum(w.values())
+    if not n:
+        return ""
+    parts = [f"{w[k]} {name}{'s' if w[k] != 1 else ''}" for k, name in (("error", "error"), ("warning", "warning"),
+                                                                         ("info", "note")) if w.get(k)]
+    return f"{n} waived: " + ", ".join(parts)
+
+
+def _result_line(c):
+    """'1 regulator (U201)', '2 waived', 'no I2C lines' for one check's row."""
+    bits = []
+    if c.get("scope"):
+        bits.append(c["scope"])
+    if c.get("waived"):
+        bits.append(f"{c['waived']} waived")
+    if c["status"] == "skipped" and c.get("reason"):
+        bits.append(c["reason"])
+    return "; ".join(bits)
+
+
 def verdict(res):
     c = res["counts"]
     crashed = any(ch["status"] == "error" for ch in res["checks"])
@@ -97,12 +120,14 @@ def verdict(res):
 def report_md(res):
     lines = [f"# {res.get('project', '')} design checks", "",
              f"Generated {res['generated']} by `./tw check` ({res['seconds']} s). Verdict: **{verdict(res)}** "
-             f"({res['counts']['error']} errors, {res['counts']['warning']} warnings, {res['counts']['info']} notes).", "",
+             f"({res['counts']['error']} errors, {res['counts']['warning']} warnings, {res['counts']['info']} notes"
+             f"{'; ' + waived_text(res) if waived_text(res) else ''}).", "",
              "These checks read the generated files (netlist, board, KiCad's ERC/DRC, the plotted sheets). What only "
              "the assembled board can show is listed in `build/readiness.md`.", "",
-             "| Check | Group | Result | Findings |", "|---|---|---|---|"]
+             "| Check | Group | Result | Findings | Examined |", "|---|---|---|---|---|"]
     for c in res["checks"]:
-        lines.append(f"| {c['title']} (`{c['id']}`) | {c['group']} | {c['status'].upper()} | {len(c['findings'])} |")
+        res_txt = "N/A" if c.get("na") else c["status"].upper()
+        lines.append(f"| {c['title']} (`{c['id']}`) | {c['group']} | {res_txt} | {len(c['findings'])} | {_result_line(c)} |")
     for c in res["checks"]:
         if c["findings"]:
             lines += ["", f"## {c['title']}", ""]
@@ -124,10 +149,10 @@ def readiness_md(ctx, res):
         mark = {"pass": "PASS", "warn": "WARN", "fail": "FAIL", "error": "CHECK CRASHED", "skipped": "not run"}[c["status"]]
         if c.get("na"):
             mark = "n/a"
-        extra = f" ({len(c['findings'])} findings)" if c["findings"] else ""
-        if c["status"] == "skipped":
-            extra = f" ({c.get('reason', '')})"
-        lines.append(f"- {mark}: {c['title']}{extra}")
+        bits = [_result_line(c)] if _result_line(c) else []
+        if c["findings"]:
+            bits.insert(0, f"{len(c['findings'])} finding{'s' if len(c['findings']) != 1 else ''}")
+        lines.append(f"- {mark}: {c['title']}" + (f" ({'; '.join(bits)})" if bits else ""))
     lines += ["", "## Needs the built board (not verifiable from files)", ""]
     if hw:
         lines += [f"- {h}" if isinstance(h, str) else f"- {h.get('what')}: {h.get('how', '')}" for h in hw]
@@ -137,21 +162,25 @@ def readiness_md(ctx, res):
                   "- Thermal behavior at worst-case load", "- Mechanical fit: connectors, holes, enclosure"]
     if os.path.exists(doc):
         lines += ["", f"The bring-up procedure is in `docs/bring-up.md`."]
-    lines += ["", f"**Verdict: {verdict(res)}.** A board is ready only when every check passes (or each warning is "
-              "reviewed and waived with a reason) and the hardware list above has a test plan."]
+    wt = waived_text(res)
+    lines += ["", f"**Verdict: {verdict(res)}{' (' + wt + ')' if wt else ''}.** A board is ready only when every check "
+              "passes (or each warning is reviewed and waived with a reason) and the hardware list above has a test plan."]
     return "\n".join(lines) + "\n"
 
 
 def summary_text(res, limit=25):
     """Short text for the agent / terminal."""
+    wt = waived_text(res)
     lines = [f"{verdict(res).upper()}: {res['counts']['error']} errors, {res['counts']['warning']} warnings, "
-             f"{res['counts']['info']} notes ({res['seconds']} s)" + (" -- STOPPED before the end" if res.get("stopped") else "")]
+             f"{res['counts']['info']} notes" + (f"; {wt} (say so when you report)" if wt else "") + f" ({res['seconds']} s)" +
+             (" -- STOPPED before the end" if res.get("stopped") else "")]
     for c in res["checks"]:
         n = len(c["findings"])
         tag = {"pass": "ok  ", "warn": "WARN", "fail": "FAIL", "error": "CRSH", "skipped": "skip"}[c["status"]]
         if c.get("na"):
             tag = "n/a "
-        lines.append(f"  {tag} {c['id']:<22} {n:>3}  {c['title']}" + (f" ({c.get('reason')})" if c["status"] == "skipped" else ""))
+        rl = _result_line(c)
+        lines.append(f"  {tag} {c['id']:<22} {n:>3}  {c['title']}" + (f" ({rl})" if rl else ""))
     shown = 0
     for sev in ("error", "warning"):
         for c in res["checks"]:

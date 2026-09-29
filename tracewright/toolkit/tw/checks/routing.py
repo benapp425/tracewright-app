@@ -1,6 +1,6 @@
 """Routing workmanship (differential pairs and other high-speed checks are in signal.py)."""
 import math, re, collections
-from . import check, Finding
+from . import check, Finding, examined, plural, NotApplicable
 from .. import geom
 
 
@@ -56,6 +56,7 @@ def route_style(ctx):
         nets = collections.Counter(t.net for t in off)
         out.append(Finding("route.style", "info", f"{len(off)} of {len(straight)} segments are not at 0/45/90 degrees "
                            f"(most on {', '.join(n for n, _ in nets.most_common(3))})", key="route:angles"))
+    examined(ctx, plural(len(b.tracks), "track") + ", " + plural(len(b.vias), "via"))
     return out
 
 
@@ -96,4 +97,5 @@ def netclasses(ctx):
         if name != "Default" and not members.get(name):
             out.append(Finding("pcb.netclasses", "warning", f"net class {name} has no nets, so its rules never apply",
                                {"type": "netclass"}, key=f"netclass:empty:{name}"))
+    examined(ctx, plural(len(pro.classes), "net class", "net classes") + " on " + plural(len(nets), "net"))
     return out

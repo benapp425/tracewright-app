@@ -1,6 +1,6 @@
 """Assembly: the CPL puts JLC's own footprint on our pads (rotation, origin, polarity)."""
 import os, csv, time, collections
-from . import check, Finding, NotApplicable
+from . import check, Finding, NotApplicable, examined, plural
 
 SKIP_DIRS = {"build", ".git", ".tracewright", "sourcing", "tools", "node_modules", "libraries", "3dmodels", ".claude",
              "__pycache__", "backups", "trash"}
@@ -174,4 +174,5 @@ def cpl_jlc(ctx):
                            hint="The parts service (EasyEDA) did not answer in time: a network or throttling problem, not "
                                 "the board. Run this check again later; answers are cached, so each run gets further.",
                            key="cpl:unverified"))
+    examined(ctx, plural(len(placed), "placed part"))
     return out
