@@ -638,6 +638,20 @@ a.brand:hover { text-decoration: none; }
 .attach .aspin { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line-2); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
 .sendbtn.waiting { opacity: .6; }
 .composer-bar .listening { color: var(--err); opacity: 1; }
+/* what a turn changed */
+.changes { border: 1px solid var(--line-2); border-radius: 10px; background: var(--surface); padding: 8px 10px; margin: 2px 0 6px; font-size: 12.5px; }
+.changes .ch-h { display: flex; align-items: center; gap: 6px; color: var(--text-2); }
+.changes .ch-h b { font-weight: 600; color: var(--text); }
+.changes .ch-acts { display: flex; gap: 6px; margin: 6px 0 0 -6px; flex-wrap: wrap; }
+.changes .ch-acts .btn { height: 24px; }
+.changes .ch-rows { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.changes .ch-row { display: flex; align-items: baseline; gap: 6px; color: var(--text-2); line-height: 1.45; }
+.changes .ch-row svg.ic { flex: none; color: var(--text-3); position: relative; top: 1px; }
+.changes .ch-k { flex: none; width: 70px; color: var(--text-3); }
+.changes .ch-v { min-width: 0; }
+.changes .ch-files { margin-top: 4px; font-size: 11.5px; color: var(--text-3); }
+.changes.undone { opacity: .6; }
+.changes.undone .ch-v { text-decoration: line-through; text-decoration-color: var(--text-3); }
 /* attachments on a sent message */
 .msg.user .apics { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .msg.user .apics img { max-width: 180px; max-height: 130px; border-radius: 8px; border: 1px solid var(--line-2); cursor: zoom-in; display: block; object-fit: cover; }

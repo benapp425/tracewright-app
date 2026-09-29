@@ -1921,6 +1921,30 @@ def make_app():
         sid = await a.send(text, body.get("sid"), (body.get("attachments") or []) + files, images=images)
         return jresp({"sid": sid})
 
+    @routes.post("/api/projects/{pid}/turns/undo")
+    async def undo_turn(request):
+        """Undo Claude's last turn: the project's files as they were before it, as new commits (the History tab
+        keeps everything). Only the latest turn, and only while Claude is idle; Claude hears of it next turn."""
+        from . import turns
+        pid = request.match_info["pid"]
+        a, rt = app.agent(pid), app.rt(pid)
+        body = await request.json()
+        if a.busy:
+            return err("Claude is working: stop it first", 409)
+        sess = a.get_session(body.get("sid")) if body.get("sid") else (a.session or a.get_session())
+        recs = [r for r in sess.transcript() if r.get("kind") in ("changes", "undone")]
+        last = next((r for r in reversed(recs) if r.get("kind") == "changes"), None)
+        if not last or last.get("turn") != body.get("turn"):
+            return err("only Claude's last turn can be undone here; the History tab goes further back", 409)
+        if any(r.get("kind") == "undone" and r.get("turn") == last["turn"] for r in recs):
+            return err("that turn is already undone", 409)
+        new = await asyncio.to_thread(turns.undo, rt.p, last["base"])
+        sess.append({"kind": "undone", "turn": last["turn"], "head": new})
+        a.head = new
+        rt.user_changes.append(f"the user undid your last turn: the project's files are back as they were before it (commit {last['base']})")
+        rt.hub.emit("agent.undone", sid=sess.sid, turn=last["turn"], head=new)
+        return jresp({"undone": last["turn"], "head": new})
+
     @routes.post("/api/projects/{pid}/chat/steer")
     async def steer(request):
         """A note for Claude while it works: read at its next tool call (409 when it has stopped, so

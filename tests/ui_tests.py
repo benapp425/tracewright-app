@@ -343,6 +343,26 @@ async def floorplan_shows_on_the_board_until_there_is_one(t):
     check(abs(pw["x"] - 20) <= 0.5 and abs(pw["y"] - 24) <= 0.5 and pw["moved"], pw)
 
 
+@test
+async def turn_changes_card(t):
+    await t.open_project("board")
+    await t.page.wait("[...document.querySelectorAll('*')].some((e) => e.__chat)", 10)
+    card = {"turn": "T1", "base": "a1", "head": "b2", "files": [["M", "hardware/demo/demo.kicad_pcb"]],
+            "board": {"added": ["C12"], "removed": [], "moved": ["J1", "U1"], "tracks": 48, "vias": 6, "routed": ["SDA", "SCL", "VBUS"], "unrouted": [], "outline": False},
+            "schematic": {"added": ["C12"], "removed": [], "values": [["R8", "4.7k", "10k"]]}, "docs": ["docs/decisions.md"], "other": []}
+    await t.page.js("(() => { const c = [...document.querySelectorAll('*')].find((e) => e.__chat).__chat; c.changesCard(%s, false);"
+                    " c.changesCard(Object.assign({}, %s, { turn: 'T2' }), false); return 1; })()" % (json.dumps(card), json.dumps(card)))
+    txt = await t.page.js("[...document.querySelectorAll('.changes')].map((e) => e.innerText)")
+    check(len(txt) == 2 and "moved 2 parts" in txt[1] and "routed 3 nets" in txt[1] and "+48 tracks, +6 vias" in txt[1] and "R8 4.7k → 10k" in txt[1]
+          and "decisions.md" in txt[1], txt)
+    check(await t.page.js("document.querySelectorAll('.changes .undo').length") == 1 and
+          await t.page.js("!!document.querySelector('.changes[data-turn=T2] .undo')"), "Undo should be on the latest turn only")
+    await t.shot("turn-changes")
+    await t.page.js("[...document.querySelectorAll('.changes[data-turn=T2] button')].find((b) => b.textContent.includes('Show on the board')).click(); 1")
+    hl = await t.page.wait("(() => { const v = document.querySelector('.viewer canvas').__view; return v.hl && [...v.hl.refs]; })()", 5)
+    check(sorted(hl) == ["C12", "J1", "U1"], hl)
+
+
 # a speech recognizer the test speaks through (headless Chrome has no microphone or speech service)
 FAKE_SPEECH = """
 window.SpeechRecognition = window.webkitSpeechRecognition = class {
@@ -374,7 +394,7 @@ async def dictation_writes_into_the_message_box(t):
     check(await t.page.js(f"{ta}.value") == "Route the USB pair", await t.page.js(f"{ta}.value"))
     await t.page.js("window.__sr.say(['the USB pair', ' first.'], true); 1")
     check(await t.page.js(f"{ta}.value") == "Route the USB pair first.", await t.page.js(f"{ta}.value"))
-    check("Listening" in await t.page.js("document.querySelector('.composer-bar').innerText"), "the composer does not say it is listening")
+    await t.page.wait("document.querySelector('.composer-bar').innerText.includes('Listening')", 5)   # the bar says it is listening
     await t.shot("dictation")
     # a second click stops it; the text stays
     await t.page.click(".composer .micbtn")

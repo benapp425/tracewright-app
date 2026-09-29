@@ -573,9 +573,10 @@ class AgentManager:
         hub.emit("agent.status", sid=sess.sid, busy=True, turn=tid, phase="starting")
         starting = True
         t = None
+        base = None
         try:
             if self.app.settings.get("snapshot_each_turn"):
-                await self._snapshot(f"Before: {text.strip()[:60]}")
+                base = await self._snapshot(f"Before: {text.strip()[:60]}")
             if self.stop_asked:
                 raise _Stopped()
             client = await self.connect()
@@ -616,7 +617,7 @@ class AgentManager:
             sess.meta["turns"] = sess.meta.get("turns", 0) + 1
             self._save_meta(sess.meta)
             if self.app.settings.get("snapshot_each_turn"):          # after the turn, not holding it open
-                asyncio.ensure_future(self._snapshot(f"Claude: {text.strip()[:60]}", push=True))
+                asyncio.ensure_future(self._after_turn(sess, tid, base, f"Claude: {text.strip()[:60]}"))
             if self.turn is None:                          # else a turn follows (a note it had not read yet)
                 hub.emit("agent.status", sid=sess.sid, busy=False, turn=tid, seconds=round(time.time() - started, 1))
 
@@ -649,9 +650,13 @@ class AgentManager:
     async def _snapshot(self, message, push=False):
         """A history checkpoint; one at a time, so a turn's closing checkpoint and the next turn's
         opening one never commit together. push: then send it to GitHub, when the project is linked
-        with auto-push on (a failed push is reported, never fatal)."""
+        with auto-push on (a failed push is reported, never fatal). Returns the commit the project is at
+        afterwards (the new one, or the last when nothing changed)."""
+        from . import turns
         async with self._snap_lock:
             h = await asyncio.to_thread(history.snapshot, self.rt.p.root, message)
+            cur = h or await asyncio.to_thread(turns.head, self.rt.p.root)
+        self.head = cur
         if h:
             self.hub.emit("history.snapshot", hash=h, message=message)
         gh = self.rt.p.cfg.get("github") or {}
@@ -662,12 +667,30 @@ class AgentManager:
                 self.hub.emit("github.status", **st)
             except Exception as e:
                 self.hub.emit("github.status", error=str(e), connected=True, repo=gh.get("repo"))
+        return cur
+
+    async def _after_turn(self, sess, tid, base, message):
+        """The checkpoint after a turn, and what the turn changed (turns.py) for the chat's card."""
+        from . import turns
+        after = await self._snapshot(message, push=True)
+        if not base or not after or base == after:
+            return
+        try:
+            ch = await asyncio.to_thread(turns.summary, self.rt.p, base, after)
+        except Exception as e:
+            self.app.log(f"what the turn changed: {type(e).__name__}: {e}")
+            return
+        if not ch:
+            return
+        rec = {"kind": "changes", "turn": tid, **ch}
+        sess.append(rec)
+        self.hub.emit("agent.changes", sid=sess.sid, **{k: v for k, v in rec.items() if k != "kind"})
 
     def _auto_turn(self, sess, reason="background"):
         """A turn the CLI starts by itself: when background work finishes, or to read a note the user
         sent after Claude's last tool call (reason 'steer')."""
         t = {"tid": uuid.uuid4().hex[:8], "sess": sess, "done": None, "auto": True, "blocks": {}, "started": time.time(),
-             "tools": {}}
+             "tools": {}, "base": getattr(self, "head", None)}
         self.turn = t
         sess.append({"kind": "auto", "turn": t["tid"], "reason": reason})
         self.hub.emit("agent.auto", sid=sess.sid, turn=t["tid"], reason=reason)
@@ -690,7 +713,7 @@ class AgentManager:
         if not quiet:
             self.hub.emit("agent.status", sid=sess.sid, busy=False, turn=t["tid"], seconds=round(time.time() - t["started"], 1))
         if self.app.settings.get("snapshot_each_turn"):
-            asyncio.ensure_future(self._snapshot("Claude: after background work", push=True))
+            asyncio.ensure_future(self._after_turn(sess, t["tid"], t.get("base"), "Claude: after background work"))
 
     def _handle(self, m, sess):
         hub = self.hub

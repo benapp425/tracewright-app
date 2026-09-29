@@ -2328,12 +2328,19 @@ def chat_attachments_go_to_their_place_and_pictures_to_claude():
                 return fc.reply("done")
             fake.script.append(lambda prompt: [fc.init(), fc.text("working")])
             r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Start"})
-            await asyncio.sleep(0.1)
+
+            async def until(cond, what):
+                for _ in range(300):
+                    if cond():
+                        return
+                    await asyncio.sleep(0.02)
+                raise AssertionError(f"waited for {what}: {fake.prompts[-1:]}")
+            await until(lambda: fake.prompts and fake.prompts[-1].text.endswith("Start"), "the turn to reach Claude")
             assert a.busy
             note = await attach(["shot.png"])
             r = await c.post(f"/api/projects/{pid}/chat/steer", json={"text": "Also this one", "files": [note[0]["path"]]})
             assert r.status == 200, await r.text()
-            await asyncio.sleep(0.05)
+            await until(lambda: "Also this one" in fake.prompts[-1].text, "the note to reach Claude")
             p = fake.prompts[-1]
             assert "Also this one" in p.text and "Attached: a picture, " + note[0]["path"] in p.text and len(p.images) == 1, p
             fake.q.put_nowait(fc.result())
@@ -2425,6 +2432,84 @@ def floorplan_from_the_start_to_the_board():
     os.remove(os.path.join(p.root, ".tracewright", "canvas.json"))
     c = runner.run_all(p, only=["placement.floorplan"], offline=True, write=False)["checks"][0]
     assert c.get("na") and c["status"] != "pass", c
+
+
+@test()
+def each_turn_says_what_it_changed_and_can_be_undone():
+    """After each of Claude's turns the chat says what it changed -- parts moved or added on the board, parts and
+    values in the schematic, the docs -- read from the history checkpoints around the turn; Undo puts the files
+    back as they were before it (as new commits), tells Claude, and only ever undoes the latest turn."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import history
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import fakeclaude as fc
+    if not history.available():
+        raise AssertionError("git is needed for the history")
+    pid = ProjectStore().import_copy(FIXTURE, "Turns demo").id
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        app.settings.update({"snapshot_each_turn": True})
+        rt = app.rt(pid)
+        root = rt.p.root
+        pcb, sch = rt.p.tw.pcb, os.path.join(root, "hardware/demo/mcu.kicad_sch")
+        before = {f: open(f).read() for f in (pcb, sch)}
+
+        def edit(prompt):                                  # Claude's turn: a part moved, a value changed, a doc written
+            with open(pcb) as f:
+                t = f.read()
+            with open(pcb, "w") as f:
+                f.write(t.replace("(at 103.675 117.5 -90)", "(at 108 117.5 -90)", 1))
+            with open(sch) as f:
+                t = f.read()
+            i = t.index('(property "Reference" "R8"')
+            j = t.index('(property "Value" "4.7k"', i)
+            with open(sch, "w") as f:
+                f.write(t[:j] + '(property "Value" "10k"' + t[j + len('(property "Value" "4.7k"'):])
+            os.makedirs(os.path.join(root, "docs"), exist_ok=True)
+            with open(os.path.join(root, "docs", "decisions.md"), "a") as f:
+                f.write("\n- R8 raised to 10k.\n")
+            return fc.reply("Moved J1 and raised R8.")
+        fake = fc.FakeClaude([edit, fc.reply("Nothing to do.")])
+        a = app.agent(pid)
+        fake.plug(a)
+        seen = fc.events_of(rt)
+
+        async def changes(n):
+            for _ in range(400):
+                got = [kw for t, kw in seen if t == "agent.changes"]
+                if len(got) >= n:
+                    return got
+                await asyncio.sleep(0.02)
+            raise AssertionError(f"no agent.changes: {fc.dumps(seen)}")
+        async with TestClient(TestServer(webapp)) as c:
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Move J1 and raise R8"})
+            assert r.status == 200, await r.text()
+            await fake.settle(a)
+            ch = (await changes(1))[0]
+            assert ch["board"]["moved"] == ["J1"] and not ch["board"]["added"] and ch["board"]["tracks"] == 0, ch["board"]
+            assert ch["schematic"]["values"] == [["R8", "4.7k", "10k"]] and not ch["schematic"]["added"], ch["schematic"]
+            assert "docs/decisions.md" in ch["docs"], ch["docs"]
+            # undone: the files are back, Claude hears of it, the transcript says so
+            r = await c.post(f"/api/projects/{pid}/turns/undo", json={"turn": ch["turn"]})
+            assert r.status == 200, await r.text()
+            assert open(pcb).read() == before[pcb] and open(sch).read() == before[sch]
+            assert not os.path.exists(os.path.join(root, "docs", "decisions.md")) or "R8 raised" not in open(os.path.join(root, "docs", "decisions.md")).read()
+            assert any("undid your last turn" in x for x in rt.user_changes), rt.user_changes
+            assert [x for x in a.get_session(a.session.sid).transcript() if x["kind"] == "undone"]
+            assert (await c.post(f"/api/projects/{pid}/turns/undo", json={"turn": ch["turn"]})).status == 409      # once
+            assert any("Restored to" in e["message"] for e in history.log(root, 5)), history.log(root, 5)
+            # a turn that changes nothing gets no card; an older turn cannot be undone once a newer one changed things
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Anything else?"})
+            await fake.settle(a)
+            await asyncio.sleep(0.5)
+            assert len([kw for t, kw in seen if t == "agent.changes"]) == 1
+        await a.disconnect()
+        rt.stop()
+    asyncio.run(run())
 
 
 @test(needs=("node",))

@@ -2,7 +2,7 @@
 // folded once a burst of work is over), its agenda as a live checklist, notes you send while it works
 // (read at its next step), its questions docked above the composer, permission prompts, the context
 // you attach (selections, KiCad's selection) and the review flags you send.
-import { h, clear, api, toast, lightbox, fmtTime, btn, menu, copyText, upload } from "./util.js";
+import { h, clear, api, toast, lightbox, fmtTime, btn, menu, copyText, upload, confirmDialog } from "./util.js";
 import { icon } from "./icons.js";
 import { markdown } from "./markdown.js";
 import { native, isNative } from "./native.js";
@@ -411,6 +411,8 @@ export class Chat {
       else if (r.kind === "agenda") agenda = r;
       else if (r.kind === "steer") this.steerMsg(r.id, r.text, steerState[r.id] || (busy ? "queued" : "dropped"));
       else if (r.kind === "error") { this.closeSteps(); this.errorLine(r.text, i === recs.length - 1 ? this.lastUserText : null); }
+      else if (r.kind === "changes") this.changesCard(r, recs.some((x) => x.kind === "undone" && x.turn === r.turn));
+      else if (r.kind === "undone") this.undoneLine(r);
     }
     if (!busy) this.closeSteps();
     this.replaying = false;
@@ -460,7 +462,67 @@ export class Chat {
       this.setPending(this.pending - 1);
     });
     ev.on("agent.done", (e) => { this.closeSteps(); this.turnMeta(e); if (e.session_cost) this.costEl.textContent = `≈ $${e.session_cost.toFixed(2)}`; });
+    ev.on("agent.changes", (e) => { if (!e.sid || e.sid === this.sid) this.changesCard(e, false); });
+    ev.on("agent.undone", (e) => { if (!e.sid || e.sid === this.sid) this.undoneLine(e); });
     ev.on("agent.error", (e) => { this.closeSteps(); if (e.message !== "stopped") this.errorLine(e.message, this.lastUserText); else this.put(h("div.noteline", icon("circle-stop", 13), "Stopped.")); });
+  }
+
+  // ------------------------------------------------------------------ what a turn changed, and undoing it
+  // After each turn: what it changed on the board, in the schematic and in the docs (turns.py), with the
+  // parts shown on the board and, for the latest turn, Undo (the files back as they were before it).
+  changesCard(r, undone) {
+    const refs = (list, n = 8) => list.length > n ? list.slice(0, n).join(", ") + ` and ${list.length - n} more` : list.join(", ");
+    const rows = [];
+    const b = r.board;
+    if (b && !b.error) {
+      const bits = [];
+      if (b.outline) bits.push("new outline");
+      if (b.added.length) bits.push(`added ${refs(b.added)}`);
+      if (b.removed.length) bits.push(`removed ${refs(b.removed)}`);
+      if (b.moved.length) bits.push(`moved ${b.moved.length} part${b.moved.length === 1 ? "" : "s"}`);
+      if (b.routed && b.routed.length) bits.push(`routed ${b.routed.length} net${b.routed.length === 1 ? "" : "s"}`);
+      if (b.tracks || b.vias) bits.push([b.tracks ? `${b.tracks > 0 ? "+" : ""}${b.tracks} tracks` : null, b.vias ? `${b.vias > 0 ? "+" : ""}${b.vias} vias` : null].filter(Boolean).join(", "));
+      if (bits.length) rows.push(["circuit-board", "Board", bits.join(" · ")]);
+    }
+    const sc = r.schematic;
+    if (sc && !sc.error) {
+      const bits = [];
+      if (sc.added.length) bits.push(`added ${refs(sc.added)}`);
+      if (sc.removed.length) bits.push(`removed ${refs(sc.removed)}`);
+      for (const [ref, a, z] of sc.values.slice(0, 4)) bits.push(`${ref} ${a} → ${z}`);
+      if (sc.values.length > 4) bits.push(`${sc.values.length - 4} more values`);
+      rows.push(["waypoints", "Schematic", bits.join(" · ") || "edited"]);
+    }
+    if (r.docs && r.docs.length) rows.push(["file-text", "Docs", r.docs.map((d) => d.split("/").pop()).join(", ")]);
+    if (r.other && r.other.length) rows.push(["folder", "Other", `${r.other.length} file${r.other.length === 1 ? "" : "s"}`]);
+    if (!rows.length) return;
+    const show = [...new Set([...(b && b.added || []), ...(b && b.moved || [])])];
+    const undoBtn = undone ? null : h("button.btn.sm.ghost.undo", { onclick: () => this.undoTurn(r, card) }, icon("undo-2", 13), "Undo this turn");
+    for (const old of this.msgs.querySelectorAll(".changes .undo")) old.remove();      // only the latest turn can be undone
+    for (const acts of this.msgs.querySelectorAll(".changes .ch-acts")) if (!acts.children.length) acts.remove();
+    const showBtn = show.length && !undone ? h("button.btn.sm.ghost", { onclick: () => { this.ws.show("board"); this.ws.view("board").highlight({ refs: show }); } }, icon("target", 13), "Show on the board") : null;
+    const card = h("div.changes" + (undone ? ".undone" : ""), { "data-turn": r.turn },
+      h("div.ch-h", icon("history", 13), h("b", undone ? "Undone" : "Changed in this turn")),
+      h("div.ch-rows", rows.map(([ic, t, text]) => h("div.ch-row", icon(ic, 12), h("span.ch-k", t), h("span.ch-v", text)))),
+      r.other && r.other.length ? h("div.ch-files", { "data-tip": r.other.join("\n") }, r.other.slice(0, 3).map((f) => f.split("/").pop()).join(", ") + (r.other.length > 3 ? " …" : "")) : null,
+      showBtn || undoBtn ? h("div.ch-acts", showBtn, undoBtn) : null);
+    this.put(card);
+    this.scroll();
+  }
+
+  async undoTurn(r, card) {
+    if (this.busy) { toast("Claude is working: stop it first", "warn"); return; }
+    const ok = await confirmDialog({ title: "Undo this turn?", text: "The project's files go back to how they were before this turn, and Claude is told. " +
+      "Nothing is lost: the History tab keeps both versions.", ok: "Undo this turn" });
+    if (!ok) return;
+    try { await api(`/api/projects/${encodeURIComponent(this.pid)}/turns/undo`, { body: { turn: r.turn, sid: this.sid } }); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  undoneLine(e) {
+    const card = this.msgs.querySelector(`.changes[data-turn="${e.turn}"]`);
+    if (card) { card.classList.add("undone"); const a = card.querySelector(".ch-acts"); if (a) a.remove(); const t = card.querySelector(".ch-h b"); if (t) t.textContent = "Undone"; }
+    if (!this.replaying) this.put(h("div.noteline", icon("undo-2", 13), "The turn is undone: the files are back as they were before it."));
   }
 
   setPending(n) { this.pending = Math.max(0, n); native.badge(this.pending ? String(this.pending) : ""); }
