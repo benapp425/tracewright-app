@@ -6,7 +6,7 @@ router, the check self-test (a planted fault per check), projects and history, t
 in-place schematic edits, and a smoke test of the web API. Tests that need KiCad are skipped when
 it is not installed.
 """
-import os, re, sys, json, shutil, tempfile, time, traceback, asyncio
+import os, re, sys, json, shutil, tempfile, time, traceback, asyncio, collections
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -142,13 +142,40 @@ def board_ops_roundtrip_is_exact():
 
 @test(needs=("kicad", "kpy"))
 def router_reroutes_cleanly():
+    """The whole demo board routed again from nothing (every track and via taken off first): every net routed,
+    KiCad's DRC clean with nothing left unconnected, the USB pair run side by side and matched, no net far longer
+    than the way its pads lie, few vias; and routing the finished board again changes nothing."""
     from tw.route import driver
-    from tw import kicad
+    from tw import kicad, geom
+    from tw.board import Board
     p = fixture_copy("route")
-    r = driver.route(p, nets=["I2C_SDA", "I2C_SCL", "RESET"], clear=True, live=False, log=lambda m: None)
-    assert r["summary"]["routed"] == 3 and not r["summary"]["failed"], r["summary"]
+    before = Board.load(p.pcb)
+    r = driver.route(p, clear=True, live=False, log=lambda m: None)
+    s_ = r["summary"]
+    assert s_["nets"] >= 8 and s_["routed"] == s_["nets"] and not s_["failed"], s_
     d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
-    assert not d["violations"] and not d["unconnected_items"], (len(d["violations"]), len(d["unconnected_items"]))
+    assert not d["violations"] and not d["unconnected_items"], ([v.get("description") for v in d["violations"]][:5], len(d["unconnected_items"]))
+    b = Board.load(p.pcb)
+    length = collections.defaultdict(float)
+    for t in b.tracks:
+        length[t.net] += t.length()
+    usb = [n for n in length if n.split("/")[-1] in ("USB_D_P", "USB_D_N")]
+    assert len(usb) == 2 and s_.get("coupled_pairs"), (usb, s_.get("coupled_pairs"))          # the pair run side by side
+    from tw.checks import runner                                  # judged as the checks judge it (skew per interface)
+    res = runner.run_all(p, only=["hs.pairs", "route.quality", "route.style", "si.stubs", "si.layer_change", "si.crosstalk"],
+                         offline=True, write=False)
+    bad = [(c["id"], f["message"]) for c in res["checks"] for f in c["findings"] if f["severity"] in ("error", "warning")]
+    assert not bad, bad[:6]
+    for net, L in length.items():                                  # no wild detours
+        pads = [(pd.x, pd.y) for f in b.fp_list for pd in f.pads if pd.net == net]
+        if len(pads) < 2:
+            continue
+        bx = geom.bbox(pads)
+        span = (bx[2] - bx[0]) + (bx[3] - bx[1])
+        assert L <= 3.0 * span + 6.0, (net, round(L, 1), round(span, 1))
+    assert s_["vias"] <= max(12, len(before.vias) * 2), (s_["vias"], len(before.vias))
+    again = driver.route(p, live=False, log=lambda m: None)["summary"]           # nothing left to do
+    assert again["tracks"] == 0 and again["vias"] == 0 and not again["failed"], again
 
 
 @test(needs=("kicad", "kpy"))

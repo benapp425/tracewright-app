@@ -342,10 +342,15 @@ class GridRoute:
             lt, lv = B.legal(net, prof)
             x0, y0, x1, y1 = b.bbox()
             r = int(reach / R.RES)
+            # already stitched there (a second run adds nothing); the router's own copy, so vias being cleared do not count
+            have = [tuple(v["pos"]) for v in self.dump.get("vias", []) if v.get("net") == net]
             gy = y0 + pitch / 2
             while gy < y1:
                 gx = x0 + pitch / 2
                 while gx < x1:
+                    if any(geom.dist((gx, gy), q) < pitch / 2 for q in have):
+                        gx += pitch
+                        continue
                     if any(geom.inside((gx, gy), pl) for pl in polys):
                         j0, i0 = B.cell(gx, gy)
                         best = None
