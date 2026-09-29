@@ -2713,6 +2713,73 @@ def datasheet_library_and_pin_tables():
         httpd.shutdown()
 
 
+@test(needs=("kicad",))
+def firmware_starter_from_the_schematic():
+    """The firmware starter: each microcontroller pin's net as a constant in its Arduino core's naming, with
+    what it drives (an LED through its resistor, with the level that lights it; a button; a bus), a pin table,
+    and a bring-up sketch that compiles against the Arduino API; the sketch is written once, pins.h each time."""
+    import subprocess
+    from tw import firmware
+    from tw.netlist import Netlist
+    from tw.checks.context import Context
+    p = fixture_copy("firmware-demo")
+    nl = Context(p, offline=True).netlist
+    m = firmware.build(nl, p.name)
+    assert [x["ref"] for x in m] == ["U2"] and m[0]["family"] == "attiny", m
+    h = firmware.header(m[0], p.name)
+    assert "#define PIN_I2C_SDA            PIN_PB0  // pin 5 (PB0): to J2.3, R8.2 (4.7k)" in h, h
+    assert "PIN_USB_N" in h and "PIN_NC" not in h, h
+    # a made-up RP2040 board: an LED through a resistor, one to 3V3 (lit by LOW), a button, a UART, an ADC
+    x = Netlist()
+    x.parts = {"U1": {"value": "RP2040", "lib": "MCU_RaspberryPi:RP2040", "footprint": "QFN-56"},
+               "R1": {"value": "330R"}, "D1": {"value": "LED green", "lib": "Device:LED"}, "R2": {"value": "330R"},
+               "D2": {"value": "LED red", "lib": "Device:LED"}, "SW1": {"value": "BOOT"}, "J1": {"value": "Conn_01x03"}}
+    wires = {"/GPIO25_LED": [("U1", "37"), ("R1", "1")], "/LED_A": [("R1", "2"), ("D1", "1")], "GND": [("D1", "2")],
+             "/STATUS": [("U1", "36"), ("D2", "1")], "/STATUS_R": [("D2", "2"), ("R2", "1")], "+3V3": [("R2", "2")],
+             "/BUTTON": [("U1", "35"), ("SW1", "1")], "/UART_TX": [("U1", "2"), ("J1", "2")], "/VBAT_SENSE": [("U1", "38"), ("J1", "3")],
+             "+3V3_IO": [("U1", "1")], "unconnected-(U1-GPIO1-Pad3)": [("U1", "3")]}
+    names = {("U1", "37"): "GPIO25", ("U1", "36"): "GPIO24", ("U1", "35"): "GPIO23", ("U1", "2"): "GPIO0", ("U1", "38"): "GPIO26_ADC0",
+             ("U1", "1"): "IOVDD", ("U1", "3"): "GPIO1", ("D1", "1"): "A", ("D1", "2"): "K", ("D2", "1"): "K", ("D2", "2"): "A"}
+    x.nets = wires
+    x.pin = {rp: n for n, rps in wires.items() for rp in rps}
+    x.pin_info = {k: {"name": v, "type": ""} for k, v in names.items()}
+    for r, pn in [("U1", "1"), ("U1", "3"), ("SW1", "2"), ("J1", "1")]:
+        x.pin_info.setdefault((r, pn), {"name": "", "type": ""})
+    mm = firmware.build(x, "Pico board")[0]
+    roles = {p_["short"]: (p_["role"], p_["on"], p_["arduino"]) for p_ in mm["pins"]}
+    assert roles["GPIO25_LED"] == ("led", "HIGH", "25") and roles["STATUS"] == ("led", "LOW", "24"), roles
+    assert roles["BUTTON"][0] == "button" and roles["UART_TX"][0] == "uart" and roles["VBAT_SENSE"][0] == "analog", roles
+    hh = firmware.header(mm, "Pico board")
+    assert "#define PIN_STATUS_ON" in hh and "LOW" in hh, hh
+    sk = firmware.sketch(mm, "Pico board")
+    assert "Serial.begin(115200)" in sk and "INPUT_PULLUP" in sk and "analogRead(PIN_VBAT_SENSE)" in sk, sk
+    # both sketches compile against the Arduino API (stubs)
+    cc = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+    if cc:
+        stub = ("#include <stdint.h>\n#define HIGH 1\n#define LOW 0\n#define OUTPUT 1\n#define INPUT_PULLUP 2\n#define HEX 16\n"
+                "enum { PIN_PB0, PIN_PB1, PIN_PB2, PIN_PB3, PIN_PB4, PIN_PB5 };\n"
+                "void pinMode(int, int); void digitalWrite(int, int); int digitalRead(int); int analogRead(int); void delay(unsigned long);\n"
+                "struct S { void begin(long); void print(const char*); void print(int, int = 10); void println(const char*); void println(int, int = 10); } Serial;\n"
+                "struct W { void begin(); void beginTransmission(uint8_t); uint8_t endTransmission(); } Wire;\n")
+        for tag, mcu in (("tiny", m[0]), ("pico", mm)):
+            d = os.path.join(TMP, "fw-" + tag)
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, "Arduino.h"), "w").write(stub)
+            open(os.path.join(d, "Wire.h"), "w").write("")
+            open(os.path.join(d, "pins.h"), "w").write(firmware.header(mcu, "b"))
+            open(os.path.join(d, "s.cpp"), "w").write('#include "Arduino.h"\n' + firmware.sketch(mcu, "b"))
+            r = subprocess.run([cc, "-fsyntax-only", "-I", d, os.path.join(d, "s.cpp")], capture_output=True, text=True)
+            assert r.returncode == 0, (tag, r.stderr[-1500:])
+    # written: pins.h again each time, the sketch once
+    out = firmware.write(p, nl, p.name)
+    assert {"firmware/pins.h", "firmware/PINS.md", "firmware/bringup/bringup.ino", "firmware/bringup/pins.h"} <= set(out), out
+    ino = os.path.join(p.root, "firmware", "bringup", "bringup.ino")
+    with open(ino, "a") as f:
+        f.write("// my change\n")
+    out = firmware.write(p, nl, p.name)
+    assert "firmware/bringup/bringup.ino" not in out and open(ino).read().endswith("// my change\n")
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

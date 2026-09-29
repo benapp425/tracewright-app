@@ -929,6 +929,20 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.post("/api/projects/{pid}/firmware")
+    async def firmware_make(request):
+        """The firmware starter from the schematic (tw/firmware.py): pins.h, PINS.md, a bring-up sketch."""
+        from tw import firmware
+        from tw.checks.context import Context
+        rt = app.rt(request.match_info["pid"])
+        tw = rt.p.tw
+        if not tw.has_sch():
+            return err("there is no schematic yet")
+        out = await asyncio.to_thread(lambda: firmware.write(tw, Context(tw, offline=True).netlist, rt.p.name))
+        if not out:
+            return err("no microcontroller in the schematic")
+        return jresp({"written": out})
+
     @routes.get("/api/projects/{pid}/datasheets")
     async def datasheets_list(request):
         """The project's data sheet library (docs/datasheets): the PDFs and the pin tables read from them."""

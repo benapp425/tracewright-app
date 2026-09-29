@@ -17,6 +17,7 @@ Run in the project folder. Everything writes its results to `build/` and prints 
 | `./tw pcb ops.json` | apply board operations (below) |
 | `./tw route [--nets A B] [--clear] [--engine grid|freerouting]` | route (grid router: human style, net by net) |
 | `./tw fill` | refill zones |
+| `./tw firmware` | a firmware starter from the schematic: `firmware/pins.h` (each MCU pin's net as a constant in the Arduino core's naming, with what it drives), `firmware/PINS.md`, and a bring-up sketch (written once; LEDs, I2C scan, buttons, analog) |
 | `./tw floorplan` / `./tw floorplan apply [--outline]` | the guided start's floorplan in board coordinates (outline, holes, each connector on its edge, the blocks' areas); `apply` draws the outline when the board has none, the areas on Dwgs.User (group "Floorplan"), and moves the connectors and holes on the board to their places (turn each connector to face off its edge) |
 | `./tw nets` / `./tw nets set VPYRO kind=power voltage=8.4 current=5` / `./tw nets classes [--apply]` | the net model: what each net is (declared or inferred); declare a net; net classes sized for the declared currents and impedances |
 | `./tw parts search "AMS1117-3.3"` / `./tw parts code C6186` | JLC / LCSC data, cached with the query date |

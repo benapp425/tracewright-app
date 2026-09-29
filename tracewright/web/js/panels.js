@@ -270,6 +270,27 @@ export class DocsPanel {
       if (e.path === this.current) it.classList.add("on");
       this.list.appendChild(it);
     }
+    // the firmware starter: the pin map from the schematic, pins.h and a bring-up sketch (tw/firmware.py)
+    if (this.ws.p && this.ws.p.has_sch) {
+      const fw = await ls("firmware");
+      const bring = fw.some((e) => e.name === "bringup" && e.dir) ? await ls("firmware/bringup") : [];
+      const items = [...fw.filter((e) => e.name === "PINS.md"), ...fw.filter((e) => e.name.endsWith(".h")), ...bring.filter((e) => e.name.endsWith(".ino"))];
+      const make = btn(items.length ? "refresh-cw" : "cpu", null, { "data-tip": items.length ? "Update the pin map from the schematic" : "Write the pin map and a bring-up sketch from the schematic",
+        onclick: async () => {
+          make.disabled = true;
+          try { const r = await api(`/api/projects/${enc(this.pid)}/firmware`, { body: {} }); toast(`Wrote ${r.written.length} files in firmware/`, "ok"); this.current = "firmware/PINS.md"; this.load(); }
+          catch (e) { toast(e.message, "error"); make.disabled = false; }
+        } }, "sm ghost");
+      this.list.appendChild(h("div.listhead", h("b.grow", "Firmware"), make));
+      if (!items.length) this.list.appendChild(h("div.small.muted", { style: { padding: "6px 14px 12px" } }, "A pin map and a bring-up sketch, from the schematic."));
+      for (const e of items) {
+        const label = e.name === "PINS.md" ? "Pin map" : e.name;
+        const it = h("div.fitem", { onclick: () => { this.list.querySelectorAll(".fitem").forEach((x) => x.classList.remove("on")); it.classList.add("on"); this.current = e.path; viewFile(this.ws, e.path, this.view); } },
+          icon(e.name.endsWith(".md") ? "table-2" : "file-code", 14), h("span.fn", label), h("span.sz", fmtTime(e.mtime)));
+        if (e.path === this.current) { it.classList.add("on"); viewFile(this.ws, e.path, this.view); }
+        this.list.appendChild(it);
+      }
+    }
     // the data sheet library: each part's data sheet, and whether its pin table was read from it
     const lib = (await api(`/api/projects/${enc(this.pid)}/datasheets`).catch(() => ({ items: [] }))).items || [];
     if (lib.length) {

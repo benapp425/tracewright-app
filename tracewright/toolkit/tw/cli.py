@@ -249,6 +249,22 @@ def cmd_style(a):
     return 0 if r["ok"] else 1
 
 
+def cmd_firmware(a):
+    """A firmware starter from the schematic: firmware/pins.h, PINS.md and a bring-up sketch."""
+    from tw import firmware
+    from tw.checks.context import Context
+    p = env.project()
+    if not p.has_sch():
+        print("no schematic yet")
+        return 1
+    out = firmware.write(p, Context(p, offline=True).netlist, p.name)
+    if not out:
+        print("no microcontroller in the schematic (a part with port-named pins, or a known family)")
+        return 1
+    print("wrote " + ", ".join(out))
+    return 0
+
+
 def cmd_floorplan(a):
     """The guided start's floorplan: print it in board coordinates, or put it on the board."""
     from tw import floorplan
@@ -405,6 +421,7 @@ def main(argv=None):
     nt.add_argument("args", nargs="*")
     nt.add_argument("--apply", action="store_true")
     nt.add_argument("--json", action="store_true")
+    sub.add_parser("firmware", help="a firmware starter: firmware/pins.h (nets to pins), PINS.md, a bring-up sketch")
     fpp = sub.add_parser("floorplan", help="the guided start's floorplan: show (board coordinates) | apply (outline, areas, connectors, holes)")
     fpp.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
     fpp.add_argument("--outline", action="store_true", help="replace the board's outline with the floorplan's")
