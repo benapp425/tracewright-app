@@ -267,6 +267,19 @@ def mem_crystal(ctx):
     b.zones.append(z)
 
 
+def mem_escape(ctx):
+    # a QFN's pin row 0.2 mm from its exposed pad, and a capacitor's pad 0.25 mm below the row: the pins are boxed in
+    b = ctx.board
+    pads = [("EP", 130.0, 130.0, 1.7, 1.7, "GND")] + [(str(i + 1), 129.25 + 0.5 * i, 131.45, 0.25, 0.8, f"ESC{i}") for i in range(4)]
+    u = _fake_fp("U9", "Package_DFN_QFN:QFN-16-1EP_3x3mm_P0.5mm_EP1.7x1.7mm", 130.0, 130.0, pads)
+    c = _fake_fp("C9", "Capacitor_SMD:C_1206_3216Metric", 130.0, 132.6, [("1", 130.0, 132.6, 3.0, 1.0, "PLANT_V")])
+    tps = [_fake_fp(f"TP9{i}", "TestPoint:TestPoint_Pad_D1.0mm", 140.0 + 2 * i, 110.0, [("1", 140.0 + 2 * i, 110.0, 1.0, 1.0, f"ESC{i}")])
+           for i in range(4)]
+    for fp in [u, c] + tps:
+        b.fp_list.append(fp)
+        b.footprints[fp.ref] = fp
+
+
 def mem_thermal(ctx):
     b = ctx.board
     pads = [("EP", 130.0, 130.0, 2.6, 2.6, "GND")] + [(str(i + 1), 128.2 + 0.65 * (i % 4), 128.0, 0.3, 0.7, f"N{i}") for i in range(4)]
@@ -551,6 +564,7 @@ CASES = [
     ("lessons.mechanical", "no mounting holes", ("mem", mem_mechanical), "mounting"),
     ("cpl.jlc", "JLC placement corrections removed", ("file", plant_cpl), "rotate"),
     ("placement.floorplan", "the floorplan puts J2 on the top edge; the board has it on the right", ("file", plant_floorplan), "planned on the top edge"),
+    ("placement.escape", "a QFN's pins boxed in by its exposed pad and a capacitor 0.25 mm from the row", ("mem", mem_escape), "no way out"),
     ("assembly.hand", "R1 an 0201 on a board you solder yourself", ("mem", mem_hand), "too small"),
     ("power.flyback", "a relay coil switched by a MOSFET with no diode", ("mem", mem_flyback), "no flyback diode"),
     ("power.cap_voltage", "C1 on +5V rated 4 V", ("mem", mem_cap_voltage), "rated 4"),

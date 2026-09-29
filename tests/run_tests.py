@@ -2966,6 +2966,34 @@ def schematic_engine_connectors_dividers_power_bars():
     assert not st, st                                         # the bars' joints: no four-way junctions
 
 
+@test(needs=("kicad", "kpy"))
+def silkscreen_tidied_before_release():
+    """Before the fab files are plotted the silkscreen is tidied (every reference off pads, other silk and the
+    edge; fab.tidy_silk false leaves it), and the release stage waits while a reference still sits on a pad."""
+    from tracewright.projects import ProjectStore
+    from tracewright import gates
+    from tw.board import Board
+    from tw.pcb import client
+    from tw.outputs import Outputs
+    prj = ProjectStore().import_copy(FIXTURE, "Silk demo")
+    tw = prj.tw
+    r8 = next(f for f in Board.load(tw.pcb).fp_list if f.ref == "R8")
+    pad = r8.pads[0]
+    res = client.apply(tw, [{"op": "ref_text", "ref": "R8", "x": pad.x, "y": pad.y}], live=False)
+    assert res["ok"], res
+    ok, miss = gates.gate(prj, "release")
+    assert any("reference designator" in m for m in miss), miss
+    prj.cfg.setdefault("fab", {})["tidy_silk"] = False
+    prj.save()
+    assert Outputs(env.Project(prj.root)).silk() is None                  # left as it is when asked
+    prj.cfg["fab"]["tidy_silk"] = True
+    prj.save()
+    rep = Outputs(env.Project(prj.root)).silk()
+    assert "R8" in rep["moved"], rep
+    ok, miss = gates.gate(prj.reload(), "release")
+    assert not any("reference designator" in m for m in miss), miss
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to

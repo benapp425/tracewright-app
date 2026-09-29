@@ -218,7 +218,27 @@ class Outputs:
         self.say(f"release: {len(manifest)} files -> {os.path.relpath(z, self.p.root)}")
         return z
 
+    def silk(self):
+        """Before anything is plotted: every reference designator moved off pads, other silk and the board edge
+        (tw.silk; `fab.tidy_silk: false` in tracewright.json leaves the silkscreen as it is)."""
+        if self.p.setting("fab.tidy_silk", True) is False or not self.p.has_pcb():
+            return None
+        from . import silk
+        from .board import Board
+        from .pcb import client
+        ops, rep = silk.tidy(Board.load(self.p.pcb))
+        if ops:
+            res = client.apply(self.p, ops)
+            if not res.get("ok"):
+                self.say(f"silkscreen: the tidy could not be applied ({res.get('error') or res.get('results')})")
+                return rep
+        n = len(rep["moved"])
+        self.say(f"silkscreen: {n} reference{'s' if n != 1 else ''} moved clear" + (f", {len(rep['stuck'])} with no clear spot: "
+                 f"{', '.join(rep['stuck'][:8])}" if rep["stuck"] else "") if rep["moved"] or rep["stuck"] else "silkscreen: every reference clear")
+        return rep
+
     def all(self, renders=True):
+        self.silk()
         nl = self.netlist()
         parts = self.parts(nl)
         self.bom(parts)

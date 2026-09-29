@@ -334,3 +334,99 @@ def placement_floorplan(ctx):
         raise NotApplicable("none of the floorplan's connectors or holes carry a reference that is on the board")
     examined(ctx, plural(seen, "connector or hole", "connectors and holes") + " against the floorplan")
     return out
+
+
+ESCAPE_MM = 1.0              # how far a track (or a via beside the pad) needs to get clear before it can turn
+_DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.7071, 0.7071), (0.7071, -0.7071), (-0.7071, 0.7071), (-0.7071, -0.7071)]
+
+
+def _pad_layers(p):
+    if any(l in ("*.Cu", "F&B.Cu") for l in p.layers):
+        return ["F.Cu", "B.Cu"]
+    return [l for l in p.layers if l.endswith(".Cu")]
+
+
+def _dist_box(x, y, b):
+    dx = max(b[0] - x, 0.0, x - b[2])
+    dy = max(b[1] - y, 0.0, y - b[3])
+    return math.hypot(dx, dy)
+
+
+@check("placement.escape", "Every pad has a way out", "Placement", needs=("pcb",))
+def placement_escape(ctx):
+    """A pad no track can leave: each way out -- straight and diagonal, a track's width plus clearance on each
+    side -- runs into another net's copper within a millimetre, so neither a track nor a via beside the pad
+    fits. Parts placed tight against an IC's pin row do this; the router then fails or needs vias in pads. Pads
+    of nets that go nowhere else, and big pads (an exposed pad takes its vias inside), are left out; a
+    through-hole pad is trapped only if it is boxed in on every layer."""
+    b = ctx.board
+    cls = (ctx.pro.classes or {}).get("Default") or {}
+    w = float(cls.get("track_width") or 0.2) + 2 * float(cls.get("clearance") or 0.15)
+    count = collections.Counter()
+    for fp in b.fp_list:
+        for p in fp.pads:
+            if p.net:
+                count[p.net] += 1
+    # every copper pad as an obstacle box, per layer, in a coarse grid
+    CELL = 2.0
+    grid = collections.defaultdict(list)
+    items = []
+    for fp in b.fp_list:
+        for p in fp.pads:
+            pts = p.poly or [(p.x, p.y)]
+            box = geom.bbox(pts)
+            for l in _pad_layers(p):
+                it = (box, p.net or "", l, id(p))
+                items.append((fp, p, it))
+                for gx in range(int(math.floor(box[0] / CELL)), int(math.floor(box[2] / CELL)) + 1):
+                    for gy in range(int(math.floor(box[1] / CELL)), int(math.floor(box[3] / CELL)) + 1):
+                        grid[(l, gx, gy)].append(it)
+    ol = b.outline[0] if b.outline else None
+
+    def blocked(x, y, layer, net, own):
+        if ol is not None and not geom.inside((x, y), ol):
+            return True
+        for gx in range(int(math.floor((x - w) / CELL)), int(math.floor((x + w) / CELL)) + 1):
+            for gy in range(int(math.floor((y - w) / CELL)), int(math.floor((y + w) / CELL)) + 1):
+                for box, n2, l2, pid in grid.get((layer, gx, gy), ()):
+                    if pid != own and (n2 != net or not net) and _dist_box(x, y, box) < w / 2:
+                        return True
+        return False
+
+    trapped = collections.defaultdict(list)
+    seen = 0
+    per_pad = {}
+    for fp, p, (box, net, layer, pid) in items:
+        if not net or net.startswith("unconnected-") or count[net] < 2:
+            continue
+        hw, hh = (box[2] - box[0]) / 2, (box[3] - box[1]) / 2
+        if hw * hh * 4 > 1.5:                              # a big pad: vias go in it
+            continue
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        out = False
+        for dx, dy in _DIRS:
+            t0 = min(hw / abs(dx) if dx else 1e9, hh / abs(dy) if dy else 1e9) + w / 2
+            if all(not blocked(cx + dx * t, cy + dy * t, layer, net, pid) for t in [t0 + k * 0.1 for k in range(int(ESCAPE_MM / 0.1) + 1)]):
+                out = True
+                break
+        key = (fp.ref, p.num)
+        per_pad.setdefault(key, []).append(out)
+        if key not in per_pad or len(per_pad[key]) == len(_pad_layers(p)):
+            seen += 1
+            if not any(per_pad[key]):
+                trapped[fp.ref].append((p.num, p.pinfunction or "", net, cx, cy))
+    out_f = []
+    for ref, pads in sorted(trapped.items()):
+        fp = b.footprints[ref]
+        near = sorted({f.ref for f in b.fp_list if f.ref != ref and f.pads and
+                       any(math.hypot(q.x - pads[0][3], q.y - pads[0][4]) < 2.5 for q in f.pads)})
+        names = ", ".join(f"{n}{f' ({fn})' if fn else ''}" for n, fn, _, _, _ in pads[:6]) + (" ..." if len(pads) > 6 else "")
+        out_f.append(Finding("placement.escape", "warning",
+                             f"{ref}: {plural(len(pads), 'pad')} {names} with no way out" + (f" (hemmed in by {', '.join(near[:4])})" if near else ""),
+                             {"ref": ref, "x": pads[0][3], "y": pads[0][4]},
+                             hint=f"Leave room for a track ({w:.2f} mm with its clearances) to leave each pin: move the neighbours "
+                                  "back, or turn the part so its pins face open board.", key=f"placement.escape:{ref}"))
+    if not seen:
+        raise NotApplicable("no pads with connections to escape")
+    examined(ctx, plural(seen, "connected pad") + f", {w:.2f} mm tracks with clearance")
+    return out_f

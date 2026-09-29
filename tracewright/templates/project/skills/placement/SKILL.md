@@ -18,5 +18,6 @@ description: Place the footprints on the board with intent - outline and mountin
 
 Work a functional group at a time with `place` (it animates live in KiCad and in the app), say what the group
 is and why it sits there, and `show` / `annotate` when you want the user's opinion. After each group run
-`run_checks` with `pcb.placement`, `power.decoupling` and `power.regulators` (plus `power.switcher` for a
+`run_checks` with `pcb.placement`, `placement.escape` (every pad has room for a track to leave it),
+`power.decoupling` and `power.regulators` (plus `power.switcher` for a
 converter's hot loop and `pcb.esd` for protection at the connectors), and `render` the board to look at it.

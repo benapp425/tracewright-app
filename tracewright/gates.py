@@ -138,4 +138,13 @@ def gate(project, stage):
             miss.append("the user has not signed the design off (Checks > Sign-off)")
         elif not s.get("valid"):
             miss.append("the design changed after the user signed it off: they need to sign it off again")
+        if p.tw.has_pcb():                                  # the silkscreen as it will be printed
+            from tw import silk
+            from tw.board import Board
+            ops, rep = silk.tidy(Board.load(p.tw.pcb))
+            if ops:
+                miss.append(f"{len(ops)} reference designator{'s' if len(ops) != 1 else ''} still sit on pads, other silk or "
+                            "the edge: run the silk tidy (the silk tool, or ./tw outputs does it first)")
+            if rep["stuck"]:
+                miss.append(f"no clear spot for {', '.join(rep['stuck'][:6])}: move them by hand or hide them")
     return (not miss), miss
