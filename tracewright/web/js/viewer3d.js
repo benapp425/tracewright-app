@@ -489,7 +489,6 @@ export class Viewer3D {
       this.info.style.display = "flex";
       this.info.append(icon("microchip", 14), h("span.sl", `${part.name}${f ? "  " + f.val : ""}`),
         f ? h("span", { style: { color: "var(--hud-muted)", fontSize: "11.5px" } }, f.lib.split(":").pop()) : null,
-        h("button.tbtn", { onclick: () => this.ws.ask(`About ${part.name}: `), "data-tip": "Ask Claude about it" }, icon("message-square", 14), h("span", "Ask")),
         h("button.tbtn", { onclick: () => this.ws.locate({ ref: part.name }), "data-tip": "Show on board" }, icon("circuit-board", 14)),
         h("button.tbtn", { onclick: () => { this.ws.show("bom"); this.ws.view("bom").probe([part.name], "3d"); }, "data-tip": "Show it in the BOM" }, icon("list", 14)),
         h("button.tbtn", { "data-tip": "Flag it", onclick: () => {

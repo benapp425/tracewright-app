@@ -15,12 +15,19 @@ def _board_stats(rt):
         return None
     s = b.summary()
     placed = [f for f in b.fp_list if f.pads and (not b.outline or b.on_board(f))]
-    signal = {p.net for p in b.pads() if p.net}
+    pads_on = {}
+    for p in b.pads():
+        if p.net and not p.net.startswith("unconnected-"):
+            pads_on[p.net] = pads_on.get(p.net, 0) + 1
+    signal = {n for n, k in pads_on.items() if k >= 2}          # nets that need copper between pads
     unrouted = rt._unrouted()
+    if unrouted is not None:                                   # a fresh DRC knows what is still open
+        routed = max(0, len(signal) - len(unrouted))
+    else:                                                      # else: copper on the net, tracks or a pour
+        routed = len(({t.net for t in b.tracks if t.net} | {z.net for z in b.zones if z.net and not z.is_rule_area}) & signal)
     return {"w": s["size_mm"][0], "h": s["size_mm"][1], "layers": s["copper_layers"], "parts": s["footprints"], "placed": len(placed),
             "off_board": len(s.get("off_board") or []), "tracks": s["tracks"], "vias": s["vias"], "nets": len(signal),
-            "routed": len({t.net for t in b.tracks if t.net} & signal),
-            "unrouted": None if unrouted is None else len(unrouted), "outline": s["outline_closed"]}
+            "routed": routed, "unrouted": None if unrouted is None else len(unrouted), "outline": s["outline_closed"]}
 
 
 def _bom(rt):

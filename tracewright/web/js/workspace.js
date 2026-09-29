@@ -18,6 +18,7 @@ import { TimelapsePlayer } from "./timelapse.js";
 import { MissionControl } from "./mission.js";
 import { GuidedCanvas } from "./guided.js";
 import { Inspector } from "./inspector.js";
+import { limitsPanel } from "./limits.js";
 
 const enc = encodeURIComponent;
 export const TABS = [
@@ -25,10 +26,18 @@ export const TABS = [
   ["bom", "BOM", "list"], ["checks", "Checks", "list-checks"], ["outputs", "Order", "shopping-cart"], ["rules", "Rules", "sliders-horizontal"],
   ["docs", "Docs", "file-text"], ["files", "Files", "folder"], ["history", "History", "history"],
 ];
-// The views on the tab bar until you choose your own (the rest wait under More).
-export const DEFAULT_PINNED = ["overview", "board", "schematic", "3d", "bom", "checks", "outputs"];
-export const pinnedTabs = () => { try { const v = JSON.parse(localStorage.getItem("tw.tabs.pinned")); if (Array.isArray(v) && v.length) return v; } catch {} return DEFAULT_PINNED; };
-export const tabKey = (i) => i < 9 ? `mod+${i + 1}` : i === 9 ? "mod+0" : null;
+// Five places, each holding one or more views (Design: the board, schematic and 3D model ...).
+export const PLACES = [
+  ["overview", "Overview", "layout-grid", ["overview"]],
+  ["design", "Design", "circuit-board", ["board", "schematic", "3d"]],
+  ["parts", "Parts", "list", ["bom", "outputs"]],
+  ["checks", "Checks", "list-checks", ["checks", "rules"]],
+  ["project", "Project", "folder", ["docs", "files", "history"]],
+];
+const SUB = { board: "Board", schematic: "Schematic", "3d": "3D", bom: "BOM", outputs: "Order", checks: "Checks", rules: "Design rules",
+  docs: "Docs", files: "Files", history: "History" };
+export const placeOf = (view) => (PLACES.find((p) => p[3].includes(view)) || PLACES[1])[0];
+export const tabKey = (i) => i < 9 ? `mod+${i + 1}` : null;
 const VIEWS = { overview: OverviewPanel, board: BoardView, schematic: SchematicView, "3d": Viewer3D, bom: BomView, checks: ChecksPanel, rules: RulesView,
   files: FilesPanel, history: HistoryPanel, outputs: OutputsPanel, docs: DocsPanel };
 const STAGE_ICON = { done: "check", blocked: "x", active: null, todo: null, skipped: null };
@@ -79,7 +88,6 @@ export class Workspace {
       this.checkEl,
       state.info.server_mode ? btn("download", "Download", { onclick: () => this.download() }, "sm")
         : this.kicadBtn = h("button.btn.sm.kicadbtn", { onclick: (e) => this.kicadMenu(e.currentTarget) }, this.liveEl, h("span", "KiCad"), icon("chevron-down", 12)),
-      btn("ellipsis", null, { onclick: (e) => this.moreMenu(e.currentTarget), "data-tip": "More" }, "sm ghost"),
     ]);
     this.root.appendChild(bar);
     const ws = h("div.ws");
@@ -115,7 +123,16 @@ export class Workspace {
   // ------------------------------------------------------------------ commands (menus, shortcuts, palette)
   commands() {
     const c = (name, spec) => this.unreg.push(command(name, { group: "Project", ...spec }));
-    TABS.forEach(([id, label, ic], i) => c("tab:" + id, { title: `Show ${label}`, icon: ic, kbd: tabKey(i), group: "View", run: () => this.show(id) }));
+    PLACES.forEach(([id, label, ic, views], i) => c("place:" + id, { title: `Go to ${label}`, icon: ic, kbd: tabKey(i), group: "View",
+      run: () => this.show(this.lastIn(id)) }));
+    TABS.forEach(([id, label, ic]) => c("tab:" + id, { title: `Show ${label === "Order" ? "the order" : label === "3D" ? "the 3D model" : label}`, icon: ic, group: "View",
+      run: () => this.show(id) }));
+    c("calculators", { title: "Calculators", icon: "calculator", kbd: "mod+shift+c", group: "Tools", run: () => runCommand("calculators") });
+    c("focus", { title: "Focus mode", icon: "focus", group: "View", run: () => this.focusMode() });
+    c("limits", { title: "Design limits…", icon: "ruler", run: () => this.limitsDialog() });
+    c("selftest", { title: "Run the check self-test", icon: "flask-conical", group: "Tools", run: () => this.selftest() });
+    c("toolkit", { title: "Update the project's toolkit", icon: "wrench", group: "Tools", run: () => this.updateToolkit() });
+    c("archive", { title: "Archive project…", icon: "archive", run: () => this.archive() });
     c("run-checks", { title: "Run all checks", icon: "list-checks", kbd: "mod+shift+k", run: () => this.runChecks() });
     c("checkpoint", { title: "Save checkpoint", icon: "bookmark", kbd: "mod+s", run: () => this.checkpoint() });
     c("download", { title: "Download project", icon: "download", run: () => this.download() });
@@ -248,15 +265,27 @@ export class Workspace {
 
   viewIf(name, fn) { if (this.views[name]) fn(this.views[name]); }
 
+  lastIn(place) {
+    const views = (PLACES.find((p) => p[0] === place) || PLACES[1])[3];
+    const v = localStorage.getItem(`tw.place.${this.pid}.${place}`);
+    return views.includes(v) ? v : views[0];
+  }
+
   show(name) {
-    if (!VIEWS[name]) name = "board";
+    if (!VIEWS[name]) name = PLACES.find((p) => p[0] === name) ? this.lastIn(name) : "board";
+    const was = this.tab && placeOf(this.tab);
     this.tab = name;
     localStorage.setItem("tw.tab." + this.pid, name);
+    localStorage.setItem(`tw.place.${this.pid}.${placeOf(name)}`, name);
+    const want = `#/p/${enc(this.pid)}/${name}`;
+    if (location.hash !== want) history.replaceState(null, "", want);          // the address follows the view (no reload)
+    if (was !== placeOf(name) || !this.tabsEl.querySelector(".subnav")) this.renderTabs();
     for (const [k, v] of Object.entries(this.views)) { v.holder.classList.toggle("on", k === name); if (k !== name && v.hidden) v.hidden(); }
     const v = this.view(name);
     v.holder.classList.add("on");
     v.shown && v.shown();
-    for (const t of this.tabsEl.querySelectorAll(".tab")) t.classList.toggle("on", t.dataset.tab === name);
+    for (const t of this.tabsEl.querySelectorAll(".tab")) t.classList.toggle("on", t.dataset.place === placeOf(name));
+    for (const t of this.tabsEl.querySelectorAll(".subnav button")) t.classList.toggle("on", t.dataset.view === name);
   }
 
   renderTabs() {
@@ -264,60 +293,21 @@ export class Workspace {
     if (this.chatPane.classList.contains("collapsed"))
       this.tabsEl.appendChild(btn("panel-left", null, { onclick: () => this.toggleChat(), "data-tip": "Show the chat", "data-kbd": "mod+\\" }, "sm ghost"));
     const nChecks = this.p.checks && this.p.checks.counts ? (this.p.checks.counts.error || 0) : 0;
-    const pinned = new Set(pinnedTabs());
-    TABS.forEach(([id, label, ic], i) => {
-      if (!pinned.has(id) && id !== this.tab) return;                       // unpinned views wait under More (the one open shows)
-      this.tabsEl.appendChild(h("div.tab" + (id === this.tab ? ".on" : "") + (pinned.has(id) ? "" : ".extra"), { "data-tab": id, onclick: () => this.show(id),
-        "data-tip": label, "data-kbd": tabKey(i) }, icon(ic, 14), h("span", label), id === "checks" && nChecks ? h("span.count", { style: { background: "var(--err)", color: "#fff" } }, String(nChecks)) : null));
+    const here = placeOf(this.tab || "overview");
+    PLACES.forEach(([id, label, ic, views], i) => {
+      this.tabsEl.appendChild(h("div.tab" + (id === here ? ".on" : ""), { "data-place": id, onclick: () => this.show(id === here ? this.tab : this.lastIn(id)),
+        "data-tip": label, "data-kbd": tabKey(i) }, icon(ic, 14), h("span", label),
+        id === "checks" && nChecks ? h("span.count", { style: { background: "var(--err)", color: "#fff" } }, String(nChecks)) : null));
     });
-    const hidden = TABS.filter(([id]) => !pinned.has(id));
-    this.tabsEl.appendChild(h("button.tab.moretab", { onclick: (e) => this.moreTabs(e.currentTarget), "data-tip": "More views" },
-      h("span", hidden.length ? "More" : "Views"), icon("chevron-down", 12)));
+    const views = (PLACES.find((p) => p[0] === here) || PLACES[1])[3];
+    if (views.length > 1)
+      this.tabsEl.appendChild(h("div.subnav", views.map((v) => h("button" + (v === this.tab ? ".on" : ""), { "data-view": v, onclick: () => this.show(v) }, SUB[v]))));
     const active = this.review.active().length;
     const open = this.reviewOpen;
     requestAnimationFrame(() => this.fitTabs());
     this.tabsEl.appendChild(h("div.tabs-right",
-      h("button.btn.sm.ghost.toolsbtn", { onclick: (e) => this.toolsMenu(e.currentTarget), "data-tip": "Tools" }, icon("wrench", 14), h("span", "Tools")),
       h("button.btn.sm" + (open ? ".on" : ".ghost"), { onclick: () => this.toggleReview(), "data-tip": "Review flags", "data-kbd": "mod+shift+r" },
         icon("flag", 14), h("span", "Review"), active ? h("span.count" + (open ? "" : ".muted"), String(active)) : null)));
-  }
-
-  moreTabs(anchor) {
-    const pinned = new Set(pinnedTabs());
-    menu(anchor, [
-      ...TABS.filter(([id]) => !pinned.has(id)).map(([id, label, ic]) => ({ label, icon: ic, kbd: tabKey(TABS.findIndex((t) => t[0] === id)), run: () => this.show(id) })),
-      pinned.size < TABS.length ? "-" : null,
-      { label: "Customize tabs…", icon: "sliders-horizontal", run: () => this.customizeTabs() },
-    ], { align: "start" });
-  }
-
-  // which views sit on the tab bar (the rest under More); kept for every project
-  customizeTabs() {
-    const pinned = new Set(pinnedTabs());
-    const rows = TABS.map(([id, label, ic]) => {
-      const cb = h("input", { type: "checkbox", checked: pinned.has(id), onchange: () => { cb.checked ? pinned.add(id) : pinned.delete(id); save(); } });
-      return h("label.ctab", cb, icon(ic, 15), h("span.grow", label), h("span.tiny.muted", DEFAULT_PINNED.includes(id) ? "default" : ""));
-    });
-    const save = () => {
-      const v = TABS.map((t) => t[0]).filter((id) => pinned.has(id));
-      localStorage.setItem("tw.tabs.pinned", JSON.stringify(v.length ? v : ["board"]));
-      this.renderTabs();
-    };
-    const m = modal({ title: "Customize tabs", icon: "sliders-horizontal", sub: "Views you hide stay under More.",
-      body: h("div.ctabs", rows), actions: [h("button.btn", { onclick: () => { localStorage.removeItem("tw.tabs.pinned"); this.renderTabs(); m.close(); } }, "Reset"),
-        h("button.btn.primary", { onclick: () => m.close() }, "Done")] });
-  }
-
-  toolsMenu(anchor) {
-    menu(anchor, [
-      { label: "Calculators", icon: "calculator", kbd: "mod+shift+c", run: () => runCommand("calculators") },
-      { label: "Timelapse of the board", icon: "play", kbd: "mod+shift+t", run: () => this.timelapse() },
-      { label: "Mission Control", icon: "activity", kbd: "mod+shift+m", run: () => this.mission() },
-      { label: "Compare versions", icon: "history", run: () => this.show("history") },
-      "-",
-      { label: this.focused ? "Leave focus mode" : "Focus mode", icon: "focus", run: () => this.focusMode() },
-      { label: "Customize tabs…", icon: "sliders-horizontal", run: () => this.customizeTabs() },
-    ], { align: "end" });
   }
 
   // the view alone: the chat and the review panel out of the way, until you leave it
@@ -471,9 +461,16 @@ export class Workspace {
   projectMenu(anchor) {
     api("/api/projects").then((list) => {
       const others = list.filter((s) => !s.archived && s.id !== this.pid).slice(0, 8);
-      menu(anchor, [{ head: "Switch project" }, ...others.map((s) => ({ label: s.name, icon: "circuit-board", hint: fmtTime(s.updated), run: () => go("p/" + enc(s.id)) })),
-        others.length ? "-" : null, { label: "All projects", icon: "layout-grid", kbd: "mod+shift+p", run: () => go("") },
-        { label: "Rename…", icon: "pencil", run: () => this.rename() }]);
+      const server = state.info && state.info.server_mode;
+      menu(anchor, [
+        { label: "Rename…", icon: "pencil", run: () => this.rename() },
+        { label: "Design limits…", icon: "ruler", run: () => this.limitsDialog() },
+        { label: "Save checkpoint…", icon: "bookmark", kbd: "mod+s", run: () => this.checkpoint() },
+        { label: "Download project", icon: "download", run: () => this.download() },
+        server ? null : { label: "Show in Finder", icon: "folder", run: () => this.reveal() },
+        { label: "Archive project…", icon: "archive", danger: true, run: () => this.archive() },
+        "-", { head: "Switch project" }, ...others.map((s) => ({ label: s.name, icon: "circuit-board", hint: fmtTime(s.updated), run: () => go("p/" + enc(s.id)) })),
+        { label: "All projects", icon: "layout-grid", kbd: "mod+shift+p", run: () => go("") }]);
     });
   }
 
@@ -487,30 +484,28 @@ export class Workspace {
     ], { align: "end" });
   }
 
-  moreMenu(anchor) {
-    const server = state.info && state.info.server_mode;
-    menu(anchor, [
-      { label: "Save checkpoint…", icon: "bookmark", kbd: "mod+s", run: () => this.checkpoint() },
-      { label: "Download project", icon: "download", run: () => this.download() },
-      server ? null : { label: "Show in Finder", icon: "folder", run: () => this.reveal() },
-      { label: "Rename…", icon: "pencil", run: () => this.rename() },
-      "-",
-      { label: "Run check self-test", icon: "flask-conical", run: async () => {
-        toast("Running the check self-test…");
-        const r = await api(`/api/projects/${enc(this.pid)}/selftest`, { body: {} });
-        toast(r.output.trim().split("\n").pop(), r.ok ? "ok" : "error", 8000);
-      } },
-      { label: "Update toolkit", icon: "wrench", run: async () => {
-        const r = await api(`/api/projects/${enc(this.pid)}/toolkit/update`, { body: {} });
-        toast(`Toolkit ${r.toolkit} installed`, "ok");
-      } },
-      "-",
-      { label: "Archive project", icon: "archive", danger: true, run: async () => {
-        if (!await confirmDialog({ title: `Archive ${this.p.name}?`, text: "You can restore it from the projects page.", ok: "Archive", danger: true })) return;
-        await api(`/api/projects/${enc(this.pid)}`, { method: "DELETE" });
-        go("");
-      } },
-    ], { align: "end" });
+  async selftest() {
+    toast("Running the check self-test…");
+    const r = await api(`/api/projects/${enc(this.pid)}/selftest`, { body: {} });
+    toast(r.output.trim().split("\n").pop(), r.ok ? "ok" : "error", 8000);
+  }
+
+  async updateToolkit() {
+    const r = await api(`/api/projects/${enc(this.pid)}/toolkit/update`, { body: {} });
+    toast(`Toolkit ${r.toolkit} installed`, "ok");
+  }
+
+  async archive() {
+    if (!await confirmDialog({ title: `Archive ${this.p.name}?`, text: "You can restore it from the projects page.", ok: "Archive", danger: true })) return;
+    await api(`/api/projects/${enc(this.pid)}`, { method: "DELETE" });
+    go("");
+  }
+
+  async limitsDialog() {
+    const body = h("div", h("p.small.muted", { style: { margin: "0 0 10px" } }, "Limits the board must meet. Leave any to Claude; the checks hold the design to the ones you set."));
+    const m = modal({ title: "Design limits", icon: "ruler", body, actions: [h("button.btn.primary", { onclick: () => m.close() }, "Done")] });
+    try { body.appendChild(await limitsPanel(this.pid, (v) => { this.p.constraints = v; })); }
+    catch (e) { body.appendChild(h("div.small.muted", e.message)); }
   }
 
   // ------------------------------------------------------------------ actions

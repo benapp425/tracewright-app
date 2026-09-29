@@ -5,12 +5,11 @@ import { h, clear } from "./util.js";
 import { icon } from "./icons.js";
 
 const STEPS = [
-  { sel: ".chatpane", title: "Chat with Claude", text: "Ask for a review, a part change, placement or routing. You can send notes while it works.", side: "right" },
-  { sel: ".tabs", title: "Views", text: "Board, schematic, 3D, BOM, checks and ordering. Pin the ones you use.", side: "bottom" },
-  { sel: ".mainpane", title: "Live updates", text: "Changes appear here and in KiCad as Claude works. Select parts or nets to ask about them.", side: "left" },
-  { sel: ".tabs-right [data-tip^='Review']", title: "Review flags", text: "Press C to mark something on any view, then send your flags to Claude.", side: "bottom" },
-  { sel: ".tabs-right [data-tip^='Tools']", title: "Tools", text: "Calculators, timelapse, Mission Control and version comparison.", side: "bottom" },
-  { sel: ".topbar .helpbtn", title: "Help", text: "Shortcuts, release notes and this tour. ⌘K runs any command.", side: "bottom" },
+  { sel: ".chatpane", title: "Chat", text: "Say what to change: a part, the placement, the routing. You can add notes while Claude works.", side: "right" },
+  { sel: ".tabs", title: "Five places", text: "Overview, Design (board, schematic, 3D), Parts, Checks and Project. ⌘1 to ⌘5 jump between them.", side: "bottom" },
+  { sel: ".mainpane", title: "Live updates", text: "Changes appear here and in KiCad as they are made. Parts and nets you select go with your next message.", side: "left" },
+  { sel: ".tabs-right [data-tip^='Review']", title: "Review flags", text: "Press C to mark something on any view, then send your flags together.", side: "bottom" },
+  { sel: ".topbar .helpbtn", title: "Help", text: "Shortcuts, release notes and this tour. ⌘K finds any command, part or net.", side: "bottom" },
 ];
 
 export class Tour {

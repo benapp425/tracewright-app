@@ -372,6 +372,12 @@ a.brand:hover { text-decoration: none; }
 .tab.on svg.ic { color: var(--accent); }
 .tab .count { margin-left: 1px; }
 .tabs .tabs-right { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+/* the current place's views: a quiet segmented switch after the places */
+.tabs .subnav { display: inline-flex; align-items: center; gap: 2px; margin-left: 10px; padding: 2px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line); }
+.tabs .subnav::before { content: ""; width: 1px; height: 16px; background: var(--line); margin: 0 10px 0 -12px; }
+.tabs .subnav button { height: 24px; padding: 0 10px; border: 0; border-radius: 6px; background: none; color: var(--text-3); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.tabs .subnav button:hover { color: var(--text); }
+.tabs .subnav button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .18); }
 .tabs.compact .tab > span:not(.count) { display: none; }
 .tabs.compact .tab { padding: 0 8px; }
 .viewer.narrow .findbox input { width: 130px; }
@@ -620,8 +626,9 @@ a.brand:hover { text-decoration: none; }
 .chip button { border: 0; background: none; cursor: pointer; color: var(--text-4); padding: 0 3px; display: flex; }
 .chip button:hover { color: var(--text); }
 .chip.kicad { background: var(--ok-soft); color: var(--ok); }
-.suggest { display: flex; flex-direction: column; align-items: center; gap: 14px; margin: auto 0; padding: 24px 0; }
-.suggest .shead { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 5px; color: var(--text-3); }
+.suggest { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: auto; padding: 12px 2px 4px; }
+.suggest .shead { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; color: var(--text-3); }
+.suggest .schips { justify-content: flex-start; }
 .suggest .shead .sic { width: 36px; height: 36px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
 .suggest .shead b { color: var(--text); font-size: 14px; font-weight: 600; }
 .schips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 360px; }
@@ -1644,10 +1651,6 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 
 /* ============================================================ tab bar: pinned views, More, Tools; the KiCad dot; focus mode */
 .tab.extra { opacity: .85; }
-.tab.moretab { border: 0; background: none; font: inherit; color: var(--text-2); display: inline-flex; align-items: center; gap: 4px; }
-.tabs.compact .tab.moretab span { display: inline; }
-.toolsbtn span { font-size: 12.5px; }
-.tabs.compact .toolsbtn span { display: none; }
 .ctabs { display: flex; flex-direction: column; gap: 2px; }
 .ctab { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; cursor: pointer; font-size: 13.5px; }
 .ctab:hover { background: var(--surface-3); }

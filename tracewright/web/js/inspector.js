@@ -115,7 +115,7 @@ export class Inspector {
         info.datasheet && /^https?:/.test(info.datasheet) ? h("a.btn", { href: info.datasheet, target: "_blank", rel: "noopener" }, icon("file-text", 14), "Data sheet") : null,
         h("button.btn", { onclick: () => { m.close(); this.ws.select([{ ref: info.ref }], "inspector"); if (this.ws.show) this.ws.show("schematic"); } }, "Show in the schematic"),
         info.board ? h("button.btn", { onclick: () => { m.close(); if (this.ws.show) this.ws.show("board"); this.ws.select([{ ref: info.ref }], "inspector"); } }, "Show on the board") : null,
-        h("button.btn.primary", { onclick: () => { m.close(); this.ws.ask(`About ${info.ref} (${info.value}): `); } }, "Ask Claude")].filter(Boolean) });
+        h("button.btn.primary", { onclick: () => m.close() }, "Done")].filter(Boolean) });
   }
 }
 

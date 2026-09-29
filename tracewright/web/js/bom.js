@@ -159,7 +159,6 @@ export class BomView {
     bar.append(icon("microchip", 14), h("span.sl", label),
       h("button.tbtn", { onclick: () => this.ws.locate({ ref: refs[0] }), "data-tip": "Show on board" }, icon("circuit-board", 14), h("span", "Board")),
       h("button.tbtn", { onclick: () => { this.ws.show("schematic"); this.ws.view("schematic").probe(refs, "bom", true); }, "data-tip": "Show in schematic" }, icon("waypoints", 14), h("span", "Schematic")),
-      h("button.tbtn", { onclick: () => this.ws.ask(`About ${refs.join(", ")} in the BOM: `), "data-tip": "Ask Claude" }, icon("message-square", 14), h("span", "Ask")),
       h("button.tbtn", { onclick: () => this.setSel([], "bom"), "data-tip": "Clear selection" }, icon("x", 14)));
   }
 

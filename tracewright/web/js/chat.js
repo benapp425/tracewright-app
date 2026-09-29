@@ -217,7 +217,7 @@ export class Chat {
       acts.push(["move", "Place parts", "Place the parts in functional groups, one group at a time, explaining each step. Show me each group before moving on."]);
       acts.push(["route", "Route board", "Route the board: supplies first, then pairs, then signals. Stream it and run the routing checks afterwards."]);
     }
-    const box = h("div.suggest", h("div.shead", h("div.sic", icon("sparkles", 18)), h("b", "Ask Claude"), h("span.small", "Design, place, route or check this board.")),
+    const box = h("div.suggest", h("div.shead", h("span.small", "For this stage")),
       h("div.schips", acts.map(([ic, t, msg]) => h("button.schip", { onclick: () => { this.input.value = msg; this.grow(); this.input.focus(); } }, icon(ic, 13), t)),
         h("button.schip", { onclick: () => this.ws.flagTool() }, icon("flag", 13), "Flag areas")));
     this.msgs.appendChild(box);

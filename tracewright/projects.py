@@ -149,7 +149,10 @@ class Project:
             with open(f) as fh:
                 d = json.load(fh)
             from tw.checks.runner import verdict
-            return {"verdict": verdict(d), "counts": d["counts"], "generated": d["generated"]}
+            waived = d.get("waived") or {}
+            if not waived:                                         # results from before waivers were counted
+                waived = {"total": sum(c.get("waived") or 0 for c in d.get("checks", []))}
+            return {"verdict": verdict(d), "counts": d["counts"], "generated": d["generated"], "waived": waived}
         except (OSError, ValueError, KeyError):
             return None
 

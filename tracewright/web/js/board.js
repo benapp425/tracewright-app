@@ -696,7 +696,6 @@ export class BoardView {
     const label = items.map((i) => i.ref || "net " + i.net.split("/").pop()).join(", ");
     const refs = [...this.sel];
     this.selBar.append(icon(this.selNet && !refs.length ? "cable" : "microchip", 14), h("span.sl", label.length > 60 ? label.slice(0, 60) + "..." : label),
-      h("button.tbtn", { onclick: () => this.ws.ask(`About ${label}: `), "data-tip": "Ask Claude" }, icon("message-square", 14), h("span", "Ask")),
       h("button.tbtn", { "data-tip": "Flag the selection", onclick: () => {
         const box = this.selectionBox();
         if (box) this.flags.create({ x: box[0], y: box[1], region: box, refs, nets: this.selNet ? [this.selNet] : [] });
@@ -865,8 +864,7 @@ export class BoardView {
           h("button.tbtn", { "data-tip": "Flag net", onclick: () => {
             const b = this.netBox(this.spot);
             if (b) this.flags.create({ x: b[0], y: b[1], region: b, nets: [this.spot] });
-          } }, icon("flag", 13), h("span", "Flag")),
-          h("button.tbtn", { "data-tip": "Ask Claude", onclick: () => this.ws.ask(`About net ${short(this.spot)}: `) }, icon("message-square", 13), h("span", "Ask")))));
+          } }, icon("flag", 13), h("span", "Flag")))));
     }
     const isl = this.islands.filter((i) => !this.solo || i.layer === this.solo);
     if (isl.length) {

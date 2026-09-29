@@ -132,8 +132,7 @@ export class ChecksPanel {
       h("div.m", f.message, f.hint ? h("div.hint", f.hint) : null),
       loc ? h("span.loc", { "data-tip": "Show on board", onclick: () => this.ws.locate(w) }, icon("target", 12), loc) : null,
       h("div.fa",
-        btn("flag", null, { "data-tip": "Add to review", onclick: async () => { await this.ws.review.fromFinding(c, f); toast("Added to review", "ok", 2500, { label: "Show", run: () => this.ws.toggleReview(true) }); } }, "sm ghost"),
-        btn("message-square", null, { "data-tip": "Ask Claude about it", onclick: () => this.ws.ask(`Check ${c.id} reports: "${f.message}"${loc ? " (" + loc + ")" : ""}. Is it real? If so fix it; if not, explain and waive it with a reason.`) }, "sm ghost")));
+        btn("flag", null, { "data-tip": "Add to review", onclick: async () => { await this.ws.review.fromFinding(c, f); toast("Added to review", "ok", 2500, { label: "Show", run: () => this.ws.toggleReview(true) }); } }, "sm ghost")));
   }
 
   selectionBar() {

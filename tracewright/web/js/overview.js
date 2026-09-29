@@ -32,6 +32,7 @@ export class OverviewPanel {
   }
 
   render() {
+    const waivedN = (c) => { const w = c.waived || {}; return w.total != null ? w.total : (w.error || 0) + (w.warning || 0) + (w.info || 0); };
     const d = this.d, p = d.project, b = d.board, c = d.checks, bom = d.bom;
     const el = clear(this.el);
     const stages = p.stages || [];
@@ -46,18 +47,18 @@ export class OverviewPanel {
         p.description ? h("p.ov-desc", p.description) : null,
         h("div.ov-stages", stages.map((s) => h("div.ov-st." + s.status, { "data-tip": s.note || s.description || s.title }, h("i"), h("span", s.title)))),
         h("div.ov-actions",
-          btn("sparkles", "Ask Claude", { onclick: () => this.ws.ask("") }, "primary"),
           btn("list-checks", "Run checks", { onclick: () => runCommand("run-checks") }),
           d.has_pcb ? btn("shopping-cart", "Order", { onclick: () => this.ws.show("outputs") }) : null,
           active ? h("span.ov-now", icon("circle-dot", 12), `Now: ${active.title}`) : null))));
     if (d.next.length) el.appendChild(h("section.ov-sec", h("div.ov-h", icon("list-todo", 14), "Next steps"),
-      h("div.ov-next", d.next.map((n, i) => h("button.ov-step", { onclick: () => this.act(n.action), style: { animationDelay: `${i * 0.05}s` } },
+      h("div.ov-next", d.next.map((n, i) => h("button.ov-step", { onclick: () => this.act(n.action), style: { animationDelay: `${i * 0.05}s` },
+        "data-tip": n.action.kind === "chat" ? "Puts the request in the message box" : n.action.kind === "tab" ? "Opens it" : "Runs it" },
         h("span.ov-si", icon(n.icon || "arrow-right", 16)), h("div.grow", h("b", n.title), h("span", n.detail)),
-        h("span.ov-go", n.action.kind === "chat" ? "Ask Claude" : n.action.kind === "tab" ? "Open" : "Run", icon("arrow-right", 13)))))));
+        h("span.ov-go", icon("arrow-right", 14)))))));
     const cc = (c && c.counts) || {};
     const tiles = [
       tile("list-checks", "Checks", c ? (c.verdict === "checks pass" ? "Passing" : c.verdict === "not ready" ? `${cc.error} error${cc.error === 1 ? "" : "s"}` : `${cc.warning} warning${cc.warning === 1 ? "" : "s"}`) : "Not run",
-        c ? `${cc.error || 0} errors · ${cc.warning || 0} warnings · ${cc.info || 0} notes` : `${d.check_count || ""} checks`.trim(), c ? (c.verdict === "checks pass" ? "ok" : c.verdict === "not ready" ? "bad" : "warn") : "", () => this.ws.show("checks")),
+        c ? `${cc.error || 0} errors · ${cc.warning || 0} warnings · ${cc.info || 0} notes${waivedN(c) ? ` · ${waivedN(c)} waived` : ""}` : `${d.check_count || ""} checks`.trim(), c ? (c.verdict === "checks pass" ? "ok" : c.verdict === "not ready" ? "bad" : "warn") : "", () => this.ws.show("checks")),
       tile("circuit-board", "Board", b ? `${b.w} × ${b.h} mm` : "—",
         b ? `${b.layers} layers · ${b.placed}/${b.parts} placed · ${b.nets ? Math.round(100 * b.routed / b.nets) : 0}% routed` : "No board yet", "", () => this.ws.show("board"),
         b && b.nets ? b.routed / b.nets : null),

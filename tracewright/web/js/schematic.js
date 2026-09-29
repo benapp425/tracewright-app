@@ -111,8 +111,8 @@ export class SchematicView {
     if (d.empty) {
       clear(this.loading); this.loading.style.display = "flex";
       this.loading.appendChild(h("div", h("div.eicon", icon("waypoints", 22)), h("h3", "No schematic yet"),
-        h("p", "Ask Claude to draw it, or draw it in KiCad."),
-        h("button.btn.primary", { onclick: () => this.ws.ask("Let's capture the schematic. Start with the power sheet and show me each block as you add it.") }, "Start the schematic")));
+        h("p", "It appears here when the design reaches the schematic, or when you draw one in KiCad."),
+        this.ws.openKicad ? h("button.btn", { onclick: () => this.ws.openKicad("schematic") }, "Open the Schematic Editor") : null));
       return;
     }
     this.loading.style.display = "none";
@@ -332,7 +332,6 @@ export class SchematicView {
     const refs = [...this.sel];
     const label = refs.join(", ");
     this.selBar.append(icon("waypoints", 14), h("span.sl", label.length > 60 ? label.slice(0, 60) + "..." : label),
-      h("button.tbtn", { onclick: () => this.ws.ask(`About ${label} on the ${this.cur} sheet: `), "data-tip": "Ask Claude about the selection" }, icon("message-square", 14), h("span", "Ask")),
       h("button.tbtn", { "data-tip": "Flag the selection", onclick: () => {
         const b = this.selBox();
         if (b) this.flags.create({ x: b[0], y: b[1], region: b, refs });
