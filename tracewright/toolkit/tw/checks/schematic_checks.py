@@ -42,8 +42,10 @@ def _same_block(a, b):
         return False
 
 
-def render_findings(doc, rects, sheet_label):
-    """[(kind, message, (x, y))] for one plotted sheet. rects: block / zone rectangles of the sheet."""
+def render_findings(doc, rects, sheet_label, own_mark=None):
+    """[(kind, message, (x, y), texts)] for one plotted sheet. rects: block / zone rectangles of the sheet.
+    own_mark(text, seg): a no-connect mark that belongs to the text (the X at the tip of the pin whose number it
+    is: on a short pin the two meet in every KiCad sheet), not reported."""
     words, seen = [], set()
     for t in doc.texts:                       # KiCad plots some texts twice (e.g. fields): keep one
         if not t.box or not t.text.strip():
@@ -81,6 +83,8 @@ def render_findings(doc, rects, sheet_label):
                 if max(q[0], q[2]) < s[0] or min(q[0], q[2]) > s[2] or max(q[1], q[3]) < s[1] or min(q[1], q[3]) > s[3]:
                     continue
                 if _through(q, s):
+                    if q[4] == NC and own_mark is not None and own_mark(t, q):
+                        continue
                     out.append((kind, f"{what} '{t.text}'", (t.box[0], t.box[1]), (t,)))
                     break
     return out
@@ -112,7 +116,12 @@ def sch_render(ctx):
     for name_path, (doc, path) in sorted(ctx.svgs.items()):
         sh = sheets.get(name_path)
         rects = sh.sf.rects if sh else []
-        for kind, msg, (x, y), texts in render_findings(doc, rects, name_path):
+        tips = [(str(num), x, y) for sym in (sh.symbols if sh else []) for (num, _, _, x, y) in sym.pins]
+
+        def own_mark(t, q, tips=tips):
+            mx, my = (q[0] + q[2]) / 2, (q[1] + q[3]) / 2
+            return any(num == t.text.strip() and abs(mx - x) < 1.0 and abs(my - y) < 1.0 for num, x, y in tips)
+        for kind, msg, (x, y), texts in render_findings(doc, rects, name_path, own_mark):
             lib = _inside_library_symbol(sh, texts) if kind == "text-text" else None
             where = {"sheet": name_path, "file": sh.filename if sh else "", "x": round(x, 2), "y": round(y, 2)}
             key = f"sch.render:{name_path}:{kind}:{msg}"          # unchanged, so a waiver on it still holds
@@ -256,15 +265,15 @@ def sch_style(ctx):
                 parts = ", ".join(f"{k} x{v}" for k, v in sorted(colored.items()))
                 out.append(Finding("sch.style", "info", f"custom colors on {sum(colored.values())} items ({parts})", where,
                                    hint="Leave colors at the default so KiCad's theme draws them and the PDF prints in black "
-                                        "and white; say it in a note instead of a color.", key=f"style:colour:{sf.path}"))
+                                        "and white; say it in a note instead of a color.", key=f"style:colour:{sh.filename}"))
             if filled:
                 out.append(Finding("sch.style", "info", f"{filled} filled boxes or shapes", where,
                                    hint="Group a function with a thin unfilled box and a title; tints hide wires in print.",
-                                   key=f"style:fill:{sf.path}"))
+                                   key=f"style:fill:{sh.filename}"))
             if small:
                 out.append(Finding("sch.style", "warning", f"{small} texts or labels smaller than 1 mm", where,
                                    hint="1.27 mm for labels, fields and notes; 2 mm for block titles.",
-                                   key=f"style:small:{sf.path}"))
+                                   key=f"style:small:{sh.filename}"))
             if many_sheets and globals_ and (style == "hierarchical" or (style is None and has_pins)):
                 signals = sorted(set(globals_) - supplies)
                 if signals:
@@ -272,18 +281,18 @@ def sch_style(ctx):
                                        + ("in a hierarchical schematic" if style else "alongside sheet pins"), where,
                                        hint="Sheet pins show which signals cross which sheets (`./tw style hierarchical` redraws "
                                             "them); or choose flat in the Schematic tab if that is how this design is drawn.",
-                                       key=f"style:global:{sf.path}"))
+                                       key=f"style:global:{sh.filename}"))
             if many_sheets and style == "flat" and sh.parent is not None and hier_labels:
                 out.append(Finding("sch.style", "info", f"{hier_labels} hierarchical labels in a flat schematic", where,
                                    hint="`./tw style flat` redraws them as global labels, checked against KiCad's netlist.",
-                                   key=f"style:hier:{sf.path}"))
+                                   key=f"style:hier:{sh.filename}"))
             tb = sf.title
             missing = [k for k in ("title", "rev", "date") if not tb.get(k)]
             if missing:
                 out.append(Finding("sch.style", "warning" if set(missing) - {"date"} else "info",
                                    f"title block without {', '.join(missing)}", where,
                                    hint="Every sheet: title, revision, date, company or author.",
-                                   key=f"style:tb:{sf.path}"))
+                                   key=f"style:tb:{sh.filename}"))
             # four-way junctions: a dot where four or more wire arms / pins meet
             segs = [(a, b) for w in sf.wires for a, b in zip(w, w[1:])]
             pins = [(round(x, 2), round(y, 2)) for s_ in sh.symbols for (_, _, _, x, y) in s_.pins]
@@ -301,7 +310,7 @@ def sch_style(ctx):
                                        {**where, "x": jx, "y": jy},
                                        hint="Split it into two T junctions a grid step apart: a dot on a crossing is "
                                             "easy to miss, and a missed dot reads as two wires crossing.",
-                                       key=f"style:4way:{sf.path}:{jx:.2f}:{jy:.2f}"))
+                                       key=f"style:4way:{sh.filename}:{jx:.2f}:{jy:.2f}"))
         for s_ in sh.symbols:                                  # per instance: symbols and their designators
             if s_.is_power and s_.pins and s_.value and not s_.value.upper().startswith("PWR_FLAG"):
                 (_, _, _, px, py) = s_.pins[0]
@@ -373,7 +382,7 @@ def sch_text(ctx):
                 out.append(Finding("sch.text", "warning", f"text inside the sheet symbol for {c['name'] or c['file']}: "
                                    f"\u201c{inside[0]['text'].splitlines()[0][:60]}\u201d", {**where, "x": inside[0]["x"], "y": inside[0]["y"]},
                                    hint="A sheet symbol shows its name, its file and its pins. Say what the sheet holds on "
-                                        "that sheet, or in the cover's contents list.", key=f"text:insheet:{sf.path}:{c['path']}"))
+                                        "that sheet, or in the cover's contents list.", key=f"text:insheet:{sh.filename}:{c['path']}"))
         total = 0
         for t in sf.texts:
             body = t["text"]
@@ -385,19 +394,19 @@ def sch_text(ctx):
                     out.append(Finding("sch.text", sev, f"note {why}: \u201c{line.strip()}\u201d", {**where, "x": t["x"], "y": t["y"]},
                                        hint="Keep notes to what the drawing cannot show: why a value, a rating, a layout "
                                             "constraint, a short numbered list of general notes. Review items, firmware rules "
-                                            "and background go in docs/.", key=f"text:{why[:12]}:{sf.path}:{t['x']:.1f}:{t['y']:.1f}"))
+                                            "and background go in docs/.", key=f"text:{why[:12]}:{sh.filename}:{t['x']:.1f}:{t['y']:.1f}"))
                     break
             longest = max((len(l) for l in body.splitlines()), default=0)
             if longest > 110:
                 out.append(Finding("sch.text", "info", f"a {longest}-character line of text", {**where, "x": t["x"], "y": t["y"]},
                                    hint="A schematic note is a line or two beside what it explains.",
-                                   key=f"text:long:{sf.path}:{t['x']:.1f}:{t['y']:.1f}"))
+                                   key=f"text:long:{sh.filename}:{t['x']:.1f}:{t['y']:.1f}"))
         long_notes = [t for t in sf.texts if len(t["text"]) > 40]
         if total > 1400 or len(long_notes) > 10:
             out.append(Finding("sch.text", "info", f"{len(sf.texts)} notes, {total} characters, on one sheet", where,
                                hint="This reads like a document. Keep the cover to what the board is, the sheet list, a short "
                                     "numbered list of general notes and the revisions; the rest belongs in docs/.",
-                               key=f"text:wall:{sf.path}"))
+                               key=f"text:wall:{sh.filename}"))
         for s_ in sh.symbols:
             if s_.ref.startswith("#FLG") and s_.lib and any(k == "rectangle" for _, _, k, _ in s_.lib.graphics):
                 out.append(Finding("sch.text", "warning", f"{s_.ref} is a box standing in for PWR_FLAG", {**where, "ref": s_.ref},

@@ -127,6 +127,25 @@ def plan(b, net, via_d=0.6, via_drill=0.3, clearance=0.25):
     return out
 
 
+def stray(b, net):
+    """The net's pour islands that hold one of its pads and reach its main copper through nothing (what repair
+    could not join: no spot in the island over main copper on another layer): [(layer, (x, y))], a point in each."""
+    isl, comp, main = islands(b, net)
+    if main is None:
+        return []
+    pads = [(p, [l for l in p.layers if l.endswith(".Cu")]) for p in b.pads() if p.net == net]
+    out, seen = [], set()
+    for k, (l, pl, bx) in enumerate(isl):
+        if comp[k] == main or comp[k] in seen:
+            continue
+        if not any(l in ls and bx[0] <= p.x <= bx[2] and bx[1] <= p.y <= bx[3] and geom.inside((p.x, p.y), pl) for p, ls in pads):
+            continue
+        seen.add(comp[k])
+        c = _best_point(pl, 0.0) or ((bx[0] + bx[2]) / 2, (bx[1] + bx[3]) / 2)
+        out.append((l, (round(c[0], 2), round(c[1], 2))))
+    return out
+
+
 def repair(project, net="GND", via_d=0.6, via_drill=0.3, passes=3, live="auto"):
     """Fill, then stitch stray islands and refill, up to `passes` times. Returns the vias added."""
     from . import client

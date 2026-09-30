@@ -1,0 +1,411 @@
+{
+ "board": {
+  "footprints": 21,
+  "length_mm": 219.3,
+  "tracks": 80,
+  "vias": 29
+ },
+ "bom": [
+  [
+   "C1",
+   "10u 25V",
+   "C15850"
+  ],
+  [
+   "C2",
+   "22u 25V",
+   "C12891"
+  ],
+  [
+   "C3,C4",
+   "100n",
+   "C1525"
+  ],
+  [
+   "D1",
+   "red",
+   "C2286"
+  ],
+  [
+   "H1,H2,H3,H4",
+   "M3",
+   ""
+  ],
+  [
+   "J1",
+   "USB-C",
+   "C3020560"
+  ],
+  [
+   "J2",
+   "I2C (Qwiic)",
+   "C160404"
+  ],
+  [
+   "R1,R2",
+   "5.1k",
+   "C25905"
+  ],
+  [
+   "R3",
+   "1k",
+   "C11702"
+  ],
+  [
+   "R4",
+   "10k",
+   "C25744"
+  ],
+  [
+   "R6,R7",
+   "68R",
+   "C25108"
+  ],
+  [
+   "R8,R9",
+   "4.7k",
+   "C25900"
+  ],
+  [
+   "U1",
+   "AMS1117-3.3",
+   "C6186"
+  ],
+  [
+   "U2",
+   "ATtiny85-20SU",
+   "C31540447"
+  ]
+ ],
+ "checks": {
+  "assembly.hand": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "bom.board": {
+   "findings": [],
+   "status": "pass"
+  },
+  "bom.fields": {
+   "findings": [],
+   "status": "pass"
+  },
+  "bom.package": {
+   "findings": [],
+   "status": "pass"
+  },
+  "cpl.jlc": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "dfm.copper": {
+   "findings": [],
+   "status": "pass"
+  },
+  "dfm.rules": {
+   "findings": [],
+   "status": "pass"
+  },
+  "drc": {
+   "findings": [],
+   "status": "pass"
+  },
+  "erc": {
+   "findings": [],
+   "status": "pass"
+  },
+  "hs.pairs": {
+   "findings": [
+    "hs:layers:USB_D_P",
+    "hs:loose:USB_D_P",
+    "hs:vias:USB_D_P",
+    "hs:z:USB_D_P"
+   ],
+   "status": "pass"
+  },
+  "lessons.control_pins": {
+   "findings": [],
+   "status": "pass"
+  },
+  "lessons.crystal": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "lessons.i2c": {
+   "findings": [],
+   "status": "pass"
+  },
+  "lessons.led": {
+   "findings": [],
+   "status": "pass"
+  },
+  "lessons.mechanical": {
+   "findings": [
+    "mech:tp"
+   ],
+   "status": "pass"
+  },
+  "lessons.open_drain": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "lessons.rpi_ffc": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "lessons.strapping": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "lessons.thermal_pad": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "lessons.usb_c": {
+   "findings": [
+    "usbc:esd:J1"
+   ],
+   "status": "warn"
+  },
+  "nets.model": {
+   "findings": [],
+   "status": "pass"
+  },
+  "pcb.antenna": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "pcb.esd": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "pcb.netclasses": {
+   "findings": [
+    "netclass:empty:Power"
+   ],
+   "status": "warn"
+  },
+  "pcb.placement": {
+   "findings": [],
+   "status": "pass"
+  },
+  "pcb.polarity": {
+   "findings": [],
+   "status": "pass"
+  },
+  "pcb.silk": {
+   "findings": [],
+   "status": "pass"
+  },
+  "placement.escape": {
+   "findings": [],
+   "status": "pass"
+  },
+  "placement.floorplan": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "power.cap_voltage": {
+   "findings": [],
+   "status": "pass"
+  },
+  "power.decoupling": {
+   "findings": [],
+   "status": "pass"
+  },
+  "power.domains": {
+   "findings": [],
+   "status": "pass"
+  },
+  "power.drop": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "power.flyback": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "power.gates": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "power.pours": {
+   "findings": [],
+   "status": "pass"
+  },
+  "power.regulators": {
+   "findings": [],
+   "status": "pass"
+  },
+  "power.switcher": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "power.thermal": {
+   "findings": [
+    "thermal:unverified"
+   ],
+   "status": "pass"
+  },
+  "power.width": {
+   "findings": [
+    "power.width:undeclared"
+   ],
+   "status": "warn"
+  },
+  "req.limits": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "route.quality": {
+   "findings": [
+    "quality:score"
+   ],
+   "status": "pass"
+  },
+  "route.style": {
+   "findings": [],
+   "status": "pass"
+  },
+  "sch.conventions": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "sch.nets": {
+   "findings": [],
+   "status": "pass"
+  },
+  "sch.pinout": {
+   "findings": [],
+   "status": "pass"
+  },
+  "sch.render": {
+   "findings": [],
+   "status": "pass"
+  },
+  "sch.style": {
+   "findings": [],
+   "status": "pass"
+  },
+  "sch.text": {
+   "findings": [],
+   "status": "pass"
+  },
+  "sch.wiring": {
+   "findings": [],
+   "status": "pass"
+  },
+  "si.crosstalk": {
+   "findings": [],
+   "status": "pass"
+  },
+  "si.layer_change": {
+   "findings": [
+    "layer_change:/MCU/USB_D_N"
+   ],
+   "status": "pass"
+  },
+  "si.length_groups": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "si.noise": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "si.return_path": {
+   "findings": [
+    "si:retvia:USB_D_N"
+   ],
+   "status": "pass"
+  },
+  "si.stubs": {
+   "findings": [],
+   "status": "pass"
+  }
+ },
+ "kicad": "10.0",
+ "nets": {
+  "+3V3": [
+   "C2.1",
+   "C3.1",
+   "C4.1",
+   "J2.2",
+   "R3.1",
+   "R4.1",
+   "R8.1",
+   "R9.1",
+   "U1.2",
+   "U2.8"
+  ],
+  "+5V": [
+   "C1.1",
+   "J1.A4",
+   "J1.A9",
+   "J1.B4",
+   "J1.B9",
+   "U1.3"
+  ],
+  "/MCU/I2C_SCL": [
+   "J2.4",
+   "R9.2",
+   "U2.7"
+  ],
+  "/MCU/I2C_SDA": [
+   "J2.3",
+   "R8.2",
+   "U2.5"
+  ],
+  "/MCU/PB3_USB_N": [
+   "R7.1",
+   "U2.2"
+  ],
+  "/MCU/PB4_USB_P": [
+   "R6.1",
+   "U2.3"
+  ],
+  "/MCU/RESET": [
+   "R4.2",
+   "U2.1"
+  ],
+  "/MCU/USB_D_N": [
+   "J1.A7",
+   "J1.B7",
+   "R7.2"
+  ],
+  "/MCU/USB_D_P": [
+   "J1.A6",
+   "J1.B6",
+   "R6.2"
+  ],
+  "/Power/CC1": [
+   "J1.A5",
+   "R1.1"
+  ],
+  "/Power/CC2": [
+   "J1.B5",
+   "R2.1"
+  ],
+  "GND": [
+   "C1.2",
+   "C2.2",
+   "C3.2",
+   "C4.2",
+   "D1.1",
+   "J1.A1",
+   "J1.A12",
+   "J1.B1",
+   "J1.B12",
+   "J1.SH",
+   "J2.1",
+   "R1.2",
+   "R2.2",
+   "U1.1",
+   "U2.4"
+  ],
+  "Net-(D1-A)": [
+   "D1.2",
+   "R3.2"
+  ]
+ }
+}

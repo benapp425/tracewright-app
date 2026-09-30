@@ -373,6 +373,9 @@ def tool_list(rt, app):
                         await run(link.apply, [{"op": "vias", "items": extra}, {"op": "fill"}])
                         await run(link.save)
                         summary["island_vias"] = summary.get("island_vias", 0) + len(extra)
+                left = await run(driver.islands_left, tw, [n for n in g.planes if g._net_ok(n)])
+                if left:
+                    summary["islands"] = left
                 res = {"summary": summary, "apply": {"via": "live", "ok": True}}
             else:
                 res = await run(driver.route, tw, nets=nets, clear=bool(args.get("clear")), on_progress=progress, live=False,
@@ -385,7 +388,9 @@ def tool_list(rt, app):
         txt = (f"{engine}: routed {s.get('routed', '?')} of {s.get('nets', '?')} nets, {s.get('tracks', '?')} segments, "
                f"{s.get('vias', '?')} vias, {s.get('length_mm', '?')} mm in {s.get('seconds', '?')} s"
                + (f"; stitching vias {s.get('stitching_vias')}" if s.get("stitching_vias") else "")
-               + (f"\nFAILED: " + "; ".join(f"{n.rsplit('/', 1)[-1]} at {w}" for n, w in failed.items()) if failed else ""))
+               + (f"\nFAILED: " + "; ".join(f"{n.rsplit('/', 1)[-1]} at {w}" for n, w in failed.items()) if failed else "")
+               + (f"\nPOUR ISLANDS NOT JOINED (pads cut off from the rest of their net): "
+                  + "; ".join(f"{n.rsplit('/', 1)[-1]} {', '.join(w)}" for n, w in s["islands"].items()) if s.get("islands") else ""))
         if engine == "freerouting":
             txt = f"freerouting: {_json(s)}"
         return _text(txt + "\nNext: run_checks (drc, route.style, power.width, hs.pairs) and render the board.")

@@ -26,7 +26,7 @@ than one sheet gets a global label, which tw.sch.finish() redraws in the project
 (sheet pins when hierarchical). What the pages were asked to connect is saved next to the sheets
 (.tracewright-nets.json) and finish() checks KiCad's netlist against it.
 """
-import math
+import copy, math, re
 from . import kisch
 from .kisch import snap, rot_vec
 from .builder import stock, power as power_symbol
@@ -65,11 +65,15 @@ def _hit(a, b, gap=0.0):
     return a[0] < b[2] + e and b[0] < a[2] + e and a[1] < b[3] + e and b[1] < a[3] + e
 
 
+def _seg_box(a, b):
+    return (min(a[0], b[0]) - 0.15, min(a[1], b[1]) - 0.15, max(a[0], b[0]) + 0.15, max(a[1], b[1]) + 0.15)
+
+
 def _label_box(name, pt, d, flag=True):
     """The page area a label covers (a global label's flag outline included)."""
     w = len(name) * TEXT_W + (3.4 if flag else 0.4)
     x, y = pt
-    h0, h1 = (0.95, 0.95) if flag else (1.5, 0.0)
+    h0, h1 = (1.55, 0.95) if flag else (1.5, 0.0)
     if d == RIGHT:
         return (x, y - h0, x + w, y + h1)
     if d == LEFT:
@@ -87,6 +91,9 @@ def _text_box(s, at, size=1.27):
 
 
 def _gap(k1, k2):
+    if "vlane" in (k1, k2):                        # a top or bottom pin's supply, kept for it: no name or body on it
+        other = k2 if k1 == "vlane" else k1
+        return {"text": 0.0, "label": 0.0, "body": 0.0}.get(other, -99.0)
     if "halo" in (k1, k2):                         # a margin that only text and labels must keep
         other = k2 if k1 == "halo" else k1
         return 0.0 if other in ("text", "label") else -99.0
@@ -94,6 +101,8 @@ def _gap(k1, k2):
         return -0.05                               # wires may touch only where they are meant to
     if k1 == k2 == "label":
         return 0.05                                # labels on neighbouring pins, a grid step apart
+    if {k1, k2} == {"label", "text"}:
+        return 0.1                                 # both boxes hold their text's ink: a hair apart is apart
     if "text" in (k1, k2) or "label" in (k1, k2):
         return 0.3
     return 0.9
@@ -375,7 +384,9 @@ class Group:
 
     def flush(self):
         """Draw what was asked for, in order. Every pin still waiting keeps its way out (a short stub's
-        worth, reserved) so an earlier pattern cannot wall it in."""
+        worth, reserved) so an earlier pattern cannot wall it in. When a pattern still found no room and was
+        drawn aside, the group is drawn again with that pin's whole way out kept clear from the start (its
+        label's, its part's or its supply symbol's worth), and the drawing with the fewest patterns aside is kept."""
         todo, self.pending = self.pending, []
         series = {(id(rq["inst"]), rq["pin"]): rq for rq in todo if rq["kind"] == "series"}
         merged = []
@@ -387,22 +398,67 @@ class Group:
                 continue
             merged.append(rq)
         todo = sorted(merged, key=self._order)
+        start, best, lanes = self._state(), None, set()
+        for attempt in range(3):
+            if attempt:
+                self._restore(start)
+            n0 = len(self.page.crowded)
+            self._draw_all(todo, lanes)
+            aside = self.page.crowded[n0:]
+            if best is None or len(aside) < best[0]:
+                best = (len(aside), self._state())
+            stuck = {m.groups() for m in (re.match(r"(\S+) pin (\S+):", c) for c in aside) if m}
+            if not aside or stuck <= lanes:
+                break
+            lanes |= stuck
+        if attempt:
+            self._restore(best[1])
+
+    def _draw_all(self, todo, lanes):
         keep = {}
         for rq in todo:
             if rq["kind"] == "nc":
                 continue
             for pin in rq.get("pins") or [rq["pin"]]:
                 p, d = rq["inst"].pin(pin), rq["inst"].pin_dir(pin)
-                e = _add(p, d, P)
-                box = ("wire", (min(p[0], e[0]) - 0.15, min(p[1], e[1]) - 0.15, max(p[0], e[0]) + 0.15, max(p[1], e[1]) + 0.15),
-                       ("exit", rq["inst"].ref, pin))
-                keep[(rq["inst"].ref, pin)] = box
-        self.boxes += list(keep.values())
+                keep[(rq["inst"].ref, pin)] = [("wire", _seg_box(p, _add(p, d, P)), ("exit", rq["inst"].ref, pin))] + \
+                    (self._lane(rq, pin, p, d) if (rq["inst"].ref, pin) in lanes else [])
+        self.boxes += [b for bs in keep.values() for b in bs]
         for rq in todo:
-            mine = [keep.get((rq["inst"].ref, pin)) for pin in rq.get("pins") or [rq["pin"]]]
+            mine = [b for pin in rq.get("pins") or [rq["pin"]] for b in keep.get((rq["inst"].ref, pin), [])]
             self.boxes = [b for b in self.boxes if b not in mine]
             getattr(self, "_draw_" + rq["kind"])(rq)
-        self.boxes = [b for b in self.boxes if not (isinstance(b[2], tuple) and b[2][0] == "exit")]
+        self.boxes = [b for b in self.boxes if not (isinstance(b[2], tuple) and b[2][0] in ("exit", "lane"))]
+
+    @staticmethod
+    def _lane(rq, pin, p, d):
+        """A pin's whole way out: a sideways pin's line as far as its pattern reaches drawn straight (a label's stub
+        and text, a series part and its label, an LED's resistor and LED), held as a wire so nothing crosses it or
+        sits on it; a top or bottom pin's supply symbol, as wide as its name."""
+        kind, tag = rq["kind"], ("lane", rq["inst"].ref, pin)
+        label = lambda n: len(str(n)) * TEXT_W + 3.4 if n else 0
+        if d[1] == 0 or kind == "net":
+            if kind == "series":
+                lead = math.ceil((len(rq["before"]) * TEXT_W + 2 * P) / P) * P if rq.get("before") else P
+                L = lead + 7.62 + P + label(rq.get("net"))
+            else:
+                L = {"net": P + label(rq.get("name")), "indicator": 3 * P + 2 * 7.62,
+                     "pull": 3 * P + label(rq.get("net"))}.get(kind, 2 * P)
+            return [("wire", _seg_box(_add(p, d, P), _add(p, d, max(2 * P, L))), tag)]
+        half = max(1.3, len(str(rq.get("rail") or "")) * TEXT_W / 2 + 0.3)
+        f = _add(p, d, 3 * P if kind == "decouple" else 2 * P)
+        return [("vlane", (min(p[0], f[0]) - half, min(p[1], f[1]), max(p[0], f[0]) + half, max(p[1], f[1])), tag)]
+
+    def _state(self):
+        return (list(self.ops), list(self.boxes), dict(self.parts), {k: set(v) for k, v in self.page.nets.items()},
+                list(self.page.crowded), copy.deepcopy(self.__dict__.get("marks", {})))
+
+    def _restore(self, st):
+        self.ops, self.boxes, self.parts = list(st[0]), list(st[1]), dict(st[2])
+        self.page.nets.clear()
+        self.page.nets.update({k: set(v) for k, v in st[3].items()})
+        self.page.crowded[:] = st[4]
+        self.__dict__["marks"] = copy.deepcopy(st[5])
 
     def _commit(self, ops, items):
         for op in ops:
@@ -576,6 +632,18 @@ class Group:
                     self._mark(name, lab[2], lab[3], inst.ref, [it for it in items if it[0] == "label"] +
                                [it for it in items if it[0] == "wire"][-1:])
                 return
+        if len(pins) == 1 and d[1] == 0:                   # out, down (or up) to a clear row, then the label
+            p = pts[0]
+            for vdir in (DOWN, UP):
+                for a in (P, 2 * P, 3 * P, 4 * P, 5 * P):
+                    for b in range(1, 10):
+                        c2 = _add(_add(p, d, a), vdir, b * P)
+                        for L in (P, 2 * P, 3 * P):
+                            path = [p, _add(p, d, a), c2, _add(c2, d, L)]
+                            items = self._wire_items(path, inst.ref) + [("label", _label_box(name, path[-1], d), None)]
+                            if self._clear(items, anchor=inst.ref):
+                                self._commit([("wire", path), ("label", name, path[-1], d) + (("global",) if rq.get("rail") else ())], items)
+                                return
         # nowhere clear: each pin carries the label itself (no wire, so it cannot touch another net)
         for q in pts:
             self._commit([("label", name, q, d)], [("label", _label_box(name, q, d), None)])
@@ -828,6 +896,19 @@ class Group:
                         return True
         return False
 
+    def _indicator_chain(self, rq, start, d):
+        """The resistor and the LED in line from `start` along d, anode toward the resistor, then ground."""
+        rref, dref = rq["refs"]
+        r = self._two(rq["rkey"], rref, start, _dir_name(d))
+        anode = _add(r.pin("2"), d, P)
+        led = self._two(rq["dkey"], dref, _add(anode, d, 7.62), _dir_name((-d[0], -d[1])))
+        k = led.pin("1")
+        end = _add(k, d, P)
+        ops = [("part", r), ("wire", [r.pin("2"), led.pin("2")]), ("part", led), ("wire", [k, end]), ("power", rq["gnd"], end, 0)]
+        items = self._part_items(r) + self._wire_items([r.pin("2"), led.pin("2")], rref)
+        items += self._part_items(led) + self._wire_items([k, end], dref) + self._power_items(rq["gnd"], end)
+        return ops, items
+
     def _draw_indicator(self, rq):
         inst, pin, (rref, dref), gnd = rq["inst"], rq["pin"], rq["refs"], rq["gnd"]
         p, d = inst.pin(pin), inst.pin_dir(pin)
@@ -835,24 +916,51 @@ class Group:
         self._connect(a_net, inst.ref, pin)
         self._connect(a_net, rref, "1")
         self._connect(k_net, rref, "2")
+        self._connect(k_net, dref, "2")
         self._connect(gnd, dref, "1")
         if d[1] != 0:
             self.page.crowded.append(f"{inst.ref} pin {pin}: indicator needs a sideways pin")
-        for lead in range(1, 14):
-            a = _add(p, d, lead * P)
-            r = self._two(rq["rkey"], rref, a, _dir_name(d))
-            anode = _add(r.pin("2"), d, P)
-            led = self._two(rq["dkey"], dref, _add(anode, d, 7.62), _dir_name((-d[0], -d[1])))    # anode toward the resistor
-            k = led.pin("1")
-            end = _add(k, d, P)
-            ops = [("wire", [p, a]), ("part", r), ("wire", [r.pin("2"), led.pin("2")]), ("part", led), ("wire", [k, end]),
-                   ("power", gnd, end, 0)]
-            items = self._wire_items([p, a], inst.ref) + self._part_items(r) + self._wire_items([r.pin("2"), led.pin("2")], rref)
-            items += self._part_items(led) + self._wire_items([k, end], dref) + self._power_items(gnd, end)
-            if self._clear(items, anchor=inst.ref):
-                self._commit(ops, items)
+        paths = [[p, _add(p, d, lead * P)] for lead in range(1, 14)]
+        if d[1] == 0:                          # out, down (or up) to a clear row, then out through the pair
+            paths += [[p, c1, c2, _add(c2, d, lead * P)] for vdir in (DOWN, UP) for a in (P, 2 * P, 3 * P, 4 * P, 5 * P)
+                      for c1 in [_add(p, d, a)] for b in range(1, 10) for c2 in [_add(c1, vdir, b * P)] for lead in range(2, 13)]
+        for path in paths:
+            ops, items = self._indicator_chain(rq, path[-1], d)
+            if self._clear(self._wire_items(path, inst.ref) + items, anchor=inst.ref):
+                self._commit([("wire", path)] + ops, self._wire_items(path, inst.ref) + items)
                 return
-        self.page.crowded.append(f"{inst.ref} pin {pin}: indicator crowded")
+        # no room in line: the pin labelled, the resistor and LED aside from the same label
+        self._draw_net({"inst": inst, "pin": pin, "name": a_net, "pins": [pin]}, record=False)
+
+        def make(x, y):
+            a, s0 = (x, y), _add((x, y), RIGHT, P)
+            ops, items = self._indicator_chain(rq, s0, RIGHT)
+            return ([("wire", [a, s0]), ("label", a_net, a, LEFT)] + ops,
+                    self._wire_items([a, s0], rref) + [("label", _label_box(a_net, a, LEFT), None)] + items)
+        self._commit(*self._free_spot(make))
+        self.page.crowded.append(f"{inst.ref} pin {pin}: indicator drawn beside the part")
+
+    def _crystal_plan(self, rq, top, bot, d, reach, owner):
+        """The crystal standing between the two lines `reach` pitches out along d, each load capacitor out from its
+        end to ground: (ops, items)."""
+        ref, (c1, c2), gnd = rq["ref"], rq["cap_refs"], rq["gnd"]
+        x = snap(max(top[0] * d[0], bot[0] * d[0]) * d[0] + d[0] * reach * P)
+        mid = snap((top[1] + bot[1]) / 2)
+        ytop, ybot = snap(mid - 3.81), snap(mid + 3.81)
+        y = self._two(rq["ykey"], ref, (x, ytop), "down")
+        nt, nb = y.pin("1"), y.pin("2")
+        y.ref_at, y.val_at = (x, snap(ytop - 3.81), None), (x, snap(ybot + 3.81), None)   # name above, value below, centred
+        xj = snap(x - d[0] * 2 * P)                      # the lines jog before the crystal, then meet its pins
+        ops = [("wire", [top, (xj, top[1]), (xj, nt[1]), nt]) if top[1] != nt[1] else ("wire", [top, nt]),
+               ("wire", [bot, (xj, bot[1]), (xj, nb[1]), nb]) if bot[1] != nb[1] else ("wire", [bot, nb]), ("part", y)]
+        items = self._wire_items(ops[0][1], owner) + self._wire_items(ops[1][1], owner) + self._part_items(y)
+        for node, cref, key, where in ((nt, c1, rq["caps"][0], "fields_above"), (nb, c2, rq["caps"][1], "fields_below")):
+            c = self._two(key, cref, _add(node, d, P), _dir_name(d), **{where: True})
+            g = _add(c.pin("2"), d, P)
+            ops += [("wire", [node, c.pin("1")]), ("junction", node), ("part", c), ("wire", [c.pin("2"), g]), ("power", gnd, g, 0)]
+            items += self._wire_items([node, c.pin("1")], ref) + self._part_items(c) + self._wire_items([c.pin("2"), g], cref)
+            items += self._power_items(gnd, g)
+        return ops, items
 
     def _draw_crystal(self, rq):
         inst, (pa, pb), gnd = rq["inst"], rq["pins"], rq["gnd"]
@@ -863,40 +971,32 @@ class Group:
             return
         top, bot = (a, b) if a[1] < b[1] else (b, a)
         tpin, bpin = (pa, pb) if a[1] < b[1] else (pb, pa)
-        self._connect(f"{inst.ref}_{tpin}", inst.ref, tpin)
-        self._connect(f"{inst.ref}_{bpin}", inst.ref, bpin)
+        tn, bn = f"{inst.ref}_{tpin}", f"{inst.ref}_{bpin}"
         ref, (c1, c2) = rq["ref"], rq["cap_refs"]
+        for n, r_, q in ((tn, inst.ref, tpin), (bn, inst.ref, bpin), (tn, ref, "1"), (bn, ref, "2"), (tn, c1, "1"), (bn, c2, "1"),
+                         (gnd, c1, "2"), (gnd, c2, "2")):
+            self._connect(n, r_, q)
         for reach in range(3, 16):
-            x = snap(max(top[0] * d[0], bot[0] * d[0]) * d[0] + d[0] * reach * P)
-            mid = snap((top[1] + bot[1]) / 2 / P) * P if False else snap((top[1] + bot[1]) / 2)
-            ytop, ybot = snap(mid - 3.81), snap(mid + 3.81)
-            y = self._two(rq["ykey"], ref, (x, ytop), "down")
-            nt, nb = y.pin("1"), y.pin("2")
-            y.ref_at, y.val_at = (x, snap(ytop - 3.81), None), (x, snap(ybot + 3.81), None)   # name above, value below, centred
-            xj = snap(x - d[0] * 2 * P)                      # the lines jog before the crystal, then meet its pins
-            ops = [("wire", [top, (xj, top[1]), (xj, nt[1]), nt]) if top[1] != nt[1] else ("wire", [top, nt]),
-                   ("wire", [bot, (xj, bot[1]), (xj, nb[1]), nb]) if bot[1] != nb[1] else ("wire", [bot, nb]), ("part", y)]
-            items = self._wire_items(ops[0][1], inst.ref) + self._wire_items(ops[1][1], inst.ref) + self._part_items(y)
-            for node, cref, key, where in ((nt, c1, rq["caps"][0], "fields_above"), (nb, c2, rq["caps"][1], "fields_below")):
-                c = self._two(key, cref, _add(node, d, P), _dir_name(d), **{where: True})
-                g = _add(c.pin("2"), d, P)
-                ops += [("wire", [node, c.pin("1")]), ("junction", node), ("part", c), ("wire", [c.pin("2"), g]), ("power", gnd, g, 0)]
-                items += self._wire_items([node, c.pin("1")], ref) + self._part_items(c) + self._wire_items([c.pin("2"), g], cref)
-                items += self._power_items(gnd, g)
+            ops, items = self._crystal_plan(rq, top, bot, d, reach, inst.ref)
             if self._clear(items, anchor=inst.ref):
                 self._commit(ops, items)
-                self._connect(f"{inst.ref}_{tpin}", ref, "1")
-                self._connect(f"{inst.ref}_{bpin}", ref, "2")
-                self._connect(f"{inst.ref}_{tpin}", c1, "1")
-                self._connect(f"{inst.ref}_{bpin}", c2, "1")
-                self._connect(gnd, c1, "2")
-                self._connect(gnd, c2, "2")
                 return
-        self.page.crowded.append(f"{inst.ref}: crystal crowded {getattr(self, 'why', '')}")
+        # no room beside the pins: each pin labelled, the crystal and its capacitors aside between the two labels
+        self._draw_net({"inst": inst, "pin": tpin, "name": tn, "pins": [tpin]}, record=False)
+        self._draw_net({"inst": inst, "pin": bpin, "name": bn, "pins": [bpin]}, record=False)
+
+        def make(x, y):
+            t, b_ = (x, y), (x, snap(y + 7.62))
+            ops, items = self._crystal_plan(rq, t, b_, RIGHT, 3, None)
+            return (ops + [("label", tn, t, LEFT), ("label", bn, b_, LEFT)],
+                    items + [("label", _label_box(tn, t, LEFT), None), ("label", _label_box(bn, b_, LEFT), None)])
+        self._commit(*self._free_spot(make))
+        self.page.crowded.append(f"{inst.ref}: crystal drawn beside the part {getattr(self, 'why', '')}")
 
     # ------------------------------------------------------------------ parts drawn aside (a label at each end)
-    def _free_spot(self, make):
-        """The first place right of (then below) what is drawn where make(x, y) -> (ops, items) is clear."""
+    def _free_spot(self, make, strict=False):
+        """The first place right of (then below) what is drawn where make(x, y) -> (ops, items) is clear. None when
+        there is none and `strict`; otherwise the drawing right of everything, the one place left."""
         bb = self.bbox()
         for row in range(0, 40):
             for col in range(0, 120):
@@ -905,7 +1005,7 @@ class Group:
                 ops, items = make(x, y)
                 if self._clear(items):
                     return ops, items
-        return make(snap(bb[2] + 12.7), snap(bb[1]))
+        return None if strict else make(snap(bb[2] + 12.7), snap(bb[1]))
 
     def _aside_pull(self, key, ref, to, name):
         down = is_ground(to)
@@ -940,17 +1040,24 @@ class Group:
         self._commit(*self._free_spot(make))
 
     def _aside_caps(self, caps, refs, rail):
-        def make(x, y):
-            top = (x, y)
-            end = _add(top, RIGHT, 7.62 * len(caps))
-            ops = [("power", rail, top, 0), ("wire", [top, end])]
-            items = self._power_items(rail, top) + self._wire_items([top, end])
-            for i, key in enumerate(caps):
-                c, o, it = self._cap_down(key, refs[i], _add(top, RIGHT, 7.62 * (i + 1)))
-                ops += o + ([("junction", _add(top, RIGHT, 7.62 * (i + 1)))] if i < len(caps) - 1 else [])
-                items += it
-            return ops, items
-        self._commit(*self._free_spot(make))
+        def plan(pitch):
+            def make(x, y):
+                top = (x, y)
+                end = _add(top, RIGHT, pitch * len(caps))
+                ops = [("power", rail, top, 0), ("wire", [top, end])]
+                items = self._power_items(rail, top) + self._wire_items([top, end])
+                for i, key in enumerate(caps):
+                    c, o, it = self._cap_down(key, refs[i], _add(top, RIGHT, pitch * (i + 1)))
+                    ops += o + ([("junction", _add(top, RIGHT, pitch * (i + 1)))] if i < len(caps) - 1 else [])
+                    items += it
+                return ops, items
+            return make
+        for pitch in (7.62, 10.16, 12.7, 15.24):           # wider when a value ("10u 25V") reaches the next capacitor
+            got = self._free_spot(plan(pitch), strict=True)
+            if got:
+                self._commit(*got)
+                return
+        self._commit(*self._free_spot(plan(15.24)))
 
     # ------------------------------------------------------------------ chains and notes
     def finish(self):

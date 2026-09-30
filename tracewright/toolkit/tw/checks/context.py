@@ -9,7 +9,7 @@ ctx.drc        kicad-cli DRC JSON with schematic parity  (needs 'drc')
 ctx.svgs       {sheet name path: (SvgDoc, svg path)}      (needs 'svg')
 ctx.fab        fab capabilities in force (tw.dfm preset + tracewright.json fab.rules)
 """
-import os, glob, json, time, hashlib, threading
+import re, os, glob, json, time, hashlib, threading
 from .. import env, kicad
 from ..board import Board
 from ..netlist import Netlist
@@ -142,6 +142,9 @@ class Context:
                 w = dict(x) if isinstance(x, dict) else {"key": str(x)}
                 if w.get("key"):
                     out[str(w["key"])] = w
+                    # keys once held the sheet's full path; they hold its file name now
+                    k = re.sub(r"(?<=:)/[^:]*/([^/:]+\.kicad_sch)(?=:|$)", r"\1", str(w["key"]))
+                    out.setdefault(k, w)
             return out
         return self._get("waivers", make)
 

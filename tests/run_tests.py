@@ -20,8 +20,8 @@ import tracewright  # noqa: E402  (puts the toolkit on sys.path as `tw`)
 from tw import env  # noqa: E402
 
 FIXTURE = os.path.join(ROOT, "tracewright", "toolkit", "tw", "fixtures", "demo")
-HAVE_KICAD = bool(env.kicad()["cli"])
-HAVE_KPY = bool(env.kicad()["python"])
+HAVE_KICAD = bool(env.kicad()["cli"]) and os.path.exists(env.kicad()["cli"])        # TW_KICAD_CLI=/none: as without it
+HAVE_KPY = bool(env.kicad()["python"]) and os.path.exists(env.kicad()["python"])
 TESTS = []
 
 
@@ -408,13 +408,43 @@ def web_api_smoke():
         pid = st.import_copy(FIXTURE, "API demo").id
         app = make_app()
         async with TestClient(TestServer(app)) as c:
-            for path in ("/api/info", "/api/projects", f"/api/projects/{pid}", f"/api/projects/{pid}/board",
-                         f"/api/projects/{pid}/schematic", f"/api/projects/{pid}/checks", f"/api/projects/{pid}/history",
-                         f"/api/projects/{pid}/files", "/api/lessons", "/"):
+            async def get(path):
                 r = await c.get(path)
-                assert r.status == 200, (path, r.status, await r.text())
-            b = await (await c.get(f"/api/projects/{pid}/board")).json()
-            assert len(b["footprints"]) == 21
+                assert r.status == 200, (path, r.status, (await r.text())[:300])
+                return await r.json()
+            info = await get("/api/info")
+            assert info["version"] == tracewright.__version__ and "cli" in info["kicad"], info.get("version")
+            listed = {x["id"]: x for x in await get("/api/projects")}
+            assert listed[pid]["has_pcb"] and listed[pid]["has_sch"] and listed[pid]["cloud_only"] == 0, listed[pid]
+            pr = await get(f"/api/projects/{pid}")
+            assert pr["name"] == "API demo" and len(pr["stages"]) == 9 and isinstance(pr["brief"], str), pr["name"]
+            b = await get(f"/api/projects/{pid}/board")
+            assert len(b["footprints"]) == 21 and "GND" in b["nets"] and len(b["tracks"]) > 20 and b["outline"], (len(b["tracks"]), b["nets"][:5])
+            sc = await get(f"/api/projects/{pid}/schematic")
+            assert {x["name_path"] for x in sc["sheets"]} >= {"/", "/Power/", "/MCU/"}, [x["name_path"] for x in sc["sheets"]]
+            assert sum(len(x.get("symbols", [])) for x in sc["sheets"]) >= 21
+            ck = await get(f"/api/projects/{pid}/checks")
+            assert "checks" in ck
+            hist = await get(f"/api/projects/{pid}/history")
+            assert hist and hist[0]["hash"] and hist[0]["message"], hist[:1]
+            files = {e["name"] for e in (await get(f"/api/projects/{pid}/files"))["entries"]}
+            none = await get(f"/api/projects/{pid}/files?path=firmware")          # a folder not made yet: empty, not an error
+            assert none["entries"] == [] and none.get("missing"), none
+            assert {"tracewright.json", "hardware"} <= files, files
+            lessons = await get("/api/lessons")
+            assert len(lessons) >= 5 and all(l["id"] and l["title"] for l in lessons)
+            ov = await get(f"/api/projects/{pid}/overview")
+            assert ov["board"]["parts"] == 21 and ov["next"], ov["board"]
+            bom = await get(f"/api/projects/{pid}/bom")
+            assert bom["rows"] and bom["totals"]["parts"] >= 20 and "stock" in bom, bom["totals"]
+            so = await get(f"/api/projects/{pid}/signoff")
+            assert so["can_sign"] is False and so["blockers"] and so["signoff"] is None, so["blockers"]
+            m = await get(f"/api/projects/{pid}/mentions")
+            assert any(x["ref"] == "U2" for x in m["parts"]) and m["nets"] and m["sheets"]
+            nets = await get(f"/api/projects/{pid}/nets")
+            assert nets["nets"] and nets["summary"]
+            page = await (await c.get("/")).text()
+            assert "<title>" in page and "Tracewright" in page
             r = await c.get(f"/api/projects/{pid}/schematic/svg?sheet=/Power/")
             assert r.status == 200 and "svg" in r.headers["Content-Type"]
             r = await c.get(f"/api/projects/{pid}/file?path=../../etc/passwd")
@@ -1549,7 +1579,7 @@ def design_ideas_parse_forgivingly():
     assert "Lights" in p and "LCSC" in p and "$30" in p and "round" in p
 
 
-@test()
+@test(needs=("kicad",))
 def new_endpoints_answer():
     """Order, stack-up, ideas, steering (refused when Claude is idle) and the timelapse video upload."""
     from aiohttp.test_utils import TestServer, TestClient
@@ -2140,7 +2170,7 @@ def schematic_laid_out_by_rule():
     assert nl2.net_of("R150", "2") != nl2.net_of("Q101", "1")
 
 
-@test()
+@test(needs=("kicad",))
 def net_kinds_part_inspector_and_schematic_conventions():
     """Every net gets a kind by the checks' rules (ground, a supply with its voltage, a differential pair
     with its partner, a clock, a signal); the inspector's part info has the pins with their nets and
@@ -3021,6 +3051,352 @@ def silkscreen_tidied_before_release():
     assert not any("reference designator" in m for m in miss), miss
 
 
+# ----------------------------------------------------------------------------- golden results
+GOLDEN = os.path.join(ROOT, "tests", "golden")
+UPDATE_GOLDEN = "--update-golden" in sys.argv
+
+
+def _digest(p):
+    """What a design comes to, in a form that is the same run after run: every check's status and finding keys,
+    the netlist, the BOM, the board's copper totals."""
+    from tw.checks import runner
+    from tw.netlist import Netlist
+    from tw.board import Board
+    from tracewright import bom as bomlib
+    res = runner.run_all(p, offline=True, write=True)
+    checks = {c["id"]: {"status": c["status"], "findings": sorted(f["key"] for f in c["findings"])} for c in res["checks"]}
+    moved = [k for c in checks.values() for k in c["findings"] if os.path.realpath(p.root) in k or p.root in k]
+    assert not moved, f"finding keys hold the project's folder, so a waiver stops matching when it moves: {moved[:3]}"
+    nl = Netlist.load(os.path.join(p.build, f"{p.stem}.net"))
+    nets = {n: sorted(f"{r}.{q}" for r, q in m) for n, m in nl.nets.items() if not n.startswith("unconnected-")}
+    b = Board.load(p.pcb)
+    rows = bomlib.bom_data(p, b).get("rows", [])
+    from tw import env as twenv
+    return {"kicad": ".".join((twenv.kicad().get("version") or "?").split(".")[:2]),
+            "checks": checks, "nets": nets, "bom": sorted([",".join(r["refs"]), r["value"], r["lcsc"] or ""] for r in rows),
+            "board": {"footprints": len(b.fp_list), "tracks": len(b.tracks), "vias": len(b.vias),
+                      "length_mm": round(sum(t.length() for t in b.tracks), 1)}}
+
+
+def _golden(name, got, where=GOLDEN):
+    """Compare with the recorded results (record them with --update-golden, or when there are none yet)."""
+    path = os.path.join(where, name + ".json")
+    if UPDATE_GOLDEN or not os.path.exists(path):
+        os.makedirs(where, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(got, f, indent=1, sort_keys=True)
+        print(f"    recorded {os.path.relpath(path, ROOT)}")
+        return
+    want = json.load(open(path))
+    if want.get("kicad") and want["kicad"] != got["kicad"]:          # DRC and ERC differ between KiCad releases
+        print(f"    {os.path.relpath(path, ROOT)} was recorded with KiCad {want['kicad']}; this is {got['kicad']}: not compared")
+        return
+    diff = []
+    for cid in sorted(set(want["checks"]) | set(got["checks"])):
+        a, b_ = want["checks"].get(cid), got["checks"].get(cid)
+        if a != b_:
+            if a is None or b_ is None:
+                diff.append(f"check {cid}: {'new' if a is None else 'gone'}")
+            else:
+                gone, new = sorted(set(a["findings"]) - set(b_["findings"])), sorted(set(b_["findings"]) - set(a["findings"]))
+                diff.append(f"check {cid}: {a['status']} -> {b_['status']}" + (f"; gone {gone[:3]}" if gone else "") + (f"; new {new[:3]}" if new else ""))
+    for n in sorted(set(want["nets"]) | set(got["nets"])):
+        if want["nets"].get(n) != got["nets"].get(n):
+            diff.append(f"net {n}: {want['nets'].get(n)} -> {got['nets'].get(n)}")
+    if want["bom"] != got["bom"]:
+        diff.append(f"BOM: {len(want['bom'])} -> {len(got['bom'])} lines, changed {[r for r in got['bom'] if r not in want['bom']][:3]}")
+    for k in want["board"]:
+        if want["board"][k] != got["board"].get(k):
+            diff.append(f"board {k}: {want['board'][k]} -> {got['board'].get(k)}")
+    assert not diff, "results differ from " + os.path.relpath(path, ROOT) + " (if on purpose: --update-golden):\n  " + "\n  ".join(diff[:25])
+
+
+@test(needs=("kicad",))
+def golden_demo_results():
+    """The demo board's checks, netlist, BOM and copper as recorded in tests/golden/demo.json: a change in what
+    the checks find or in what the toolkit makes of the design shows here and has to be meant."""
+    _golden("demo", _digest(fixture_copy("golden")))
+
+
+@test(needs=("kicad",))
+def golden_local_projects():
+    """The same for the local projects named in tests/golden/local/projects.txt (one folder per line; kept out of
+    git with their results), each run on a copy so the project itself is never touched. Skipped without any."""
+    lst = os.path.join(GOLDEN, "local", "projects.txt")
+    if not os.path.exists(lst):
+        print("    no local projects listed (tests/golden/local/projects.txt)")
+        return
+    for line in open(lst):
+        src = os.path.expanduser(line.strip())
+        if not src or src.startswith("#") or not os.path.isdir(src):
+            continue
+        name = os.path.basename(src.rstrip("/"))
+        dst = os.path.join(TMP, "golden-" + name)
+        shutil.copytree(src, dst, ignore=shutil.ignore_patterns(".git", "build", "node_modules", ".tracewright"), symlinks=True)
+        _golden(name, _digest(env.Project(dst)), where=os.path.join(GOLDEN, "local"))
+
+
+# ----------------------------------------------------------------------------- properties (random designs)
+# Seeded, so a failure repeats: the message names the seed. TW_PROPERTY_RUNS=n runs n seeds instead of the few here.
+def _seeds(n, salt):
+    n = int(os.environ.get("TW_PROPERTY_RUNS") or n)
+    return [salt * 1000 + i for i in range(n)]
+
+
+def _turned(rel, k):
+    """A footprint's box (relative to its origin) after k quarter turns, whichever way KiCad turns it."""
+    x0, y0, x1, y1 = rel
+    if k % 2 == 0:
+        return rel if k % 4 == 0 else (-x1, -y1, -x0, -y0)
+    return (min(-y1, y0), min(x0, -x1), max(-y0, y1), max(x1, -x0))
+
+
+def _scatter(p, seed, reach=5.0, clear=0.5):
+    """The demo's parts moved about at random: connectors and holes stay, every other part goes up to `reach` mm
+    from where it was and turns by a random quarter, inside the outline and clear of every other part (checked
+    against the parts not yet moved where they are now, so a part that finds no spot can stay put)."""
+    import random
+    from tw.board import Board
+    from tw.pcb import client
+    rnd = random.Random(seed)
+    b = Board.load(p.pcb)
+    ox0, oy0, ox1, oy1 = b.bbox()
+    fixed = [f for f in b.fp_list if f.ref[:1] in ("J", "H") or f.locked]
+    todo = [f for f in b.fp_list if f not in fixed]
+    rnd.shuffle(todo)
+    placed = [f.bbox() for f in fixed]
+    waiting = {f.ref: f.bbox() for f in todo}
+
+    def free(box, others):
+        return all(box[2] + clear <= o[0] or o[2] + clear <= box[0] or box[3] + clear <= o[1] or o[3] + clear <= box[1]
+                   for o in others)
+    ops, moved = [], 0
+    for f in todo:
+        bb = waiting.pop(f.ref)
+        rel = (bb[0] - f.x, bb[1] - f.y, bb[2] - f.x, bb[3] - f.y)
+        spot = None
+        for _ in range(300):
+            k = rnd.randrange(4)
+            r = _turned(rel, k)
+            x, y = f.x + rnd.uniform(-reach, reach), f.y + rnd.uniform(-reach, reach)
+            box = (x + r[0], y + r[1], x + r[2], y + r[3])
+            if box[0] < ox0 + 1.5 or box[1] < oy0 + 1.5 or box[2] > ox1 - 1.5 or box[3] > oy1 - 1.5:
+                continue
+            if free(box, placed + list(waiting.values())):
+                spot = (round(x, 2), round(y, 2), (f.angle + 90 * k) % 360, box)
+                break
+        if spot:
+            ops.append({"op": "move", "ref": f.ref, "x": spot[0], "y": spot[1], "rot": spot[2]})
+            placed.append(spot[3])
+            moved += 1
+        else:
+            placed.append(bb)
+    res = client.apply(p, ops, live=False)
+    assert res.get("ok"), res
+    return moved
+
+
+@test(needs=("kicad", "kpy"))
+def router_property_random_placements():
+    """The router on the demo's parts placed at random (seeded): every net is routed or named as failed -- none
+    dropped without a word -- what DRC finds unconnected is only on the nets it named (or the pour islands it
+    could not join, named too), and the copper it lays never shorts, crowds, crosses or dangles, whatever the
+    placement."""
+    from tw.route import driver
+    from tw import kicad
+    tolerated = ("silk", "courtyard", "lib_", "footprint", "text", "starved_thermal", "isolated_copper")
+    for seed in _seeds(3, 7):
+        p = fixture_copy(f"prop-route-{seed}")
+        moved = _scatter(p, seed)
+        assert moved >= 5, (seed, moved)
+        s_ = driver.route(p, clear=True, live=False, log=lambda m: None)["summary"]
+        failed = set(s_["failed"])
+        assert s_["routed"] + len(failed) == s_["nets"], (seed, s_)
+        d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+        bad = [(v.get("type"), v.get("description")) for v in d["violations"]
+               if not any(t in (v.get("type") or "") for t in tolerated)]
+        assert not bad, (seed, bad[:6])
+        loose = set()
+        for u in d["unconnected_items"]:
+            for it in u.get("items", []):
+                m = re.search(r"\[([^\]]+)\]", it.get("description", ""))
+                if m:
+                    loose.add(m.group(1).split("/")[-1])
+        said = {n.split("/")[-1] for n in failed} | {n.split("/")[-1] for n in s_.get("islands") or {}}
+        unnamed = loose - said
+        assert not unnamed, (seed, f"unconnected but not reported: {sorted(unnamed)}", sorted(failed), s_.get("islands"))
+        assert len(failed) <= 2, (seed, f"{len(failed)} of {s_['nets']} nets failed on a board with room to spare", sorted(failed))
+
+
+def _random_ic(rnd, name):
+    """A box symbol with a random number of signal pins each side, supply pins on top, grounds below."""
+    from tw.sch.kisch import make_ic
+    n, sides = 1, {}
+    for side, prefix, kind in (("left", "PA", "bidirectional"), ("right", "PB", "output")):
+        pins = []
+        for i in range(rnd.randint(2, 6)):
+            pins.append((str(n), f"{prefix}{i}", rnd.choice((kind, "input", "bidirectional"))))
+            n += 1
+        sides[side] = pins
+    sides["top"] = [(str(n + i), nm, "power_in") for i, nm in enumerate(rnd.sample(["VDD", "VDDA", "VBAT", "VIO"], rnd.randint(1, 3)))]
+    n += len(sides["top"])
+    sides["bottom"] = [(str(n + i), nm, "power_in") for i, nm in enumerate(["GND", "GNDA"][:rnd.randint(1, 2)])]
+    return make_ic(name, [{**sides, "width": 12.7}], ref="U", value=name), sides
+
+
+def _random_schematic(seed, root):
+    """One random sheet for the engine (see schematic_engine_property_random_circuits): the project, and what was
+    asked -- (ref, pin, net) on / not on it, (part, {nets it joins}), (ref, pin) left alone, the spec."""
+    import random
+    from tw.sch import Design, Part
+    from tw.sch.auto import Page
+    from tw.examples.demo_board import catalog
+    rnd = random.Random(seed)
+    cat = catalog()
+    hw = os.path.join(root, "hardware", "p")
+    os.makedirs(hw)
+    json.dump({"name": "P", "kicad_project": "hardware/p/p.kicad_pro"}, open(os.path.join(root, "tracewright.json"), "w"))
+    d = Design("p", title=f"Property {seed}", company="t")
+    top = d.root("Cover", paper="A4")
+    sh = d.sheet("IO", "io.kicad_sch", "IO", paper="A3")
+    top.subsheet(sh, (38.1, 40.64), (50.8, 25.4), [])
+    pg = Page(d, sh, base=100, catalog=cat)
+    on, off, between, alone, spec = [], [], [], [], []   # (ref, pin, net) on / not on it; (ref, {nets}); (ref, pin)
+    names = [f"SIG_{i}" for i in range(1, 9)]
+    for gi in range(rnd.randint(2, 3)):
+        sym, sides = _random_ic(rnd, f"IC{seed}_{gi}")
+        key = f"IC{gi}"
+        cat[key] = Part(sym, "Package_QFP:LQFP-32_7x7mm_P0.8mm", f"IC{seed}_{gi}", f"IC{seed}_{gi}", "x", "")
+        g = pg.group(f"BLOCK {gi + 1}")
+        u = g.part(key, "U")
+        ref = u.ref
+        rails = rnd.sample(["+3V3", "+5V", "+1V8"], 2)
+        tops = [p_[0] for p_ in sides["top"]]
+        if len(tops) >= 2 and rnd.random() < 0.5:
+            g.power(u, tops, rails[0])
+            on += [(ref, p_, rails[0]) for p_ in tops]
+            spec.append(("power bar", ref, tops, rails[0]))
+        else:
+            for p_ in tops:
+                rail = rnd.choice(rails)
+                if rnd.random() < 0.6:
+                    caps = rnd.choice((["C100n"], ["C10u", "C100n"]))
+                    crefs = g.decouple(u, p_, caps, rail)
+                    on.append((ref, p_, rail))
+                    between += [(c, {rail, "GND"}) for c in crefs]
+                    spec.append(("decouple", ref, p_, rail, crefs))
+                else:
+                    g.power(u, p_, rail)
+                    on.append((ref, p_, rail))
+                    spec.append(("power", ref, p_, rail))
+        gnds = [p_[0] for p_ in sides["bottom"]]
+        g.power(u, gnds, "GND")
+        on += [(ref, p_, "GND") for p_ in gnds]
+        for p_, _, _ in sides["left"] + sides["right"]:
+            what = rnd.choice(("net", "net", "pull", "series", "indicator", "nc"))
+            name = rnd.choice(names)
+            if what == "net":
+                g.net(u, p_, name)
+                on.append((ref, p_, name))
+            elif what == "pull":
+                to = rnd.choice((rails[0], "GND"))
+                r = g.pull(u, p_, "R10k", to, net=name)
+                on.append((ref, p_, name))
+                between.append((r, {name, to}))
+            elif what == "series":
+                r = g.series(u, p_, "R68", name)
+                between.append((r, {("pin", ref, p_), name}))
+                off.append((ref, p_, name))
+            elif what == "indicator":
+                r, led = g.indicator(u, p_, "R1k", "LED_R")
+                between += [(r, {("pin", ref, p_), ("mid", r)}), (led, {("mid", r), "GND"})]
+            else:
+                g.nc(u, p_)
+                alone.append((ref, p_))
+            spec.append((what, ref, p_, name))
+        if rnd.random() < 0.5:
+            mid = f"VSENSE_{gi}"
+            refs = g.divider("+5V", mid, "R10k", "R4k7", cap="C100n" if rnd.random() < 0.5 else None)
+            between += [(refs[0], {"+5V", mid}), (refs[1], {mid, "GND"})] + [(c, {mid, "GND"}) for c in refs[2:]]
+            spec.append(("divider", refs))
+        if rnd.random() < 0.4:
+            r, led = g.led(rails[0], "R1k", "LED_R")
+            between += [(r, {rails[0], ("mid", r)}), (led, {("mid", r), "GND"})]
+            spec.append(("led", r, led))
+        g.finish()
+    pg.layout()
+    d.write(hw)
+    open(os.path.join(hw, "p.kicad_pro"), "w").write("{}")
+    return env.Project(root), on, off, between, alone, spec
+
+
+@test(needs=("kicad",))
+def schematic_engine_property_random_circuits():
+    """The layout engine on random circuits (seeded): ICs with random pins, each pin given at random a label, a
+    pull-up or -down, a series resistor, an LED, a supply or its decoupling, or no connection; dividers and power
+    LEDs beside. KiCad's netlist has exactly what was asked -- every pin on its net, the parts between the nets
+    they were asked to join, no two asked nets merged, the unconnected pins alone -- no wire joins nets by
+    touching, the drawing keeps the conventions, and nothing collides on a sheet the engine calls clear (where
+    it ran out of room it says so, and the parts it could not fit in line are drawn beside, joined by labels)."""
+    from tw.sch import finish
+    from tw.netlist import Netlist
+    from tw.checks import load_all, REGISTRY
+    from tw.checks.context import Context
+    load_all()
+    reg_ = {c.id: c for c in REGISTRY} if isinstance(REGISTRY, list) else REGISTRY
+    aside = patterns = collided = 0
+    for seed in _seeds(5, 11):
+        proj, on, off, between, alone, spec = _random_schematic(seed, os.path.join(TMP, f"prop-sch-{seed}"))
+        r = finish(proj, erc=False)
+        where = f"seed {seed}: " + json.dumps(spec)[:600]
+        assert r.get("connections") == "as asked", (where, r.get("connections"))
+        aside += len(r.get("crowded") or [])           # drawn beside the part, joined by labels: right, if less tidy
+        patterns += len(spec)
+        nl = Netlist.load(os.path.join(proj.build, "p.net"))
+        full = lambda ref_, pin_: nl.pin.get((ref_, str(pin_)))
+        for ref_, pin_, net in on:
+            assert nl.net_of(ref_, pin_) == net, (where, ref_, pin_, net, nl.net_of(ref_, pin_))
+        for ref_, pin_, net in off:
+            assert nl.net_of(ref_, pin_) != net, (where, ref_, pin_, "joined straight to", net)
+        for ref_, pin_ in alone:
+            got = full(ref_, pin_)
+            assert got is None or got.startswith("unconnected-"), (where, ref_, pin_, got)
+        mids = {}
+        for part, want in between:
+            got = {nl.net_of(part, "1"), nl.net_of(part, "2")}
+            named = {w for w in want if isinstance(w, str)}
+            assert named <= got, (where, part, want, got)
+            for w in want:
+                if isinstance(w, tuple) and w[0] == "pin":
+                    assert nl.net_of(w[1], w[2]) in got, (where, part, "not on", w, got)
+                elif isinstance(w, tuple) and w[0] == "mid":
+                    rest = got - named - ({nl.net_of(x[1], x[2]) for x in want if isinstance(x, tuple) and x[0] == "pin"})
+                    assert len(rest) == 1, (where, part, want, got)
+                    mids.setdefault(w[1], set()).update(rest)
+        assert all(len(v) == 1 for v in mids.values()), (where, mids)          # an LED's resistor and LED share one net
+        asked = collections.defaultdict(set)
+        for ref_, pin_, net in on:
+            asked[net].add(full(ref_, pin_))
+        merged = [n for n, got in asked.items() if len(got) != 1]
+        assert not merged, (where, {n: asked[n] for n in merged})
+        seen = collections.defaultdict(set)
+        for n, got in asked.items():
+            seen[next(iter(got))].add(n)
+        joined = {k: v for k, v in seen.items() if len(v) > 1}
+        assert not joined, (where, "asked nets merged into one:", joined)
+        ctx = Context(proj)
+        col = [f.message for f in reg_["sch.render"].fn(ctx) if f.severity in ("error", "warning")]
+        if col:                        # only where the engine said it ran out of room (finish() reports it as crowded)
+            collided += 1
+            assert r.get("crowded"), (where, "collisions on a sheet the engine called clear:", col[:5])
+        fs = [f.message for f in reg_["sch.wiring"].fn(ctx) if f.severity in ("error", "warning")]
+        assert not fs, (where, "sch.wiring", fs[:5])
+        st = [f.message for f in reg_["sch.style"].fn(ctx) if f.severity in ("error", "warning") and "title block" not in f.message]
+        assert not st, (where, st[:5])
+    print(f"    {patterns} patterns on {len(_seeds(5, 11))} random sheets: {aside} drawn beside their part, "
+          f"{collided} sheet{'s' if collided != 1 else ''} with a collision where the engine said it was crowded")
+
+
 @test(needs=("node",))
 def board_names_nets_on_copper():
     """The board view's net names: along tracks wide enough to hold them (reading left to right or bottom to
@@ -3031,13 +3407,14 @@ def board_names_nets_on_copper():
     assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
 
 
-@test(needs=("chrome",))
+@test(needs=("chrome", "kicad"))
 def browser_ui():
     """The real UI in headless Chrome against a throwaway server with the demo (tests/ui_tests.py): the
     home screen, the five places and their sub-views, no Ask Claude buttons, net names on the zoomed board,
-    and no console errors anywhere along the way."""
+    and no console errors anywhere along the way. Screenshots go to TW_UI_OUT when it is set (CI keeps them)."""
     import subprocess
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "ui_tests.py"), "--out", os.path.join(TMP, "ui")],
+    out = os.environ.get("TW_UI_OUT") or os.path.join(TMP, "ui")
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "ui_tests.py"), "--out", out],
                        capture_output=True, text=True, timeout=900)
     assert r.returncode == 0, (r.stdout + r.stderr)[-2500:]
 

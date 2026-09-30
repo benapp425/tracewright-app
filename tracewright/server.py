@@ -1685,6 +1685,8 @@ def make_app():
         root = rt.p.root
         base = safe_join(root, request.query.get("path", ""))
         out = []
+        if not os.path.isdir(base):                       # a folder not made yet (firmware/, docs/): nothing in it
+            return jresp({"path": os.path.relpath(base, root), "entries": [], "missing": True})
         for name in sorted(os.listdir(base)):
             if name in HIDDEN or name.endswith(".pyc"):
                 continue

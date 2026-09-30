@@ -22,3 +22,6 @@ __pycache__/
 /session.key
 /server.json
 /accounts.json.lock
+
+# golden results of local (private) projects: never committed
+tests/golden/local/

@@ -214,9 +214,10 @@ class GridRoute:
         if not b.outline:
             raise ValueError("the board has no closed outline; draw Edge.Cuts first")
         dump = dump_for_router(b)
-        if self.clear:
-            dump["tracks"] = [t for t in dump["tracks"] if not self._net_ok(t["net"])]
-            dump["vias"] = [v for v in dump["vias"] if not self._net_ok(v["net"])]
+        if self.clear:                   # what ops() takes off the board is no obstacle (junk copper included)
+            gone = lambda n: self._net_ok(n) or (self.only is None and (not n or n.startswith("unconnected-")))
+            dump["tracks"] = [t for t in dump["tracks"] if not gone(t["net"])]
+            dump["vias"] = [v for v in dump["vias"] if not gone(v["net"])]
         self.dump = dump
         nl_class = {}
         try:
@@ -806,15 +807,19 @@ class GridRoute:
 
     def ops(self, segs, vias):
         ops = []
-        have = {z.name for z in self.b.zones if z.is_rule_area}
+        # the neck areas as the router used them: a missing one is added, one drawn for an older layout (the part
+        # moved, or a different margin) is redrawn, or DRC would hold the necked tracks to the full clearance
+        have = {z.name: geom.bbox([q for pl in z.outline for q in pl]) for z in self.b.zones if z.is_rule_area and z.outline}
         for ref, (x0, y0, x1, y1) in self.necks:
             name = f"TW neck {ref}"
-            if name not in have:
+            if name not in have or max(abs(a - b) for a, b in zip(have[name], (x0, y0, x1, y1))) > 0.05:
                 ops.append({"op": "rule_area", "name": name, "layers": list(R.LAYERS),
                             "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], "no_tracks": False, "no_vias": False,
                             "no_pour": False, "no_footprints": False})
         if self.clear:
             nets = sorted({n for n in self.b.nets if self._net_ok(n)})
+            if self.only is None:        # all of it again: copper left on no net, or on a pad's unconnected-(...) net
+                nets += sorted({n for n in self.b.nets if n.startswith("unconnected-")}) + [""]   # (a part moved onto it) goes too
             ops.append({"op": "delete", "nets": nets, "kinds": ["track", "via"]})
         ops.append({"op": "tracks", "items": [{"net": n, "layer": l, "a": [round(a[0], 4), round(a[1], 4)],
                                                "b": [round(b[0], 4), round(b[1], 4)], "w": w} for n, (l, a, b, w) in segs]})
@@ -851,4 +856,20 @@ def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_pr
                     pr = g.B.profiles[g.net_class.get(net, "Default")]
                     added += stitch.repair(project, net, pr.via_d, pr.via_drill, live=live)
             out["summary"]["island_vias"] = len(added)
+            left = islands_left(project, [n for n in g.planes if g._net_ok(n)])
+            if left:
+                out["summary"]["islands"] = left
+    return out
+
+
+def islands_left(project, nets):
+    """{net: ["F.Cu at (x, y)", ...]}: pour islands holding a pad that no via could join to the net's main copper."""
+    from ..pcb import stitch
+    from ..board import Board
+    b = Board.load(project.pcb)
+    out = {}
+    for net in nets:
+        s = stitch.stray(b, net)
+        if s:
+            out[net] = [f"{l} at ({x}, {y})" for l, (x, y) in s]
     return out
