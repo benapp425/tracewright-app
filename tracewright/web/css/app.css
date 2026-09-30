@@ -2055,6 +2055,7 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .so-sign { margin-top: 14px; border: 1px solid var(--accent-line); border-radius: 12px; padding: 14px; background: var(--accent-soft); display: flex; flex-direction: column; gap: 10px; }
 .so-sign.blocked { border-color: var(--line-2); background: var(--surface); }
 .so-sign .row input { flex: 1; }
+.so-needh { font-size: 12px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
 .so-block { margin: 0; padding-left: 18px; font-size: 13px; color: var(--text-2); }
 .so-signed { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ok); flex-wrap: wrap; }
 .so-signed.stale { color: var(--warn); }

@@ -197,6 +197,7 @@ export class SettingsPage {
         ["bypassPermissions", "Never ask"], ["plan", "Plan only"]])),
       this.row("Allow safe commands without asking", "Toolkit, KiCad, git and read-only commands", this.sw("auto_allow_bash")),
       this.row("Allow web lookups", "Data sheets and part searches", this.sw("allow_web")),
+      this.row("Watch part stock", "Once a day, JLC and LCSC stock for the parts on a board you open", this.sw("stock_watch")),
       this.row("Checkpoint every turn", "Undo any turn from History", this.sw("snapshot_each_turn"))]);
     const auth = { api_key: "API key", subscription_token: "Claude plan token", claude_code: "Claude Code" }[info.claude_auth] || "Not connected";
     this.group("Connection", null, [

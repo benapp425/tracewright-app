@@ -33,7 +33,11 @@ export class Dictation {
     };
     r.onerror = (e) => {
       this.err = e.error === "not-allowed" || e.error === "service-not-allowed" ? "The browser blocked the microphone. Allow it for this page and try again."
-        : e.error === "no-speech" || e.error === "aborted" ? null : `Dictation stopped: ${e.error}`;
+        : e.error === "no-speech" || e.error === "aborted" ? null
+        : e.error === "audio-capture" ? "No microphone found."
+        : e.error === "network" ? "Dictation needs the speech service, which could not be reached."
+        : e.error === "language-not-supported" ? "Dictation does not support this language here."
+        : `Dictation stopped (${e.error}).`;
     };
     r.onend = () => this.end(this.err || null);
     try { r.start(); } catch (e) { this.end(e.message); }

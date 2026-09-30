@@ -9,7 +9,7 @@ Describe a board or open one you have. Claude designs, places, routes and checks
 live in KiCad, then sends it to the fab.</p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-eb8a50">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4.0-eb8a50">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-12%2B-lightgrey">
   <img alt="KiCad" src="https://img.shields.io/badge/KiCad-9%20%7C%2010-314cb0">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-43c283">
@@ -21,23 +21,27 @@ live in KiCad, then sends it to the fab.</p>
 
 **Design with Claude**
 - **A chat beside the board.** Claude reads the schematic and board, runs the checks and makes changes with its own design tools.
+- **Start from a floorplan.** Drag the board's outline, mounting holes, connectors and main parts into place. Claude lays the board out from it.
 - **Live in KiCad.** Placement and routing appear in KiCad's PCB Editor as Claude works.
-- **You stay in control.** Claude keeps a visible plan, asks questions as cards, and reads the notes you send while it works.
-- **Mission Control.** A full-screen view of autonomous runs.
+- **You stay in control.** Claude keeps a visible plan, asks questions as cards and reads the notes you send while it works. Each turn shows what it changed and can be undone.
+- **Talk, attach, point.** Dictate a message, drop in pictures and data sheets, or type @ to point Claude at a part, net or sheet.
+- **Run monitor.** A full-screen view of a run: the plan, the stages, the board as it grows, and how much of your Claude plan's limit is used.
 
 **Check it**
-- **50 design checks.** Schematic integrity (pinouts, packages, voltage domains), BOM, placement, routing quality, fab limits, assembly, signal integrity and power (regulators, heat, voltage drop, switchers, pours). Each check is tested against a planted fault.
+- **56 design checks.** Schematic integrity (pinouts, packages, voltage domains), BOM, placement, routing quality, fab limits, assembly, signal integrity and power (regulators, heat, voltage drop, switchers, pours). Each says what it examined, and each is tested against a planted fault.
+- **Sign-off.** Before anything is ordered: what the checks found, the waivers you approved, and what only the built board can show.
 - **Compare versions.** See what moved and which copper changed since any checkpoint.
-- **Bring-up checklist.** Test the built board step by step, with each reading checked against the plan.
+- **Bring-up.** A checklist for the built board, with each reading checked against the plan, and a firmware starter: the pin map and a bring-up sketch from the schematic.
 
 **Build it**
 - **Order in one place.** JLCPCB turnkey or self-assembly, with a readiness list and a price estimate. Upload to PCBWay in one click.
+- **Stock watch.** Warns when a part runs short of what an order needs, and finds in-stock stand-ins.
 - **Save money.** Exact JLC Basic equivalents for Extended parts.
 - **Parts lists.** For DigiKey, Mouser and LCSC.
 
 <p align="center">
   <img src="docs/images/board.png" width="440" alt="The board view">
-  <img src="docs/images/mission.png" width="440" alt="Mission Control">
+  <img src="docs/images/mission.png" width="440" alt="The run monitor">
 </p>
 <p align="center">
   <img src="docs/images/checks.png" width="440" alt="Design checks">
@@ -78,7 +82,8 @@ Run it again to update. `sh install.sh --uninstall` removes the app and keeps yo
 2. **Finish setup.** Tracewright checks KiCad and Claude, then asks for a theme and a workflow.
 3. **Start a project.** Describe a new board, import a KiCad project (or Altium, Eagle, PADS,
    CADSTAR, Fabmaster or P-CAD), open the demo, or get project ideas.
-4. **Order.** When the checks pass, the Order tab prepares the files and sends them to the fab.
+4. **Sign off and order.** Review the findings and waivers in Checks ▸ Sign-off and sign the design off. Parts ▸ Order then
+   prepares the files and sends them to the fab.
 
 To see Claude's edits live in KiCad, enable KiCad's API (**Preferences ▸ Plugins ▸ Enable KiCad API**),
 restart KiCad and open the board in the PCB Editor.
@@ -105,7 +110,9 @@ project folder, and Claude Code picks up the same instructions and skills there.
 
 Tracewright runs on your Mac and keeps your projects there. When Claude works on a project, what it
 reads (files, renders, check results) goes to Anthropic through your Claude Code sign-in or API key.
-Part lookups query JLCPCB, LCSC and EasyEDA for the parts you look up. Board files are uploaded only
+Part lookups query JLCPCB, LCSC and EasyEDA for the parts you look up, and once a day the stock watch asks
+about the parts on a board you open (Settings ▸ Watch part stock turns it off). Dictation uses Apple's speech recognition, on the Mac when
+it can; in a browser, the browser's own speech service. Board files are uploaded only
 when you order or sync a project with GitHub. Accounts are stored in the app's data folder, with
 passwords kept only as salted hashes. Once a day the app checks GitHub for a newer release
 (Settings ▸ About turns this off).

@@ -3,6 +3,44 @@
 All notable changes to Tracewright. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-29
+
+A simpler workspace, a floorplan to start from, and a sign-off before anything is ordered.
+
+### Added
+- **Floorplan.** At the start, set the board's size, mounting holes, connectors and main parts by dragging them. Claude lays the board out from it.
+- **Sign-off.** Before ordering, review what the checks found, approve or reject each waiver, and sign the design off. A later change to the design reopens it.
+- **Stage gates.** A stage counts as done only when its work is: the requirements written, the checks run on the design as it is, nothing left unrouted.
+- **Undo a turn.** After each turn, a card shows what changed on the board, in the schematic and in the docs. Undo puts the files back as they were.
+- **Attachments.** Drop, paste or pick files into a message. Pictures go to Claude; data sheets, libraries and 3D models go into the project.
+- **Dictation.** Click the microphone, or hold it while you talk. The Mac app recognizes speech on the Mac when it can.
+- **@-mentions.** Type @ to point Claude at a part, net, sheet or file.
+- **Net names on the board.** Zoom in to read the net on each track, pad and via.
+- **Data sheet library.** Each part's data sheet is saved in the project with its pin table, and the pinout check trusts it over the parts library.
+- **Firmware starter.** A pin map and a bring-up sketch, written from the schematic.
+- **Stock watch.** Checks your parts' stock against what an order needs, warns when one runs short, and finds in-stock stand-ins.
+- **Design limits.** An Advanced section in the requirements: size, height, layers, currents, temperature, cost, quantity and more. The checks hold the design to them.
+- **Net model.** Every net has a kind, a voltage, a current and its pair. The checks and the net classes follow it.
+- **Plan usage.** The run monitor shows how much of your Claude plan's limit is used and when it resets. The chat shows it too when you are close.
+- **Run report.** Time, turns and cost for each stage, on the sign-off page.
+
+### Changed
+- **Five places.** Overview, Design, Parts, Checks and Project replace the eleven tabs. The Ask Claude buttons are gone: ask in the chat.
+- **Run monitor.** Mission Control is now a working view of a run: the plan, the stages, the board as it grows, the latest steps and the checks.
+- **Checks.** Every check says what it examined, or why it does not apply. Nothing passes without looking.
+- **Waivers.** Claude proposes a waiver with its reason. An error stops counting only once you approve it.
+- **Schematics.** Connectors face the circuit they serve, dividers stand top to bottom, and supply pins on one side share one symbol. A crowded side is drawn again with room kept for the pins that need it.
+- **Placement.** A new check makes sure every pad has room for its track to leave.
+- **Silkscreen.** Reference designators that sit on pads, other text or the board edge are moved before release.
+- **Home screen.** Opens at once with the last project list, and says when a project's files are only in iCloud.
+
+### Fixed
+- **Costs.** Each turn was shown with the whole conversation's running cost, so conversation totals and the run report came out several times too high. Turns now show their own cost, and older conversations are corrected when opened.
+- **Parts left off schematics.** An LED or a crystal with no room beside its pins was left out of the schematic. It is now drawn beside the part.
+- **Router.** A second run no longer stacks stitching vias. Rerouting clears stray tracks left on unconnected pads, redraws the neck-down areas when a part has moved, and names the pour islands it could not join.
+- **Waivers after moving a project.** Some schematic findings were keyed by the file's full path, so moving the project folder dropped their waivers.
+- **Docs panel.** No longer shows an error when a project has no firmware folder.
+
 ## [0.3.0] - 2026-09-28
 
 Routing and schematics that look like a person made them, and more ways to check a design.

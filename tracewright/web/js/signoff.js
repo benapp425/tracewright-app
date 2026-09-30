@@ -94,7 +94,7 @@ export class SignoffView {
           : `Signed off by ${so.by} ${fmtTime(so.at)}, but the design has changed since: sign it off again before ordering.`),
         so.note ? h("span.muted", `“${so.note}”`) : null, h("span.grow"),
         btn("undo-2", "Take it back", { onclick: () => this.revoke() }, "sm ghost")) : null,
-      !s.can_sign ? h("ul.so-block", s.blockers.map((b) => h("li", b))) : null,
+      !s.can_sign ? h("div.so-need", h("div.so-needh", "Before you can sign off"), h("ul.so-block", s.blockers.map((b) => h("li", b)))) : null,
       !(so && so.valid) ? h("div.row", note, signBtn) : null,
       so && so.valid ? h("div.row", btn("shopping-cart", "Order", { onclick: () => this.ws.show("outputs") }, "primary")) : null));
   }
