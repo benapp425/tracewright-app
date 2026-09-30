@@ -1,0 +1,58 @@
+# The test suite on every push and pull request.
+#   quick: the Python and Node tests that need no KiCad (the others skip themselves), in a couple of minutes
+#   full:  everything, with KiCad 10 from its Ubuntu PPA: the checks' self-test (every planted fault caught),
+#          the router and schematic engine on random designs, the golden results, the UI in headless Chrome
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -e .
+      - run: python tests/run_tests.py
+
+  full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      TW_KICAD_CLI: /usr/bin/kicad-cli
+      TW_KICAD_PYTHON: /usr/bin/python3
+      TW_UI_OUT: ${{ github.workspace }}/ui-screenshots
+    steps:
+      - uses: actions/checkout@v4
+      - name: KiCad 10
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends kicad python3-venv
+          kicad-cli version
+          /usr/bin/python3 -c "import pcbnew; print(pcbnew.GetBuildVersion())"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Tracewright in a virtual environment (KiCad's own Python stays the system one)
+        run: |
+          python3 -m venv /tmp/tw
+          /tmp/tw/bin/pip install --upgrade pip
+          /tmp/tw/bin/pip install -e .
+      - run: /tmp/tw/bin/python tests/run_tests.py
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ui-screenshots
+          path: ui-screenshots
+          if-no-files-found: ignore
