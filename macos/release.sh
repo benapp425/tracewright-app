@@ -12,11 +12,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$ROOT/pyproject.toml" | head -1)"
 DIST="$ROOT/dist"
-APP="$DIST/Tracewright.app"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# the app is put together and signed outside the source folder: in a synced folder (iCloud Desktop) the file
+# provider tags the bundle (com.apple.FinderInfo, fileprovider attributes) and codesign refuses it
+APP="$TMP/out/Tracewright.app"
 rm -rf "$DIST"
-mkdir -p "$DIST"
+mkdir -p "$DIST" "$TMP/out"
 
 FW="-framework Cocoa -framework WebKit -framework UserNotifications -framework UniformTypeIdentifiers -framework LocalAuthentication -framework Speech -framework AVFoundation"
 for arch in arm64 x86_64; do
@@ -40,6 +42,6 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 xattr -cr "$APP"
 codesign --force --deep --sign - --identifier app.tracewright "$APP" >/dev/null
-( cd "$DIST" && ditto -c -k --keepParent Tracewright.app "Tracewright-$VERSION-mac.zip" )
+( cd "$TMP/out" && ditto -c -k --keepParent Tracewright.app "$DIST/Tracewright-$VERSION-mac.zip" )
 echo "Built $DIST/Tracewright-$VERSION-mac.zip ($(du -h "$DIST/Tracewright-$VERSION-mac.zip" | cut -f1))"
 shasum -a 256 "$DIST/Tracewright-$VERSION-mac.zip"
