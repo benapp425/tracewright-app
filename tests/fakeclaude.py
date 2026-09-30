@@ -39,6 +39,13 @@ def result(cost=0.01, session=SESSION, is_error=False, text=None):
                          is_error=is_error, num_turns=1, session_id=session, total_cost_usd=cost, result=text)
 
 
+def rate_limit(status="allowed_warning", used=0.85, resets_at=None, window="five_hour", session=SESSION):
+    """The CLI's reading of the plan's usage limit (it sends one when the limit's state changes)."""
+    from claude_agent_sdk import RateLimitEvent, RateLimitInfo
+    return RateLimitEvent(rate_limit_info=RateLimitInfo(status=status, resets_at=resets_at, rate_limit_type=window,
+                                                        utilization=used), uuid="rl-1", session_id=session)
+
+
 def reply(t, cost=0.01):
     """A whole turn that just answers."""
     return [init(), text(t), result(cost)]

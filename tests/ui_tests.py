@@ -364,6 +364,25 @@ async def turn_changes_card(t):
 
 
 @test
+async def plan_usage_in_the_header_and_the_run_monitor(t):
+    # the last reading of the plan's limit (tracewright/usage.py): 86 % used, so the chat header says so too
+    with open(os.path.join(t.s.home, "plan_usage.json"), "w") as f:
+        json.dump({"status": "allowed_warning", "window": "five_hour", "used": 0.86, "resets_at": int(time.time()) + 5400,
+                   "at": int(time.time())}, f)
+    await t.open_project("board")
+    pill = await t.page.wait("(() => { const p = document.querySelector('.chathead .planpill'); return p && !p.hidden && p.innerText; })()", 10)
+    check(pill == "86 %", pill)
+    tip = await t.page.js("document.querySelector('.chathead .planpill').dataset.tip")
+    check(tip.startswith("86 % of the 5-hour limit, resets ") and "share your plan" in tip, tip)
+    await t.page.js("(() => { document.querySelector('.mcbtn').click(); return 1; })()")
+    meter = await t.page.wait("(() => { const m = document.querySelector('.mc-plan'); return m && !m.hidden && m.innerText; })()", 10)
+    check(meter.startswith("86 % of the 5-hour limit, resets ") and "warn" in await t.page.js("document.querySelector('.mc-plan').className"), meter)
+    await t.shot("plan-usage")
+    await t.page.key("Escape")
+    os.remove(os.path.join(t.s.home, "plan_usage.json"))
+
+
+@test
 async def sign_off_before_ordering(t):
     await t.open_project()
     await t.place("checks", "signoff")

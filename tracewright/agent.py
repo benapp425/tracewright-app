@@ -5,6 +5,10 @@ import os, re, json, time, uuid, asyncio, base64, shlex, traceback
 from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, UserMessage, ResultMessage,
                               SystemMessage, StreamEvent, TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock,
                               PermissionResultAllow, PermissionResultDeny)
+try:
+    from claude_agent_sdk import RateLimitEvent
+except ImportError:                                   # an older SDK: no plan usage readings
+    RateLimitEvent = None
 from . import prompts, history, agent_tools
 
 SAFE_CMDS = {"cd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "pwd", "echo", "which", "file", "stat", "du", "sort",
@@ -474,7 +478,8 @@ class AgentManager:
             sess.append(rec)
             self.hub.emit("agent.waiting", sid=sess.sid, until=None, text=rec["text"])
             return
-        when = limit_reset(text, now)
+        from . import usage
+        when = limit_reset(text, now) or usage.reset_time(now)             # the text's time, else the reported one
         until = (when + LIMIT_MARGIN_S) if when else now + LIMIT_UNKNOWN_S
         self.resume_at = until
         at = time.strftime("%-I:%M %p", time.localtime(until)).lower().replace(" am", " am").replace(" pm", " pm")
@@ -718,6 +723,10 @@ class AgentManager:
 
     def _handle(self, m, sess):
         hub = self.hub
+        if RateLimitEvent is not None and isinstance(m, RateLimitEvent):    # the plan's usage limit, as it changes
+            from . import usage
+            hub.emit("usage.plan", **usage.seen(m.rate_limit_info))
+            return
         t = self.turn
         starts = (isinstance(m, SystemMessage) and m.subtype == "init") or \
                  (isinstance(m, (StreamEvent, AssistantMessage)) and not m.parent_tool_use_id)

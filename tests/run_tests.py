@@ -2282,6 +2282,54 @@ def project_store_is_quick_and_knows_icloud_only_files():
 
 
 @test()
+def plan_usage_meter_from_the_cli():
+    """The plan's usage limit as Claude Code reports it (the SDK's RateLimitEvent): the agent passes each reading
+    to the UI (usage.plan) and keeps the last for the run monitor (/api/usage and /api/info), read as "85 % of the
+    5-hour limit, resets 3:40 pm"; a reading whose window has reset since is not shown; a run the limit stopped
+    waits for the reported reset when the CLI's message gives no time."""
+    import time as _t
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import usage
+    from tracewright.agent import limit_reset
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import fakeclaude as fc
+    pid = ProjectStore().import_copy(FIXTURE, "Usage demo").id
+    resets = int(_t.time()) + 3600
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            seen, emit = [], rt.hub.emit
+            rt.hub.emit = lambda type_, **kw: (seen.append((type_, kw)), emit(type_, **kw))[1]
+            a = app.agent(pid)
+            fake = fc.FakeClaude([[fc.init(), fc.rate_limit("allowed_warning", 0.85, resets), fc.text("Placed."), fc.result()]]).plug(a)
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Place the parts"})
+            assert r.status == 200, await r.text()
+            await fake.settle(a)
+            got = [kw for t, kw in seen if t == "usage.plan"]
+            assert got and got[-1]["used"] == 0.85 and got[-1]["window"] == "five_hour" and got[-1]["resets_at"] == resets, got
+            assert got[-1]["label"].startswith("85 % of the 5-hour limit, resets "), got[-1]["label"]
+            assert any(t == "agent.done" for t, _ in seen)                  # the reading did not break the turn
+            now = (await (await c.get("/api/usage")).json())["plan"]
+            assert now and now["status"] == "allowed_warning" and now["used"] == 0.85, now
+            assert (await (await c.get("/api/info")).json())["plan_usage"]["used"] == 0.85
+            await a.disconnect()
+            rt.stop()
+    asyncio.run(run())
+    usage.seen({"status": "allowed", "rate_limit_type": "five_hour", "utilization": 0.2, "resets_at": int(_t.time()) - 5})
+    assert usage.last() is None                                              # that window has reset: nothing to show
+    usage.seen({"status": "rejected", "rate_limit_type": "seven_day", "utilization": 1.0, "resets_at": resets})
+    assert usage.reset_time() == resets and limit_reset("You've hit your limit", _t.time()) is None
+    assert usage.last()["label"].startswith("weekly limit reached, resets "), usage.last()["label"]
+    usage.seen({"status": "allowed", "rate_limit_type": "five_hour", "utilization": None, "resets_at": None})
+    assert usage.last()["label"] == "within the 5-hour limit" and usage.reset_time() is None
+
+
+@test()
 def chat_attachments_go_to_their_place_and_pictures_to_claude():
     """Files attached to a message go into the project by type -- pictures to uploads/images, PDFs to
     docs/datasheets, a symbol library into lib/ and the symbol table, a footprint into the project's own

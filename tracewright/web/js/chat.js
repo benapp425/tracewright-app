@@ -133,9 +133,10 @@ export class Chat {
     this.titleEl = h("span.ellipsis", "Claude");
     this.costEl = h("span.cost", { "data-tip": "Estimated at API prices. Not billed on a Claude subscription." });
     this.modeBtn = h("button.modepill", { onclick: () => this.toggleMode() });
+    this.planEl = h("span.planpill", { hidden: true });
     this.el.append(h("div.chathead",
       h("button.ctitle", { onclick: (e) => this.sessionsMenu(e.currentTarget), "data-tip": "Conversations" }, h("span.cmark", icon("sparkles", 12)), this.titleEl, icon("chevron-down", 12)),
-      h("div.grow"), this.modeBtn,
+      h("div.grow"), this.planEl, this.modeBtn,
       this.mcBtn = btn("activity", null, { onclick: () => this.ws.mission(), "data-tip": "Run monitor", "data-kbd": "mod+shift+m" }, "sm ghost mcbtn"),
       btn("ellipsis", null, { onclick: (e) => this.chatMenu(e.currentTarget), "data-tip": "Conversation" }, "sm ghost")));
     this.agendaEl = h("div.agenda.hidden");
@@ -556,6 +557,8 @@ export class Chat {
       this.setPending(this.pending - 1);
     });
     ev.on("agent.done", (e) => { this.closeSteps(); this.turnMeta(e); if (e.session_cost) this.costEl.textContent = `≈ $${e.session_cost.toFixed(2)}`; });
+    ev.on("usage.plan", (e) => this.planPill(e));
+    api("/api/usage").then((d) => this.planPill(d.plan)).catch(() => {});
     ev.on("agent.changes", (e) => { if (!e.sid || e.sid === this.sid) this.changesCard(e, false); });
     ev.on("agent.undone", (e) => { if (!e.sid || e.sid === this.sid) this.undoneLine(e); });
     ev.on("agent.error", (e) => { this.closeSteps(); if (e.message !== "stopped") this.errorLine(e.message, this.lastUserText); else this.put(h("div.noteline", icon("circle-stop", 13), "Stopped.")); });
@@ -969,6 +972,16 @@ export class Chat {
   }
 
   showChat() { if (this.ws.chatPane && this.ws.chatPane.classList.contains("collapsed")) this.ws.toggleChat(); this.scroll(true); }
+
+  // the plan's usage limit, shown only when it is close (80 % or the CLI's warning) or reached
+  planPill(d) {
+    const show = !!d && (d.status !== "allowed" || (d.used || 0) >= 0.8);
+    this.planEl.hidden = !show;
+    if (!show) return;
+    clear(this.planEl).append(icon("hourglass", 12), d.status === "rejected" ? "Limit reached" : d.used != null ? `${Math.round(d.used * 100)} %` : "Near the limit");
+    this.planEl.dataset.tip = `${d.label.charAt(0).toUpperCase() + d.label.slice(1)}. Runs here share your plan's limit with Claude Code anywhere else.`;
+    this.planEl.className = "planpill" + (d.status === "rejected" ? " bad" : "");
+  }
 
   turnMeta(e) {
     const bits = [];

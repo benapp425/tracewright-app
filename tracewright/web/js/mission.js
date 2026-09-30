@@ -60,6 +60,15 @@ export class MissionControl {
     this.startedAt = this.ws.chat && this.ws.chat.startedAt ? this.ws.chat.startedAt / 1000 : Date.now() / 1000;
   }
 
+  // the plan's usage limit (tracewright/usage.py): how much of the window is used and when it resets
+  plan(d) {
+    if (!this.planWrap) return;
+    this.planWrap.hidden = !d;
+    if (!d) return;
+    this.planEl.textContent = d.label.charAt(0).toUpperCase() + d.label.slice(1);
+    this.planWrap.className = "mc-plan" + (d.status === "rejected" ? " bad" : d.status === "allowed_warning" || (d.used || 0) >= 0.8 ? " warn" : "");
+  }
+
   // ------------------------------------------------------------------ layout
   build() {
     const card = (title, ...kids) => h("section.mc-card", h("div.mc-ch", h("span", title)), ...kids);
@@ -68,6 +77,9 @@ export class MissionControl {
     this.statusEl = h("span.mc-status");
     this.elapsedEl = h("span.mc-meta-v");
     this.costEl = h("span.mc-meta-v");
+    this.planEl = h("span.mc-meta-v");
+    this.planWrap = h("span.mc-plan", { hidden: true, "data-tip": "Your Claude plan's usage limit, as Claude Code last reported it. Runs here share it with Claude Code anywhere else." },
+      icon("hourglass", 13), this.planEl);
     this.phaseEl = h("div.mc-phase");
     this.stepEl = h("div.mc-step");
     this.saidEl = h("div.mc-said");
@@ -86,7 +98,7 @@ export class MissionControl {
       h("div.mc-win",
         h("header.mc-head",
           h("div.mc-title", h("b", this.ws.p.name), this.statusEl),
-          h("div.mc-meta", h("span", icon("clock", 13), this.elapsedEl), h("span", { "data-tip": "Usage of your Claude account in this conversation" }, icon("gauge", 13), this.costEl)),
+          h("div.mc-meta", h("span", icon("clock", 13), this.elapsedEl), h("span", { "data-tip": "Usage of your Claude account in this conversation" }, icon("gauge", 13), this.costEl), this.planWrap),
           h("div.grow"),
           h("label.mc-auto", { "data-tip": "Open this view when an autonomous run starts" },
             h("input", { type: "checkbox", checked: localStorage.getItem("tw.mission.auto") !== "0", onchange: (e) => localStorage.setItem("tw.mission.auto", e.target.checked ? "1" : "0") }),
@@ -112,6 +124,7 @@ export class MissionControl {
   // ------------------------------------------------------------------ data
   async load() {
     const enc = encodeURIComponent(this.pid);
+    api("/api/usage").then((d) => this.plan(d.plan)).catch(() => {});
     const [tl, board, pr, sess] = await Promise.all([
       api(`/api/projects/${enc}/timelapse`).catch(() => ({ frames: [] })),
       api(`/api/projects/${enc}/board`).catch(() => null),
@@ -174,6 +187,7 @@ export class MissionControl {
       ev.on("agent.permission_done", () => { this.pending = Math.max(0, this.pending - 1); if (!this.pending) this.bannerSay(null); this.status(); }),
       ev.on("agent.waiting", (e) => { this.waiting = e.until ? e : null; this.status(); }),
       ev.on("agent.done", (e) => { if (e.session_cost != null) { this.cost = e.session_cost; this.clock(); } }),
+      ev.on("usage.plan", (e) => this.plan(e)),
       ev.on("timelapse.frame", () => this.more()),
       ev.on("checks.done", () => api(`/api/projects/${encodeURIComponent(this.pid)}`).then((pr) => this.project(pr)).catch(() => {})),
       ev.on("stages", (e) => this.renderStages(e.stages)),

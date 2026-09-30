@@ -2,7 +2,7 @@
 import os, re, sys, json, time, asyncio, mimetypes, subprocess, traceback, logging, shutil, glob
 from aiohttp import web, WSMsgType
 
-from . import __version__, REPO_URL, config, history, knowledge, scaffold, auth, accounts, overview
+from . import __version__, REPO_URL, config, history, knowledge, scaffold, auth, accounts, overview, usage
 from .projects import ProjectStore, STAGES, RUN_MODES
 from .bus import Hubs
 from .runtime import ProjectRuntime
@@ -539,8 +539,12 @@ def make_app():
                       "live_api": twlive.HAVE_KIPY and not app.server_mode, "platform": sys.platform,
                       "problems": await asyncio.to_thread(config.native_problems),
                       "server_mode": app.server_mode, "auth": app.require_auth, "claude_auth": _claude_auth(app.settings),
-                      "check_count": overview.check_count(),
+                      "check_count": overview.check_count(), "plan_usage": usage.last(),
                       "repo": REPO_URL})
+
+    @routes.get("/api/usage")
+    async def plan_usage(request):
+        return jresp({"plan": usage.last()})
 
     @routes.get("/api/update")
     async def update_check(request):
