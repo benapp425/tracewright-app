@@ -148,9 +148,21 @@ class AgentManager:
     def index(self):
         try:
             with open(self._index_path()) as f:
-                return json.load(f)
+                idx = json.load(f)
         except (OSError, ValueError):
             return []
+        old = [m for m in idx if "cli_total" not in m and m.get("cost")]
+        if old:                                            # before 0.4.0 each turn's running total was added up
+            from . import costs
+            for m in old:
+                recs = Session(self.rt, m["sid"], m).transcript()
+                m["cost"], m["cli_total"] = costs.per_turn(recs)[1], costs.last_total(recs)
+            try:
+                with open(self._index_path(), "w") as f:
+                    json.dump(idx, f, indent=1)
+            except OSError:
+                pass
+        return idx
 
     def _save_meta(self, meta):
         idx = [m for m in self.index() if m["sid"] != meta["sid"]]
@@ -797,7 +809,15 @@ class AgentManager:
                         if info["tool"] == b.tool_use_id and not info["shown"]:
                             self._task_line(task, "running", sess)
         elif isinstance(m, ResultMessage):
-            cost = m.total_cost_usd or 0.0
+            from . import costs                            # the CLI reports its session's running total
+            total = m.total_cost_usd or 0.0
+            before = sess.meta.get("cli_total")
+            if before is None:
+                before = costs.last_total(sess.transcript())
+            if sess.meta.get("cli_session") and m.session_id and sess.meta["cli_session"] != m.session_id:
+                before = None                              # another session of the CLI: a total of its own
+            cost = costs.turn_cost(total, before)
+            sess.meta.update(cli_total=total, cli_session=m.session_id or sess.meta.get("cli_session"))
             sess.meta["cost"] = round(sess.meta.get("cost", 0.0) + cost, 4)
             if m.session_id:
                 sess.meta["sdk_session"] = m.session_id
@@ -805,7 +825,7 @@ class AgentManager:
                 self._save_meta(sess.meta)
                 return
             active = next((s["id"] for s in self.rt.p.stages() if s["status"] == "active"), None)
-            rec = {"kind": "done", "turn": tid, "cost": cost, "duration_ms": m.duration_ms, "turns": m.num_turns,
+            rec = {"kind": "done", "turn": tid, "cost": cost, "total": total, "duration_ms": m.duration_ms, "turns": m.num_turns,
                    "is_error": m.is_error, "subtype": m.subtype, **({"stage": active} if active else {})}
             sess.append(rec)
             hub.emit("agent.done", sid=sess.sid, **{k: v for k, v in rec.items() if k != "kind"}, session_cost=sess.meta["cost"])

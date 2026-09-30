@@ -2282,6 +2282,60 @@ def project_store_is_quick_and_knows_icloud_only_files():
 
 
 @test()
+def turn_costs_from_the_cli_running_total():
+    """Claude Code reports its session's running total with each turn (8.58, 18.46, 22.66 ...), not the turn's own
+    cost: each turn is recorded as the step from the total before it, a smaller total is a new session of the CLI,
+    and transcripts written before 0.4.0 (which kept the running total) read the same way -- in the chat, in the
+    conversation's total and in the run report -- without rewriting them."""
+    import time as _t
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import costs, signoff
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import fakeclaude as fc
+    old = [{"kind": "user", "text": "a"}, {"kind": "done", "cost": 8.58}, {"kind": "done", "cost": 18.46},
+           {"kind": "done", "cost": 22.66}, {"kind": "done", "cost": 0.7}]          # the last: a new CLI session
+    recs, total = costs.per_turn(old)
+    assert [r["cost"] for r in recs if r["kind"] == "done"] == [8.58, 9.88, 4.2, 0.7] and total == 23.36, (recs, total)
+    assert old[2]["cost"] == 18.46 and "total" not in old[2]                       # the records themselves untouched
+    assert costs.per_turn([{"kind": "done", "cost": 0.3, "total": 5.3}])[1] == 0.3 and costs.last_total(recs) == 0.7
+    pid = ProjectStore().import_copy(FIXTURE, "Cost demo").id
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            a = app.agent(pid)
+            fake = fc.FakeClaude([fc.reply("One.", cost=0.05), fc.reply("Two.", cost=0.07)]).plug(a)
+            for text in ("first", "second"):
+                r = await c.post(f"/api/projects/{pid}/chat", json={"text": text})
+                assert r.status == 200, await r.text()
+                await fake.settle(a)
+            sid = a.session.sid
+            got = (await (await c.get(f"/api/projects/{pid}/sessions/{sid}")).json())
+            done = [r for r in got["transcript"] if r["kind"] == "done"]
+            assert [d["cost"] for d in done] == [0.05, 0.07] and [d["total"] for d in done] == [0.05, 0.12], done
+            assert abs(got["meta"]["cost"] - 0.12) < 1e-9, got["meta"]
+            await a.disconnect()
+            # a conversation from before 0.4.0: its turns hold the running total, its index entry their sum
+            sess_dir = app.rt(pid).p.state_dir("sessions")
+            with open(os.path.join(sess_dir, "old0.jsonl"), "w") as f:
+                for i, cst in enumerate((8.58, 18.46, 22.66)):
+                    f.write(json.dumps({"kind": "done", "turn": f"t{i}", "cost": cst, "duration_ms": 1000, "t": _t.time() + i}) + "\n")
+            idx = json.load(open(os.path.join(sess_dir, "index.json")))
+            idx.append({"sid": "old0", "title": "Old", "created": "", "updated": "", "sdk_session": None, "cost": 49.7, "turns": 3})
+            json.dump(idx, open(os.path.join(sess_dir, "index.json"), "w"))
+            listed = (await (await c.get(f"/api/projects/{pid}/sessions")).json())["sessions"]
+            o = next(m for m in listed if m["sid"] == "old0")
+            assert o["cost"] == 22.66 and o["cli_total"] == 22.66, o
+            rep = signoff.run_report(app.rt(pid).p)
+            assert abs(rep["cost"] - (0.12 + 22.66)) < 0.02, rep["cost"]
+            app.rt(pid).stop()
+    asyncio.run(run())
+
+
+@test()
 def plan_usage_meter_from_the_cli():
     """The plan's usage limit as Claude Code reports it (the SDK's RateLimitEvent): the agent passes each reading
     to the UI (usage.plan) and keeps the last for the run monitor (/api/usage and /api/info), read as "85 % of the

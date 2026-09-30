@@ -2064,7 +2064,8 @@ def make_app():
     async def session(request):
         a = app.agent(request.match_info["pid"])
         s = a.get_session(request.match_info["sid"])
-        return jresp({"meta": s.meta, "transcript": s.transcript()})
+        from . import costs
+        return jresp({"meta": s.meta, "transcript": costs.per_turn(s.transcript())[0]})
 
     @routes.post("/api/projects/{pid}/sessions")
     async def new_session(request):

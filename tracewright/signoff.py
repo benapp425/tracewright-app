@@ -184,19 +184,22 @@ def run_report(project):
         names = [n for n in os.listdir(d) if n.endswith(".jsonl")]
     except OSError:
         names = []
+    from . import costs
     for n in names:
+        done = []
         try:
             with open(os.path.join(d, n), encoding="utf-8") as f:
                 for line in f:
                     if '"kind": "done"' not in line:
                         continue
                     try:
-                        r = json.loads(line)
+                        done.append(json.loads(line))
                     except ValueError:
                         continue
-                    turns.append((r.get("t", 0), (r.get("duration_ms") or 0) / 1000, r.get("cost") or 0.0, r.get("stage")))
         except OSError:
             pass
+        for r in costs.per_turn(done)[0]:                  # each turn's own cost, not the CLI's running total
+            turns.append((r.get("t", 0), (r.get("duration_ms") or 0) / 1000, r.get("cost") or 0.0, r.get("stage")))
     iv = _intervals(project)
     rows = []
     for sid, a, b in iv:

@@ -108,6 +108,10 @@ class FakeClaude:
         step = self.script.pop(0) if self.script else reply("OK")
         msgs = step(p) if callable(step) else step
         for m in flatten(msgs):
+            if isinstance(m, ResultMessage):              # like the CLI: the session's running total, not the turn's
+                import dataclasses
+                self.total = getattr(self, "total", 0.0) + (m.total_cost_usd or 0.0)
+                m = dataclasses.replace(m, total_cost_usd=round(self.total, 6))
             self.q.put_nowait(m)
 
     async def interrupt(self):
