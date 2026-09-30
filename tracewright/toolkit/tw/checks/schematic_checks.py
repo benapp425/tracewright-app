@@ -83,7 +83,7 @@ def render_findings(doc, rects, sheet_label, own_mark=None):
                 if max(q[0], q[2]) < s[0] or min(q[0], q[2]) > s[2] or max(q[1], q[3]) < s[1] or min(q[1], q[3]) > s[3]:
                     continue
                 if _through(q, s):
-                    if q[4] == NC and own_mark is not None and own_mark(t, q):
+                    if len(q) > 4 and q[4] == NC and own_mark is not None and own_mark(t, q):
                         continue
                     out.append((kind, f"{what} '{t.text}'", (t.box[0], t.box[1]), (t,)))
                     break
