@@ -130,7 +130,7 @@ def clean_floorplan(data):
         d = _num(o.get("d"), 1, 10, 3.2)
         holes.append({"id": _s(o.get("id") or o.get("ref") or f"H{i + 1}", 16), "ref": _s(o.get("ref"), 12),
                       "x": _num(o.get("x"), d / 2, W - d / 2, d), "y": _num(o.get("y"), d / 2, H - d / 2, d), "d": d,
-                      "moved": bool(o.get("moved"))})
+                      "moved": bool(o.get("moved")), "locked": bool(o.get("locked"))})
     items, ids = [], set()
     for o in data.get("items") or []:
         if not isinstance(o, dict):
@@ -142,7 +142,7 @@ def clean_floorplan(data):
         w, h = _num(o.get("w"), 1, W * 2, 8.0), _num(o.get("h"), 1, H * 2, 6.0)
         it = {"id": iid, "label": _s(o.get("label") or iid, 40), "ref": _s(o.get("ref"), 12),
               "kind": o.get("kind") if o.get("kind") in KINDS else ("connector" if o.get("edge") in EDGES[:4] else "other"),
-              "w": w, "h": h, "note": _s(o.get("note"), 80), "moved": bool(o.get("moved"))}
+              "w": w, "h": h, "note": _s(o.get("note"), 80), "moved": bool(o.get("moved")), "locked": bool(o.get("locked"))}
         if o.get("edge") in EDGES[:4]:
             it["edge"] = o["edge"]
             span = H if o["edge"] in ("left", "right") else W
@@ -150,29 +150,42 @@ def clean_floorplan(data):
         else:
             it["x"] = _num(o.get("x"), 0, W, W / 2)
             it["y"] = _num(o.get("y"), 0, H, H / 2)
+            it["rot"] = _rot(o.get("rot"))
         items.append(it)
     keepouts = []
-    for o in data.get("keepouts") or []:
+    for i, o in enumerate(data.get("keepouts") or []):
         if isinstance(o, dict):
-            keepouts.append({"label": _s(o.get("label"), 40), "x": _num(o.get("x"), 0, W, W / 2), "y": _num(o.get("y"), 0, H, H / 2),
-                             "w": _num(o.get("w"), 0.5, W, 5.0), "h": _num(o.get("h"), 0.5, H, 5.0)})
+            keepouts.append({"id": _s(o.get("id") or f"K{i + 1}", 16), "label": _s(o.get("label"), 40),
+                             "x": _num(o.get("x"), 0, W, W / 2), "y": _num(o.get("y"), 0, H, H / 2),
+                             "w": _num(o.get("w"), 0.5, W, 5.0), "h": _num(o.get("h"), 0.5, H, 5.0), "rot": _rot(o.get("rot")),
+                             "moved": bool(o.get("moved")), "locked": bool(o.get("locked"))})
     return {"board": board, "holes": holes[:12], "items": items[:24], "keepouts": keepouts[:8], "note": _s(data.get("note"), 200)}
 
 
+def _rot(v):
+    """A quarter turn: 0, 90, 180 or 270."""
+    try:
+        return int(round(float(v) / 90.0)) % 4 * 90
+    except (TypeError, ValueError):
+        return 0
+
+
 def _keep_moves(old, new):
-    """What the user moved keeps the user's place when Claude sends the floorplan again."""
+    """What the user moved, turned or locked keeps the user's place when Claude sends the floorplan again."""
     if not old:
         return new
-    before = {o["id"]: o for o in (old.get("items") or []) + (old.get("holes") or []) if o.get("moved")}
-    for o in (new.get("items") or []) + (new.get("holes") or []):
-        was = before.get(o["id"])
+    every = lambda fp: (fp.get("items") or []) + (fp.get("holes") or []) + (fp.get("keepouts") or [])
+    before = {o["id"]: o for o in every(old) if o.get("moved") or o.get("locked")}
+    for o in every(new):
+        was = before.get(o.get("id"))
         if not was:
             continue
-        for k in ("x", "y", "edge", "at"):
+        for k in ("x", "y", "edge", "at", "rot"):
             o.pop(k, None)
             if k in was:
                 o[k] = was[k]
-        o["moved"] = True
+        o["moved"] = bool(was.get("moved"))
+        o["locked"] = bool(was.get("locked"))
     if (old.get("board") or {}).get("moved"):
         new["board"] = {**new["board"], "w": old["board"]["w"], "h": old["board"]["h"], "moved": True}
     return new
@@ -199,10 +212,23 @@ def move(root, what):
             line = f"floorplan: the user made the board {b['w']:g} x {b['h']:g} mm (the holes kept to their corners)"
         else:
             iid = str(what.get("id") or "")
-            o = next((x for x in (fp.get("items") or []) + (fp.get("holes") or []) if x["id"] == iid), None)
+            for i, k in enumerate(fp.get("keepouts") or []):       # keep-outs saved before they had ids
+                k.setdefault("id", f"K{i + 1}")
+            o = next((x for x in (fp.get("items") or []) + (fp.get("holes") or []) + (fp.get("keepouts") or [])
+                      if x.get("id") == iid), None)
             if o is None:
                 raise ValueError(f"no {iid} on the floorplan")
             W, H = fp["board"]["w"], fp["board"]["h"]
+            name = o.get("ref") or o.get("label") or o["id"]
+            if "locked" in what and len(what) == 2:                  # {id, locked}: a lock, nothing moves
+                o["locked"] = bool(what["locked"])
+                d["floorplan"] = fp
+                d["updated"] = time.time()
+                _save(root, {k: v for k, v in d.items() if v is not None})
+                return d, f"floorplan: the user {'locked' if o['locked'] else 'unlocked'} {name}" + \
+                    (" (keep it where it is)" if o["locked"] else "")
+            if "rot" in what and "edge" not in o:
+                o["rot"] = _rot(what["rot"])
             if what.get("edge") in EDGES[:4]:
                 o["edge"] = what["edge"]
                 span = H if o["edge"] in ("left", "right") else W
@@ -214,7 +240,8 @@ def move(root, what):
                 o["y"] = _num(what.get("y"), 0, H, o.get("y", H / 2))
                 if "edge" in o and "d" not in o:
                     o.pop("edge", None), o.pop("at", None)
-                line = f"floorplan: the user moved {o.get('ref') or o.get('label') or o['id']} to x {o['x']:g}, y {o['y']:g} mm"
+                turned = f", turned {o['rot']}°" if o.get("rot") else ""
+                line = f"floorplan: the user moved {name} to x {o['x']:g}, y {o['y']:g} mm{turned}"
             o["moved"] = True
         d["floorplan"] = fp
         d["updated"] = time.time()

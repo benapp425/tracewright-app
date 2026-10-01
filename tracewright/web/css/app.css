@@ -1870,7 +1870,18 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .fp-hole circle { fill: var(--canvas); stroke: var(--text-3); stroke-width: 1; }
 .fp-hole circle.ring { fill: none; stroke: color-mix(in srgb, var(--text-3) 40%, transparent); stroke-dasharray: 2 2; }
 .fp-corner { fill: var(--surface); stroke: var(--accent); stroke-width: 1.5; cursor: nwse-resize; }
-.fp.editable .fp-item, .fp.editable .fp-hole { cursor: grab; }
+.fp.editable .fp-item, .fp.editable .fp-hole, .fp.editable .fp-ko { cursor: grab; }
+.fp:focus { outline: none; }
+.fp-item.sel rect, .fp-ko.sel rect { stroke: var(--accent); stroke-width: 2.2; }
+.fp-hole.sel circle:not(.ring) { stroke: var(--accent); stroke-width: 2; }
+.fp-item.locked rect { stroke-dasharray: none; }
+.fp-lock rect { fill: var(--text-3); } .fp-lock path { stroke: var(--text-3); stroke-width: 1.4; }
+.fp-item.sel .fp-lock rect, .fp-ko.sel .fp-lock rect { fill: var(--accent); } .fp-item.sel .fp-lock path { stroke: var(--accent); }
+.fp-bar { position: absolute; z-index: 3; display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: var(--hud);
+  border: 1px solid var(--line-2); box-shadow: var(--shadow); }
+.fp-bb { width: 26px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text-2); cursor: pointer; }
+.fp-bb:hover { background: var(--surface-3); color: var(--text); } .fp-bb.on { color: var(--accent); }
 .fp.dragging, .fp.dragging * { cursor: grabbing !important; }
 .fp-tip { position: absolute; pointer-events: none; font: 11px var(--mono); padding: 3px 7px; border-radius: 6px; background: var(--hud);
   color: var(--hud-text); border: 1px solid var(--hud-line); white-space: nowrap; z-index: 2; }

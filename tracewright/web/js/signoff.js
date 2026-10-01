@@ -12,7 +12,7 @@ export class SignoffView {
   constructor(el, ws) {
     this.el = el; this.ws = ws; this.pid = ws.pid;
     this.box = h("div.page-inner.so");
-    el.appendChild(h("div.page", this.box));
+    el.appendChild(h("div.panel", this.box));            // .panel scrolls inside the view (.page only in a flex column)
     for (const e of ["waivers", "signoff", "checks.done", "stages"]) ws.ev.on(e, () => { if (this.el.classList.contains("on")) this.load(); else this.stale = true; });
     this.load();
   }

@@ -50,6 +50,9 @@ export class GuidedCanvas {
   }
 
   render() {
+    // the cards are drawn again on every change (a drop on the floorplan too): the page keeps its place
+    const sc = this.el.closest(".gdpane") || this.el.parentElement, top = sc ? sc.scrollTop : 0;
+    const fpFocus = !!(this.fpView && this.fpView.el.contains(document.activeElement));     // and the floorplan its keys
     const c = this.cv, el = clear(this.el);
     const cards = [];
     if (c.phase === "ready" && c.plan) cards.push(["plan", this.startCard(c.plan)]);
@@ -63,6 +66,8 @@ export class GuidedCanvas {
       if (!this.seen.has(k)) { card.classList.add("new"); this.seen.add(k); }
       el.appendChild(card);
     }
+    if (sc) sc.scrollTop = top;
+    if (fpFocus && this.fpView && this.fpView.el.isConnected) this.fpView.el.focus({ preventScroll: true });
     this.ws.guidedChanged && this.ws.guidedChanged(this.hasContent, c.phase);
   }
 
@@ -125,7 +130,9 @@ export class GuidedCanvas {
   // ------------------------------------------------------------------ floorplan
   // The board to scale: drag blocks, holes and connectors (along the edges) into place, or the corner to size it.
   floorplanCard(fp) {
-    const opts = { pid: this.pid, editable: this.cv.phase !== "done", width: Math.max(320, (this.el.clientWidth || 600) - 58),
+    // movable during the setup, and after it until there is a board (then the board is where parts move)
+    const editable = this.cv.phase !== "done" || !(this.ws.p && this.ws.p.has_pcb);
+    const opts = { pid: this.pid, editable, width: Math.max(320, (this.el.clientWidth || 600) - 58),
       maxSize: (this.cv.constraints || {}).max_size_mm || null };
     if (this.fpView) { Object.assign(this.fpView.opts, opts); this.fpView.set(fp); }
     else this.fpView = new FloorplanView(fp, opts);
@@ -133,7 +140,8 @@ export class GuidedCanvas {
     const bad = this.fpView.bad ? this.fpView.bad.size : 0;
     return this.card("layout-grid", "Floorplan", `${fp.board.w} × ${fp.board.h} mm`, this.fpView.el,
       h("div.gd-fpnote", bad ? h("span.bad", `${bad} overlap${bad === 1 ? "s" : ""} or run${bad === 1 ? "s" : ""} off the board`) : null,
-        h("span", opts.editable ? `Drag to move${moved ? ` · ${moved} placed by you` : ""}. Claude follows what you place.` : `${n} items`)),
+        h("span", opts.editable ? `Drag to move, click to select: R turns, L locks, arrows nudge${moved ? ` · ${moved} placed by you` : ""}. Claude follows what you place.`
+          : `${n} items. The board holds the layout now.`)),
       fp.note ? h("div.gd-fpnote", fp.note) : null);
   }
 

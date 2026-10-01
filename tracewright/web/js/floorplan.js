@@ -1,15 +1,19 @@
 // The floorplan: the board to scale before the schematic exists -- the outline and its size, the mounting
 // holes, each connector on its edge, the main blocks where they go, keep-outs -- drawn from the canvas's
-// floorplan section (canvas.py). Everything can be dragged: blocks and holes anywhere on the board, connectors
-// along the edges (onto another edge too), the board's corner to resize it. Each drop is saved and told to
-// Claude (PATCH .../canvas/floorplan). Millimetres from the board's top-left corner, y down.
+// floorplan section (canvas.py). Everything can be dragged: blocks, keep-outs and holes anywhere on the board,
+// connectors along the edges (onto another edge too), the board's corner to resize it. A click selects: R turns
+// it a quarter (a connector to face the next edge), L locks it (Claude keeps it where it is), the arrow keys
+// nudge it (Shift: 5 mm). Each change is saved and told to Claude (PATCH .../canvas/floorplan). Millimetres
+// from the board's top-left corner, y down.
 import { h, api, toast } from "./util.js";
+import { icon } from "./icons.js";
 
 const NS = "http://www.w3.org/2000/svg";
 const enc = encodeURIComponent;
 const snap = (v, q = 0.5) => Math.round(v / q) * q;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const fmt = (v) => (Math.round(v * 10) / 10).toString();
+const NEXT_EDGE = { top: "right", right: "bottom", bottom: "left", left: "top" };
 
 function el(tag, attrs = {}, ...kids) {
   const e = document.createElementNS(NS, tag);
@@ -26,27 +30,45 @@ export function connectorRect(it, W, H) {
   if (it.edge === "top") return [at - w / 2, 0, w, d];
   return [at - w / 2, H - d, w, d];
 }
-function blockRect(it) { return [it.x - it.w / 2, it.y - it.h / 2, it.w, it.h]; }
+// a block's (or keep-out's) rectangle, turned a quarter when its rotation says so
+function blockRect(it) {
+  const q = (it.rot || 0) % 180 === 90, w = q ? it.h : it.w, hh = q ? it.w : it.h;
+  return [it.x - w / 2, it.y - hh / 2, w, hh];
+}
 function overlaps(a, b) { return a[0] < b[0] + b[2] - 0.01 && b[0] < a[0] + a[2] - 0.01 && a[1] < b[1] + b[3] - 0.01 && b[1] < a[1] + a[3] - 0.01; }
 
 export class FloorplanView {
   // opts: {pid, editable, maxSize: [a, b] | null, width, maxHeight}
   constructor(fp, opts = {}) {
     this.opts = { editable: true, width: 520, maxHeight: 330, ...opts };
-    this.el = h("div.fp");
+    this.el = h("div.fp", { tabindex: "-1" });
     this.el.__fp = this;                             // for debugging from the console, and the browser tests
     this.tip = h("div.fp-tip", { style: { display: "none" } });
-    this.el.appendChild(this.tip);
+    this.bar = h("div.fp-bar", { style: { display: "none" } });
+    this.el.append(this.tip, this.bar);
+    this.selId = null;
+    this.el.addEventListener("keydown", (e) => this.key(e));
     this.set(fp);
   }
 
   set(fp) {
     if (this.drag) { this.pendingFp = fp; return; }             // a drag is under way: draw it once it is dropped
     this.fp = JSON.parse(JSON.stringify(fp));
+    (this.fp.keepouts || []).forEach((k, i) => { if (!k.id) k.id = `K${i + 1}`; });     // saved before keep-outs had ids
+    if (this.selId && !this.find(this.selId)) this.selId = null;
     this.draw();
   }
 
   resize(width) { if (Math.abs(width - this.opts.width) > 12) { this.opts.width = width; this.draw(); } }
+
+  // everything that can be picked, by id
+  find(id) {
+    const fp = this.fp;
+    for (const it of fp.items || []) if (it.id === id) return { kind: it.edge ? "conn" : "blk", it };
+    for (const it of fp.holes || []) if (it.id === id) return { kind: "hole", it };
+    for (const it of fp.keepouts || []) if (it.id === id) return { kind: "ko", it };
+    return null;
+  }
 
   draw() {
     const fp = this.fp, { width, maxHeight } = this.opts;
@@ -73,7 +95,9 @@ export class FloorplanView {
       svg.appendChild(el("text", { x: X(a) - 4, y: Y(b) - 5, class: "fp-maxl" }, `largest allowed ${fmt(a)} × ${fmt(b)}`));
     }
     const r = Math.min(fp.board.radius || 0, W / 2, H / 2) * S;
-    svg.appendChild(el("rect", { x: X(0), y: Y(0), width: W * S, height: H * S, rx: r, class: "fp-board" }));
+    const boardRect = el("rect", { x: X(0), y: Y(0), width: W * S, height: H * S, rx: r, class: "fp-board" });
+    boardRect.addEventListener("pointerdown", (e) => { if (e.button === 0 && !this.drag) this.select(null); });
+    svg.appendChild(boardRect);
     svg.appendChild(grid);
     // dimensions
     svg.appendChild(el("text", { x: X(W / 2), y: Y(H) + 24, class: "fp-dim" }, `${fmt(W)} mm`));
@@ -81,15 +105,12 @@ export class FloorplanView {
     const rightNames = (fp.items || []).some((it) => it.edge === "right");
     const hx = rightNames ? X(W) + MR - 10 : X(W) + 22;
     svg.appendChild(el("text", { x: hx, y: Y(H / 2), class: "fp-dim v", transform: `rotate(90 ${hx} ${Y(H / 2)})` }, `${fmt(H)} mm`));
-    // keep-outs
-    for (const k of fp.keepouts || []) {
-      const g = el("g", { class: "fp-ko" }, el("rect", { x: X(k.x - k.w / 2), y: Y(k.y - k.h / 2), width: k.w * S, height: k.h * S }));
-      if (k.label && k.w * S > 40) g.appendChild(el("text", { x: X(k.x), y: Y(k.y) + 4 }, k.label));
-      svg.appendChild(g);
-    }
-    // blocks, then connectors, then holes on top
+    // keep-outs first (areas), then blocks largest first so a small one is never buried, connectors, holes on top
+    for (const k of fp.keepouts || []) svg.appendChild(this.keepout(k));
     const rects = [];
-    const blocks = (fp.items || []).filter((it) => !it.edge), conns = (fp.items || []).filter((it) => it.edge);
+    const area = (it) => it.w * it.h;
+    const blocks = (fp.items || []).filter((it) => !it.edge).sort((a, b) => area(b) - area(a));
+    const conns = (fp.items || []).filter((it) => it.edge);
     for (const it of blocks) rects.push([it, blockRect(it)]);
     for (const it of conns) rects.push([it, connectorRect(it, W, H)]);
     const bad = new Set();
@@ -111,11 +132,21 @@ export class FloorplanView {
     const old = this.el.querySelector("svg.fp-svg");
     if (old) old.replaceWith(svg); else this.el.insertBefore(svg, this.tip);
     this.el.classList.toggle("editable", !!this.opts.editable);
+    this.renderBar();
+  }
+
+  // the name and state each item carries in its tooltip
+  lockMark(it, x, y) {
+    if (!it.locked) return null;
+    const g = el("g", { class: "fp-lock", transform: `translate(${x - 11} ${y + 2})` },
+      el("rect", { width: 9, height: 7, x: 0, y: 4, rx: 1.5 }), el("path", { d: "M2 4V2.6a2.5 2.5 0 0 1 5 0V4", fill: "none" }));
+    return g;
   }
 
   item(it, [x, y, w, hh], bad) {
     const S = this.S, X = (v) => this.ox + v * S, Y = (v) => this.oy + v * S;
-    const cls = "fp-item " + (it.edge ? "conn" : "blk " + (it.kind || "other")) + (bad ? " bad" : "") + (it.moved ? " moved" : "");
+    const cls = "fp-item " + (it.edge ? "conn" : "blk " + (it.kind || "other")) + (bad ? " bad" : "") + (it.moved ? " moved" : "") +
+      (it.id === this.selId ? " sel" : "") + (it.locked ? " locked" : "");
     const g = el("g", { class: cls, "data-id": it.id });
     g.appendChild(el("rect", { x: X(x), y: Y(y), width: w * S, height: hh * S, rx: it.edge ? 1.5 : 4 }));
     const name = it.edge ? [it.ref, it.label].filter(Boolean).join(" ") : it.label || it.id;
@@ -135,28 +166,149 @@ export class FloorplanView {
         if (it.note && hh * S > 34) g.appendChild(el("text", { x: X(x + w / 2), y: Y(y + hh / 2) + 12, class: "fp-bn" }, it.note.slice(0, Math.max(4, Math.floor(w * S / 5.6)))));
       }
     }
-    g.appendChild(el("title", {}, `${name}${it.note ? " — " + it.note : ""}\n${fmt(it.w)} × ${fmt(it.h)} mm${it.moved ? "\nPlaced by you" : ""}${bad ? "\nOverlaps something or runs off the board" : ""}`));
+    const lk = this.lockMark(it, X(x + w), Y(y));
+    if (lk) g.appendChild(lk);
+    g.appendChild(el("title", {}, `${name}${it.note ? " — " + it.note : ""}\n${fmt(it.w)} × ${fmt(it.h)} mm${it.rot ? `, turned ${it.rot}°` : ""}` +
+      `${it.locked ? "\nLocked: Claude keeps it here" : it.moved ? "\nPlaced by you" : ""}${bad ? "\nOverlaps something or runs off the board" : ""}`));
     if (this.opts.editable) this.dragBy(g, { kind: it.edge ? "conn" : "blk", it });
+    return g;
+  }
+
+  keepout(k) {
+    const S = this.S, X = (v) => this.ox + v * S, Y = (v) => this.oy + v * S;
+    const [x, y, w, hh] = blockRect(k);
+    const g = el("g", { class: "fp-ko" + (k.id === this.selId ? " sel" : "") + (k.locked ? " locked" : ""), "data-id": k.id },
+      el("rect", { x: X(x), y: Y(y), width: w * S, height: hh * S }));
+    if (k.label && w * S > 40) g.appendChild(el("text", { x: X(x + w / 2), y: Y(y + hh / 2) + 4 }, k.label));
+    const lk = this.lockMark(k, X(x + w), Y(y));
+    if (lk) g.appendChild(lk);
+    g.appendChild(el("title", {}, `Keep-out${k.label ? ": " + k.label : ""}\n${fmt(w)} × ${fmt(hh)} mm${k.locked ? "\nLocked: Claude keeps it here" : ""}`));
+    if (this.opts.editable) this.dragBy(g, { kind: "ko", it: k });
     return g;
   }
 
   hole(ho) {
     const S = this.S, X = (v) => this.ox + v * S, Y = (v) => this.oy + v * S;
-    const g = el("g", { class: "fp-hole" + (ho.moved ? " moved" : ""), "data-id": ho.id },
+    const g = el("g", { class: "fp-hole" + (ho.moved ? " moved" : "") + (ho.id === this.selId ? " sel" : "") + (ho.locked ? " locked" : ""), "data-id": ho.id },
       el("circle", { cx: X(ho.x), cy: Y(ho.y), r: (ho.d / 2 + 1) * S, class: "ring" }),
       el("circle", { cx: X(ho.x), cy: Y(ho.y), r: (ho.d / 2) * S }));
-    g.appendChild(el("title", {}, `${ho.ref || "Hole"}: ${fmt(ho.d)} mm at ${fmt(ho.x)}, ${fmt(ho.y)}`));
+    const lk = this.lockMark(ho, X(ho.x + ho.d / 2 + 1) + 4, Y(ho.y - ho.d / 2 - 1) - 4);
+    if (lk) g.appendChild(lk);
+    g.appendChild(el("title", {}, `${ho.ref || "Hole"}: ${fmt(ho.d)} mm at ${fmt(ho.x)}, ${fmt(ho.y)}${ho.locked ? "\nLocked: Claude keeps it here" : ""}`));
     if (this.opts.editable) this.dragBy(g, { kind: "hole", it: ho });
     return g;
   }
 
+  // ------------------------------------------------------------------ selection: turn, lock, nudge
+  select(id) {
+    if (this.selId === id) return;
+    this.selId = id;
+    this.draw();
+  }
+
+  // the bar over the selected item: turn it, lock it
+  renderBar() {
+    const bar = this.bar, f = this.selId && this.opts.editable ? this.find(this.selId) : null;
+    bar.replaceChildren();
+    if (!f) { bar.style.display = "none"; return; }
+    const it = f.it;
+    if (f.kind !== "hole") bar.appendChild(h("button.fp-bb", { "data-tip": f.kind === "conn" ? "Face the next edge (R)" : "Turn a quarter (R)", onclick: () => this.rotate() }, icon("rotate-cw", 14)));
+    bar.appendChild(h("button.fp-bb" + (it.locked ? ".on" : ""), { "data-tip": it.locked ? "Unlock (L)" : "Lock: Claude keeps it here (L)", onclick: () => this.toggleLock() },
+      icon(it.locked ? "lock" : "lock-open", 14)));
+    bar.style.display = "";
+    const node = this.svg.querySelector(`[data-id="${CSS.escape(it.id)}"]`);
+    if (!node) { bar.style.display = "none"; return; }
+    requestAnimationFrame(() => {                     // above the item, inside the drawing
+      if (!node.isConnected) return;
+      const nr = node.getBoundingClientRect(), er = this.el.getBoundingClientRect();
+      bar.style.left = Math.max(0, nr.left - er.left + nr.width / 2 - bar.offsetWidth / 2) + "px";
+      bar.style.top = Math.max(0, nr.top - er.top - bar.offsetHeight - 6) + "px";
+    });
+  }
+
+  key(e) {
+    if (!this.opts.editable || !this.selId || e.metaKey || e.ctrlKey || e.altKey) return;
+    const f = this.find(this.selId);
+    if (!f) return;
+    const k = e.key;
+    if (k === "r" || k === "R") this.rotate();
+    else if (k === "l" || k === "L") this.toggleLock();
+    else if (k === "Escape") this.select(null);
+    else if (k.startsWith("Arrow")) {
+      const step = e.shiftKey ? 5 : 0.5;
+      const dx = k === "ArrowLeft" ? -step : k === "ArrowRight" ? step : 0, dy = k === "ArrowUp" ? -step : k === "ArrowDown" ? step : 0;
+      this.nudge(f, dx, dy);
+    } else return;
+    e.preventDefault(); e.stopPropagation();
+  }
+
+  rotate() {
+    const f = this.find(this.selId);
+    if (!f || f.kind === "hole") return;
+    const it = f.it, W = this.fp.board.w, H = this.fp.board.h;
+    const start = { ...it };
+    if (f.kind === "conn") {                          // a connector turns to face the next edge, as far along it
+      const span = (e) => (e === "left" || e === "right" ? H : W);
+      const frac = (it.at ?? span(it.edge) / 2) / span(it.edge);
+      it.edge = NEXT_EDGE[it.edge] || "top";
+      it.at = clamp(snap(frac * span(it.edge)), Math.min(it.w / 2, span(it.edge) / 2), Math.max(span(it.edge) - it.w / 2, span(it.edge) / 2));
+      this.save({ id: it.id, edge: it.edge, at: it.at }, it, start);
+    } else {
+      it.rot = ((it.rot || 0) + 90) % 360;
+      this.save({ id: it.id, x: it.x, y: it.y, rot: it.rot }, it, start);
+    }
+    it.moved = true;
+    this.draw();
+  }
+
+  toggleLock() {
+    const f = this.find(this.selId);
+    if (!f) return;
+    const start = { ...f.it };
+    f.it.locked = !f.it.locked;
+    this.draw();
+    this.save({ id: f.it.id, locked: f.it.locked }, f.it, start);
+  }
+
+  nudge(f, dx, dy) {
+    const it = f.it, W = this.fp.board.w, H = this.fp.board.h;
+    const start = this.nudgeStart && this.nudgeStart.id === it.id ? this.nudgeStart.v : { ...it };
+    this.nudgeStart = { id: it.id, v: start };
+    if (f.kind === "conn") {
+      const along = it.edge === "left" || it.edge === "right" ? dy : dx, span = it.edge === "left" || it.edge === "right" ? H : W;
+      it.at = clamp(snap((it.at ?? span / 2) + along), Math.min(it.w / 2, span / 2), Math.max(span - it.w / 2, span / 2));
+    } else {
+      const m = f.kind === "hole" ? it.d / 2 : 0;
+      it.x = clamp(snap(it.x + dx), m, W - m); it.y = clamp(snap(it.y + dy), m, H - m);
+    }
+    it.moved = true;
+    this.draw();
+    clearTimeout(this.nudgeT);                         // one save when the keys stop
+    this.nudgeT = setTimeout(() => {
+      this.nudgeStart = null;
+      this.save(f.kind === "conn" ? { id: it.id, edge: it.edge, at: it.at } : { id: it.id, x: it.x, y: it.y, ...(it.rot != null && f.kind !== "hole" ? { rot: it.rot } : {}) }, it, start);
+    }, 350);
+  }
+
+  async save(body, it, start) {
+    if (!this.opts.pid) return;
+    try {
+      const r = await api(`/api/projects/${enc(this.opts.pid)}/canvas/floorplan`, { method: "PATCH", body });
+      if (r.floorplan) this.set(r.floorplan);
+    } catch (e) {
+      toast(e.message, "error");
+      if (it && start) { Object.assign(it, start); this.draw(); }
+    }
+  }
+
   // ------------------------------------------------------------------ dragging
   // The pointer is followed on the document for the whole drag (each step redraws the plan, replacing the node
-  // that was grabbed); while the board's corner is dragged the scale holds still.
+  // that was grabbed); while the board's corner is dragged the scale holds still. A press without a move selects.
   dragBy(node, what) {
     node.addEventListener("pointerdown", (e) => {
       if (e.button !== 0 || this.drag) return;
       e.preventDefault(); e.stopPropagation();
+      this.el.focus({ preventScroll: true });
       const d = this.drag = { what, p0: this.toMM(e), moved: false, start: what.it ? { ...what.it } : { ...this.fp.board } };
       if (what.kind === "board") {
         this.fixedS = this.S;
@@ -169,6 +321,7 @@ export class FloorplanView {
         const p = this.toMM(ev), dx = p[0] - d.p0[0], dy = p[1] - d.p0[1];
         if (!d.moved && Math.hypot(dx * this.S, dy * this.S) < 3) return;
         d.moved = true;
+        if (what.it) this.selId = what.it.id;
         this.preview(d, p, dx, dy);
       };
       const up = () => {
@@ -179,6 +332,7 @@ export class FloorplanView {
         this.el.classList.remove("dragging");
         this.tip.style.display = "none";
         if (d.moved) this.drop(d);
+        else if (what.it) this.selId = what.it.id;   // a click: select it
         if (this.pendingFp) { const f = this.pendingFp; this.pendingFp = null; this.set(f); } else this.draw();
       };
       document.addEventListener("pointermove", move);
@@ -228,7 +382,8 @@ export class FloorplanView {
   async drop(d) {
     const it = d.what.it;
     const body = d.what.kind === "board" ? { board: { w: this.fp.board.w, h: this.fp.board.h }, holes: (this.fp.holes || []).map((o) => ({ id: o.id, x: o.x, y: o.y })) }
-      : d.what.kind === "conn" ? { id: it.id, edge: it.edge, at: it.at } : { id: it.id, x: it.x, y: it.y };
+      : d.what.kind === "conn" ? { id: it.id, edge: it.edge, at: it.at }
+      : { id: it.id, x: it.x, y: it.y, ...(d.what.kind !== "hole" && it.rot != null ? { rot: it.rot } : {}) };
     if (it) it.moved = true;
     if (!this.opts.pid) return;
     try {

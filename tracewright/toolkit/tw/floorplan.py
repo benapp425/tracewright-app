@@ -6,8 +6,9 @@ millimetres from the board's top-left corner, y down).
   ./tw floorplan           the plan in board coordinates: what to put where
   ./tw floorplan apply     on the board: the outline (unless the board has one; --outline replaces it), the
                            blocks' areas and keep-outs drawn on Dwgs.User (group "Floorplan"), and the
-                           connectors and holes whose references are on the board moved to their places
-                           (their rotation is left as it is: turn each so it faces off its edge)
+                           connectors, holes and one-part blocks whose references are on the board moved to their
+                           places (a block turned on the plan turns its part; a connector's rotation is left as it
+                           is: turn each so it faces off its edge)
 
 The check placement.floorplan holds the placed board to it: each connector on its planned edge, each hole
 where it was agreed."""
@@ -66,12 +67,16 @@ def placed(fp, origin=ORIGIN):
                                       "x": round(x, 3), "y": round(y, 3), "rect": [round(v, 3) for v in rect], "faces": e})
         else:
             x, y = ox + it["x"], oy + it["y"]
+            rot = int(it.get("rot") or 0) % 360
+            if rot in (90, 270):                           # turned a quarter: its area turns with it
+                w, d = d, w
             out["blocks"].append({"id": it["id"], "ref": it.get("ref") or "", "label": it.get("label", ""), "kind": it.get("kind", ""),
-                                  "x": round(x, 3), "y": round(y, 3),
+                                  "x": round(x, 3), "y": round(y, 3), "rot": rot,
                                   "rect": [round(v, 3) for v in (x - w / 2, y - d / 2, x + w / 2, y + d / 2)]})
     for k in fp.get("keepouts") or []:
         x, y = ox + k["x"], oy + k["y"]
-        out["keepouts"].append({"label": k.get("label", ""), "rect": [x - k["w"] / 2, y - k["h"] / 2, x + k["w"] / 2, y + k["h"] / 2]})
+        kw, kh = (k["h"], k["w"]) if int(k.get("rot") or 0) % 180 == 90 else (k["w"], k["h"])
+        out["keepouts"].append({"label": k.get("label", ""), "rect": [x - kw / 2, y - kh / 2, x + kw / 2, y + kh / 2]})
     return out
 
 
@@ -89,7 +94,12 @@ def describe(fp, origin=ORIGIN):
         out.append(f"Connector {c['ref'] or c['id']} {c['label']}: on the {c['edge']} edge, centre ({c['x']:g}, {c['y']:g}), "
                    f"inside [{', '.join(f'{v:g}' for v in c['rect'])}], opening facing {c['faces']}{mv}")
     for k in pl["blocks"]:
-        out.append(f"Block {k['label'] or k['id']}{' (' + k['ref'] + ')' if k['ref'] else ''}: area [{', '.join(f'{v:g}' for v in k['rect'])}]")
+        it = next((i for i in fp.get("items") or [] if i["id"] == k["id"]), {})
+        how = [f"turned {k['rot']}°"] if k.get("rot") else []
+        how += ["placed by the user"] if it.get("moved") else []
+        how += ["locked: keep it there"] if it.get("locked") else []
+        out.append(f"Block {k['label'] or k['id']}{' (' + k['ref'] + ')' if k['ref'] else ''}: area [{', '.join(f'{v:g}' for v in k['rect'])}]"
+                   + (f" ({', '.join(how)})" if how else ""))
     for k in pl["keepouts"]:
         out.append(f"Keep-out {k['label']}: [{', '.join(f'{v:g}' for v in k['rect'])}]")
     if fp.get("note"):
@@ -114,4 +124,7 @@ def ops(fp, board=None, origin=None, outline=None):
     for c in pl["connectors"] + pl["holes"]:
         if c.get("ref") and c["ref"] in refs:
             out.append({"op": "move", "ref": c["ref"], "x": c["x"], "y": c["y"]})
+    for k in pl["blocks"]:                                  # a block that is one part: the part goes there, turned as planned
+        if k.get("ref") and k["ref"] in refs:
+            out.append({"op": "move", "ref": k["ref"], "x": k["x"], "y": k["y"], **({"rot": k["rot"]} if k.get("rot") else {})})
     return out

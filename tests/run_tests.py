@@ -2671,6 +2671,46 @@ def each_turn_says_what_it_changed_and_can_be_undone():
     asyncio.run(run())
 
 
+@test()
+def floorplan_turns_locks_and_keepouts():
+    """The floorplan's quarter turns, locks and keep-outs: a turned block's area turns (and a one-part block's part
+    is placed turned), a lock keeps the user's item when Claude sends the plan again, keep-outs move like blocks."""
+    from tracewright import canvas
+    from tw import floorplan as twfp
+    root = os.path.join(TMP, "fp-turns")
+    os.makedirs(os.path.join(root, ".tracewright"))
+    fp = {"board": {"w": 50, "h": 35}, "holes": [{"id": "H1", "x": 3.5, "y": 3.5, "d": 3.2}],
+          "items": [{"id": "mcu", "ref": "U2", "label": "MCU", "x": 30, "y": 16, "w": 12, "h": 6},
+                    {"id": "usb", "ref": "J1", "label": "USB-C", "edge": "left", "at": 17.5, "w": 9, "h": 6}],
+          "keepouts": [{"label": "logo", "x": 40, "y": 29, "w": 8, "h": 5}]}
+    canvas.update(root, "floorplan", fp)
+    cv, line = canvas.move(root, {"id": "mcu", "x": 30, "y": 16, "rot": 90})
+    m = cv["floorplan"]["items"][0]
+    assert m["rot"] == 90 and m["moved"] and "turned 90" in line, (m, line)
+    cv, line = canvas.move(root, {"id": "mcu", "locked": True})
+    assert cv["floorplan"]["items"][0]["locked"] and "locked" in line and cv["floorplan"]["items"][0]["x"] == 30, line
+    cv, line = canvas.move(root, {"id": "K1", "x": 36, "y": 27})
+    assert cv["floorplan"]["keepouts"][0]["x"] == 36 and cv["floorplan"]["keepouts"][0]["moved"], cv["floorplan"]["keepouts"]
+    # Claude sends the plan again: the locked, turned block stays as the user left it
+    again = json.loads(json.dumps(fp))
+    again["items"][0].update(x=10, y=10, rot=0)
+    cv = canvas.update(root, "floorplan", again)
+    m = cv["floorplan"]["items"][0]
+    assert (m["x"], m["y"], m["rot"], m["locked"]) == (30, 16, 90, True), m
+    pl = twfp.placed(cv["floorplan"])
+    blk = pl["blocks"][0]
+    w, hh = blk["rect"][2] - blk["rect"][0], blk["rect"][3] - blk["rect"][1]
+    assert abs(w - 6) < 1e-6 and abs(hh - 12) < 1e-6 and blk["rot"] == 90, blk          # 12 x 6 turned: 6 wide, 12 tall
+    assert any("turned 90°" in l and "locked" in l for l in twfp.describe(cv["floorplan"])), twfp.describe(cv["floorplan"])
+
+    class B:                                       # a board holding U2 and J1
+        outline = [[(100, 100), (150, 100), (150, 135), (100, 135)]]
+        fp_list = [type("F", (), {"ref": "U2"})(), type("F", (), {"ref": "J1"})()]
+    ops = twfp.ops(cv["floorplan"], board=B())
+    mv = next(o for o in ops if o.get("op") == "move" and o["ref"] == "U2")
+    assert mv["rot"] == 90 and abs(mv["x"] - 130) < 1e-6 and abs(mv["y"] - 116) < 1e-6, mv
+
+
 @test(needs=("kicad",))
 def stage_gates_waivers_and_sign_off():
     """A stage only counts as done when its gate holds (requirements written, the checks run on the design as it

@@ -327,6 +327,102 @@ async def floorplan_drag_to_place(t):
         os.remove(os.path.join(root, ".tracewright", "canvas.json"))
 
 
+async def fp_click(page, target):
+    """Click a floorplan item (select it) without moving it."""
+    b = await page.js("""((id) => { const g = document.querySelector(`.fp-svg [data-id="${id}"] rect, .fp-svg [data-id="${id}"] circle:not(.ring)`);
+        const r = g.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })(%s)""" % json.dumps(target))
+    await page.mouse(b[0], b[1])
+    await asyncio.sleep(0.25)
+
+
+@test
+async def floorplan_turn_lock_nudge_and_keepouts(t):
+    """Select by clicking: R turns a block a quarter (a connector to the next edge), L locks, the arrows nudge;
+    keep-outs drag like blocks; and the page keeps its place when a drop redraws the cards."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg["start"] = {"mode": "guided", "phase": "ready"}
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    reqs = [{"label": f"Requirement {i}", "value": "a long line of text to make the page scroll " * 2} for i in range(30)]
+    with open(os.path.join(root, ".tracewright", "canvas.json"), "w") as f:
+        json.dump({"requirements": {"items": reqs}, "floorplan": DEMO_FLOORPLAN}, f)
+    cv = lambda: t.s.get(f"api/projects/{t.pid}/canvas")["floorplan"]
+    item = lambda iid: next(i for i in cv()["items"] + cv()["holes"] + cv()["keepouts"] if i.get("id") == iid)
+    try:
+        await t.page.goto(t.s.url + f"#/p/{t.pid}")
+        await t.page.wait("document.querySelector('.fp-svg .fp-board')", 20)
+        # the page settled, then scrolled down to the floorplan at the bottom
+        await asyncio.sleep(1.0)
+        top = await t.page.js("(() => { const sc = document.querySelector('.gdpane'); sc.scrollTop = sc.scrollHeight; return sc.scrollTop; })()")
+        check(top > 200, f"the setup page did not scroll ({top})")
+        await asyncio.sleep(0.3)
+        top = await t.page.js("document.querySelector('.gdpane').scrollTop")
+        await fp_click(t.page, "mcu")
+        check(await t.page.js("!!document.querySelector('.fp-item.sel[data-id=mcu]') && document.querySelector('.fp-bar').style.display !== 'none'"),
+              "a click does not select the block or show its bar")
+        await t.page.key("r")
+        await asyncio.sleep(0.6)
+        m = item("mcu")
+        check(m.get("rot") == 90 and m["moved"], m)
+        rect = await t.page.js("(() => { const r = document.querySelector('.fp-item[data-id=mcu] rect'); return [+r.getAttribute('width'), +r.getAttribute('height')]; })()")
+        check(rect[1] > rect[0], f"the turned block is not drawn turned: {rect}")
+        await t.page.key("l")
+        await asyncio.sleep(0.6)
+        check(item("mcu").get("locked") is True, item("mcu"))
+        check(await t.page.js("!!document.querySelector('.fp-item.locked[data-id=mcu] .fp-lock')"), "no lock mark on the locked block")
+        x0 = item("mcu")["x"]
+        for _ in range(4):
+            await t.page.key("ArrowRight")
+        await asyncio.sleep(0.9)
+        check(abs(item("mcu")["x"] - (x0 + 2)) <= 0.01, (x0, item("mcu")))
+        # the scroll held through every redraw
+        now = await t.page.js("document.querySelector('.gdpane').scrollTop")
+        check(abs(now - top) < 2, f"the page jumped from {top} to {now}")
+        # a connector turns to the next edge
+        await fp_click(t.page, "usb")
+        await t.page.key("r")
+        await asyncio.sleep(0.6)
+        check(item("usb")["edge"] == "top", item("usb"))
+        # keep-outs drag like blocks
+        await fp_drag(t.page, "K1", (36, 27))
+        k = item("K1")
+        check(abs(k["x"] - 36) <= 0.5 and abs(k["y"] - 27) <= 0.5 and k["moved"], k)
+        now = await t.page.js("document.querySelector('.gdpane').scrollTop")
+        check(abs(now - top) < 2, f"the page jumped after a drop from {top} to {now}")
+        await t.shot("floorplan-turned")
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(os.path.join(root, ".tracewright", "canvas.json"))
+
+
+@test
+async def signoff_page_scrolls(t):
+    """A long sign-off page (many waivers) scrolls inside its view."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg.setdefault("checks", {})["waive"] = [{"key": f"test:waiver:{i}", "reason": "A reason long enough to take a few lines on the page. " * 3,
+                                              "by": "claude", "severity": "warning", "message": f"Finding number {i}"} for i in range(24)]
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    try:
+        await t.open_project()
+        await t.place("checks", "signoff")
+        await t.page.wait("document.querySelector('.so .page-head')", 10)
+        got = await t.page.js("(() => { const p = document.querySelector('.so').closest('.panel'); if (!p) return null;"
+                              " const before = p.scrollTop; p.scrollTop = 400; return [p.scrollHeight > p.clientHeight + 100, p.scrollTop - before]; })()")
+        check(got and got[0] and got[1] > 100, f"the sign-off page does not scroll: {got}")
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+
+
 @test
 async def floorplan_shows_on_the_board_until_there_is_one(t):
     pr = t.s.post("api/projects", {"name": "Floorplan board", "brief": ""})     # no start: nothing goes to Claude
