@@ -37,11 +37,13 @@ sed -e "s|@VERSION@|$VERSION|g" -e "s|@PYTHON@||g" -e "s|@ARCH@||g" "$HERE/Info.
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # the engine's source, for the first-launch install
-( cd "$ROOT" && tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' -cf - \
+# (COPYFILE_DISABLE: no AppleDouble ._ copies of the files' extended attributes in the archive)
+( cd "$ROOT" && COPYFILE_DISABLE=1 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' --exclude='._*' -cf - \
     tracewright pyproject.toml install.sh README.md LICENSE CHANGELOG.md THIRD_PARTY.md macos/Info.plist ) | ( cd "$APP/Contents/Resources/engine" && tar -xf - )
 
 xattr -cr "$APP"
 codesign --force --deep --sign - --identifier app.tracewright "$APP" >/dev/null
-( cd "$TMP/out" && ditto -c -k --keepParent Tracewright.app "$DIST/Tracewright-$VERSION-mac.zip" )
+# no extended attributes or resource forks in the zip: unzip would leave a ._ file beside every file
+( cd "$TMP/out" && ditto -c -k --norsrc --noextattr --keepParent Tracewright.app "$DIST/Tracewright-$VERSION-mac.zip" )
 echo "Built $DIST/Tracewright-$VERSION-mac.zip ($(du -h "$DIST/Tracewright-$VERSION-mac.zip" | cut -f1))"
 shasum -a 256 "$DIST/Tracewright-$VERSION-mac.zip"
