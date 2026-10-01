@@ -1125,6 +1125,11 @@ async def schematic_edits_from_the_card_and_labels(t):
         await t.shot("part-edit")
         await t.page.js("""(() => { const i = document.querySelector('.modal.pe input'); i.value = '3.3k'; i.dispatchEvent(new Event('input')); 
           [...document.querySelectorAll('.modal.pe .modal-foot button')].find((b) => b.textContent === 'Save').click(); return 1; })()""")
+        # a new value with the old LCSC code: said first, saved on the second press
+        await t.page.wait("document.querySelector('.modal.pe .pe-warn') && document.querySelector('.modal.pe .pe-warn').style.display !== 'none'", 5)
+        warn = await t.page.js("document.querySelector('.modal.pe .pe-warn').textContent")
+        check("C25900 is the part for 4.7k" in warn, warn)
+        await t.page.js("[...document.querySelectorAll('.modal.pe .modal-foot button')].find((b) => b.textContent === 'Save anyway').click(); 1")
         await t.page.wait("!document.querySelector('.modal.pe')", 10)
         for _ in range(50):
             if '(property "Value" "3.3k"' in open(os.path.join(hw, "mcu.kicad_sch")).read():

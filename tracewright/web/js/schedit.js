@@ -10,21 +10,27 @@ const FIELDS = [["Value", "value", "10k, 100n, AMS1117-3.3"], ["Footprint", "foo
   ["Datasheet", "datasheet", "https://…"], ["Description", "description", ""]];
 const LABEL = { MPN: "Part number", LCSC: "LCSC code", Datasheet: "Data sheet" };
 
+// the last edit's notices: an undo closes them (its Undo button, and "the board has the old names")
+const shown = { done: null, stale: null };
+const close = (t) => { if (t && t.isConnected) { const x = t.querySelector(".t-x"); if (x) x.click(); } };
+
 export async function schEdit(ws, ops, label) {
   const r = await api(`/api/projects/${enc(ws.pid)}/schematic/edit`, { body: { ops, label } });
   ws.inspector && ws.inspector.invalidate();
   const sch = ws.views && ws.views.schematic;
   if (sch) { sch.history = r.history; sch.reload && sch.reload(); }
   if (!(r.changes || []).length) { toast("Nothing to change", "info", 2500); return r; }
-  toast(label, "ok", 6000, { label: "Undo", run: () => schStep(ws, true) });
-  if (r.board_out_of_date) setTimeout(() => toast("The board has the old footprint or net names", "info", 9000,
-    { label: "Update the board", run: () => updateBoard(ws) }), 400);
+  close(shown.done); close(shown.stale);
+  shown.done = toast(label, "ok", 6000, { label: "Undo", run: () => schStep(ws, true) });
+  if (r.board_out_of_date) shown.stale = toast("The board has the old footprint or net names", "info", 9000,
+    { label: "Update the board", run: () => updateBoard(ws) });
   return r;
 }
 
 export async function schStep(ws, back) {
   try {
     const r = await api(`/api/projects/${enc(ws.pid)}/schematic/${back ? "undo" : "redo"}`, { body: {} });
+    close(shown.done); close(shown.stale);
     ws.inspector && ws.inspector.invalidate();
     const sch = ws.views && ws.views.schematic;
     if (sch) { sch.history = r.history; sch.reload && sch.reload(); }
@@ -52,10 +58,20 @@ export function editPart(ws, info) {
     return [i, h("label.pe-flag", h("span.switch", i, h("span.track")), h("span", h("b", text), h("span.pe-sub", sub)))];
   };
   const [dnp, dnpRow] = flag("Not fitted (DNP)", "Kept on the board and in the BOM as not fitted", info.dnp);
-  const [errBox] = [h("div.pe-err", { style: { display: "none" } })];
+  const errBox = h("div.pe-err", { style: { display: "none" } });
+  const warnBox = h("div.pe-warn", { style: { display: "none" } });
+  let warned = false;
   const save = h("button.btn.primary", { onclick: async () => {
     const fields = {};
     for (const [k, [i, was]] of Object.entries(inputs)) if (i.value.trim() !== was) fields[k] = i.value.trim();
+    // a new value with the old order codes: the board would be built with the old part
+    if ("Value" in fields && !("LCSC" in fields) && !("MPN" in fields) && (info.lcsc || info.mpn) && !warned) {
+      warned = true;
+      warnBox.textContent = `${info.lcsc || info.mpn} is the part for ${info.value}: the board would still be built with it. ` +
+        "Change the LCSC code and part number too, or save anyway.";
+      warnBox.style.display = ""; save.textContent = "Save anyway";
+      return;
+    }
     const ops = [];
     if (Object.keys(fields).length) ops.push({ op: "fields", ref: info.ref, fields });
     if (dnp.checked !== !!info.dnp) ops.push({ op: "flags", ref: info.ref, dnp: dnp.checked });
@@ -66,7 +82,7 @@ export function editPart(ws, info) {
     catch (e) { errBox.textContent = e.message; errBox.style.display = ""; save.disabled = false; }
   } }, "Save");
   const m = modal({ title: `Edit ${info.ref}`, sub: "Written into the schematic; one undo step", icon: "pencil", cls: "pe",
-    body: [h("div.pe-grid", rows), dnpRow, errBox],
+    body: [h("div.pe-grid", rows), dnpRow, warnBox, errBox],
     actions: [h("button.btn", { onclick: () => m.close() }, "Cancel"), save] });
   m.box.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && e.target.tagName === "INPUT" && e.target.type !== "checkbox") { e.preventDefault(); save.click(); } });
   return m;
