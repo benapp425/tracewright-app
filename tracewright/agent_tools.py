@@ -545,11 +545,14 @@ def tool_list(rt, app):
         return _text("stages: " + ", ".join(f"{s['title']} {s['status']}" for s in st))
 
     @reg("waive", "Waive a check finding you have reviewed and cannot or should not fix, with the reason (required). "
-         "action: propose (key: the finding's key from the checks, reason) | withdraw (key) | list. A warning or note "
-         "waived no longer counts; an error you waive is only a proposal: it keeps counting until the user approves it "
-         "on the Sign-off page, so say in the chat why you propose it.",
+         "action: propose (key: the finding's key from the checks, reason, title, source) | withdraw (key) | list. title: "
+         "the decision in a few plain words, as the user reads it on the Sign-off page (\"J201 and J202 share a land "
+         "pattern on purpose\"); source: where it is shown, if anywhere (\"SAM-M10Q integration manual s4.4 p.61\"). A "
+         "warning or note waived no longer counts; an error you waive is only a proposal: it keeps counting until the user "
+         "approves it on the Sign-off page, so say in the chat why you propose it.",
          {"type": "object", "properties": {"action": {"type": "string", "enum": ["propose", "withdraw", "list"]},
-                                           "key": {"type": "string"}, "reason": {"type": "string"}}, "required": ["action"]})
+                                           "key": {"type": "string"}, "reason": {"type": "string"}, "title": {"type": "string"},
+                                           "source": {"type": "string"}}, "required": ["action"]})
     async def waive(args):
         from . import signoff
         a = args["action"]
@@ -581,12 +584,52 @@ def tool_list(rt, app):
             pass
         if not found:
             return _text(f"no finding {key} in the last checks run (run_checks, then use the key it reports)", error=True)
-        await run(signoff.set_waiver, p, key, reason, "claude", found.get("severity", ""), found.get("message", ""))
+        await run(signoff.set_waiver, p, key, reason, "claude", found.get("severity", ""), found.get("message", ""),
+                  args.get("title") or "", args.get("source") or "")
         hub.emit("waivers")
         if found.get("severity") == "error":
             return _text(f"proposed: {key}. It is an error, so it keeps counting until the user approves your waiver on "
                          "the Sign-off page; tell them in the chat why.")
         return _text(f"waived: {key} ({found.get('severity')}); it no longer counts from the next checks run. The user sees it on the Sign-off page.")
+
+    @reg("evidence", "Record what shows a requirement is met, for the Sign-off page (Checks > Sign-off lists every "
+         "requirement with its evidence). action: add (requirement: its id from the list, e.g. r3 or lim:max_size_mm, or "
+         "its text; kind: check | calc | datasheet | sim | hardware; label: one line the user can read, e.g. \"LDL1117 at "
+         "300 mA: 0.6 W, 41 °C rise in SOT-223, under its 125 °C limit\"; ref: a check id, a data sheet and page, a "
+         "simulation file, or the bring-up step; status: ok | warn | fail | open) | remove (requirement, label: one entry, "
+         "or all of the requirement's without it) | list (the requirements and what they have). hardware means only the "
+         "built board can show it (status open; put the step in docs/bring-up.md). Record evidence as you verify, before "
+         "the user signs off. The limits' evidence comes from the req.limits check by itself.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "remove", "list"]},
+                                           "requirement": {"type": "string"}, "kind": {"type": "string"},
+                                           "label": {"type": "string"}, "ref": {"type": "string"}, "status": {"type": "string"}},
+          "required": ["action"]})
+    async def evidence_t(args):
+        from . import signoff
+        a = args["action"]
+        if a == "list":
+            st = await run(signoff.status, p)
+            lines = []
+            for r in st["requirements"]:
+                ev = "; ".join(f"{e.get('kind')}: {e.get('label')} [{e.get('status')}]" for e in r["evidence"]) or "no evidence yet"
+                lines.append(f"{r['id']}  {r['text']}{': ' + r['value'] if r['value'] else ''}  -> {ev}")
+            return _text("\n".join(lines) or "no requirements found (the guided start's list, docs/requirements.md bullets, or limits)")
+        req = (args.get("requirement") or "").strip()
+        if not req:
+            return _text("requirement: its id (r3, lim:max_size_mm) or its text, from action list", error=True)
+        if a == "remove":
+            n = await run(signoff.remove_evidence, p, req, args.get("label") or None)
+            hub.emit("signoff")
+            return _text(f"removed {n} entr{'y' if n == 1 else 'ies'}")
+        label = (args.get("label") or "").strip()
+        if len(label) < 4:
+            return _text("label: one line saying what shows it (a number, a check, a page)", error=True)
+        st = await run(signoff.status, p)
+        if not any(r["id"] == req or r["text"].lower() == req.lower() or r["text"].lower().startswith(req.lower()) for r in st["requirements"]):
+            return _text(f"no requirement {req}; action list shows them", error=True)
+        e = await run(signoff.add_evidence, p, req, args.get("kind") or "note", label, args.get("ref") or "", args.get("status") or "ok")
+        hub.emit("signoff")
+        return _text(f"recorded for {req}: {e['kind']} [{e['status']}] {e['label']}")
 
     @reg("nets", "The net model: what each net is. The checks, the router's net classes and the user's net list read it, "
          "so declare what names can't say: every supply's voltage and the current it carries, heavy-current lines (an "

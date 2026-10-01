@@ -5,9 +5,15 @@ description: Verify the finished design and produce the fab release - full check
 # Verification and release
 
 1. `run_checks` with everything, `refresh`. Every error fixed. Every warning either fixed or waived with the
-   `waive` tool (action propose, the finding's key and the reason -- the reason is required). An error you
+   `waive` tool (action propose, the finding's key and the reason -- the reason is required -- plus a `title`:
+   the decision in a few plain words, and the `source` when a data sheet or app note shows it). An error you
    cannot fix is only a proposal when you waive it: it keeps counting until the user approves it on the
    Sign-off page, so tell them in the chat why you propose it.
+1b. Evidence for every requirement: `evidence` action list shows each requirement (the guided start's list, the
+   bullets of docs/requirements.md, the limits) and what it has. For each one without evidence, record what shows
+   it is met -- a check that covers it, a calculation with its numbers, a data sheet page, a simulation -- or, when
+   only the built board can show it, kind hardware with the bring-up step (status open). The limits get theirs
+   from the req.limits check by themselves.
 2. `./tw selftest` passes (the checks can still catch their planted faults).
 3. `docs/review.md`: verified from the files / needs the built board / open issues. `docs/bring-up.md`: the test
    order for the first board, as `## ` sections of `- [ ]` steps, each naming the value to expect where

@@ -2162,12 +2162,29 @@ def make_app():
                     return err("a waiver needs its reason")
                 await asyncio.to_thread(signoff.set_waiver, p, key, reason, "user", str(body.get("severity") or ""), str(body.get("message") or ""))
                 rt.user_changes.append(f"the user waived {key}: {reason}")
+            elif act == "prune":                          # waivers whose findings are gone
+                gone = [w["key"] for w in (await asyncio.to_thread(signoff.status, p))["waivers"] if w["state"] == "unused"]
+                for k in gone:
+                    await asyncio.to_thread(signoff.remove_waiver, p, k)
+                if gone:
+                    rt.user_changes.append(f"the user removed {len(gone)} waiver{'s' if len(gone) != 1 else ''} no longer needed")
             else:
-                return err("action: approve | reject | add")
+                return err("action: approve | reject | add | prune")
         except KeyError as e:
             return err(str(e), 404)
         rt.hub.emit("waivers")
         return jresp(await asyncio.to_thread(signoff.status, p))
+
+    @routes.get("/api/projects/{pid}/signoff/packet")
+    async def signoff_packet(request):
+        """The review packet: the sign-off page as one printable page (save it as PDF from the print dialog), also
+        written to build/signoff/review-packet.html."""
+        from . import signoff
+        rt = app.rt(request.match_info["pid"])
+        html = await asyncio.to_thread(signoff.packet_html, rt.p.reload())
+        name = f"{rt.p.name} review packet.html"
+        return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-cache",
+                            **({"Content-Disposition": _disposition(name, True)} if request.query.get("download") == "1" else {})})
 
     @routes.post("/api/projects/{pid}/turns/undo")
     async def undo_turn(request):

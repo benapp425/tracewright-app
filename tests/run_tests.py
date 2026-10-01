@@ -2807,6 +2807,92 @@ def stage_gates_waivers_and_sign_off():
 
 
 @test(needs=("kicad",))
+def signoff_reads_like_a_review():
+    """The Sign-off page's content: each waiver has a plain title (Claude's, else the finding's message, else the
+    reason's first clause), its citations, and a state -- waiting for approval, in force, or no longer needed once
+    its finding is gone (and those can be removed together); every requirement (the guided start's list and the
+    limits) with its evidence, a limit's from the limits check itself; Claude records the rest with its evidence
+    tool; the bring-up steps are counted; the review packet holds it all, escaped."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools, signoff, canvas
+    from tw.checks import runner
+    pid = ProjectStore().import_copy(FIXTURE, "Sign-off review").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        rt = app.rt(pid)
+        p = rt.p
+        rt.hub.emit = lambda *a, **k: None
+        tools = {t.name: t for t in agent_tools.tool_list(rt, app)}
+        say = lambda r: r["content"][0]["text"]
+        canvas.update(p.root, "requirements", {"items": [{"label": "Power", "value": "5 V from USB-C, 3.3 V for the MCU"},
+                                                          {"label": "Size", "value": "no larger than a credit card"}]})
+        p.cfg["constraints"] = {"max_size_mm": [40, 30]}
+        p.save()
+        res = runner.run_all(p.tw, only=["req.limits"], offline=True, write=True)
+        f = next(x for c in res["checks"] for x in c["findings"] if x["key"] == "req:size")
+        st = signoff.status(p.reload())
+        lim = next(r for r in st["requirements"] if r["id"] == "lim:max_size_mm")
+        assert lim["evidence"] and lim["evidence"][0]["status"] == "fail" and "limit" in lim["evidence"][0]["label"], lim
+        assert [r["id"] for r in st["requirements"] if r["kind"] == "brief"] == ["r1", "r2"], st["requirements"]
+        # Claude's waiver with a title and a citation; approved, it holds and the page still knows the finding
+        r = await tools["waive"].handler({"action": "propose", "key": "req:size", "title": "The enclosure grew to fit 50 x 35",
+                                          "reason": "Deliberate: the enclosure drawing rev B (docs/enclosure.pdf p.2) takes a 50 x 35 board; the limit is stale."})
+        assert "proposed" in say(r), say(r)
+        signoff.approve(p.reload(), "req:size")
+        res = runner.run_all(env.Project(p.root), only=["req.limits"], offline=True, write=True)
+        chk = next(c for c in res["checks"] if c["id"] == "req.limits")
+        assert chk.get("waived_findings") and chk["waived_findings"][0]["key"] == "req:size", chk
+        w = signoff.status(p.reload())["waivers"][0]
+        assert w["title"] == "The enclosure grew to fit 50 x 35" and w["state"] == "applies" and w["message"] == f["message"], w
+        assert "docs/enclosure.pdf p.2" in w["sources"][0] or "enclosure drawing rev B" in " ".join(w["sources"]), w["sources"]
+        # without a title: the finding's message; a reason alone: its first clause
+        assert signoff.waiver_view({"key": "k", "reason": "Fine: the pads are 0.5 mm apart (data sheet p.12); more."}, {}, {}, True, False)["title"] \
+            == "the pads are 0.5 mm apart (data sheet p.12)"
+        # the finding goes away (the limit raised): the waiver is no longer needed, and can be removed
+        p.cfg["constraints"] = {"max_size_mm": [60, 40]}
+        p.save()
+        runner.run_all(env.Project(p.root), only=["req.limits"], offline=True, write=True)
+        st = signoff.status(p.reload())
+        assert st["waivers"][0]["state"] == "unused", st["waivers"]
+        lim = next(r for r in st["requirements"] if r["id"] == "lim:max_size_mm")
+        assert lim["evidence"][0]["status"] == "ok", lim
+        async with TestClient(TestServer(webapp)) as c:
+            r = await c.post(f"/api/projects/{pid}/waivers", json={"action": "prune"})
+            assert r.status == 200 and (await r.json())["waivers"] == [], await r.text()
+            # evidence from Claude, by id and by text
+            r = await tools["evidence"].handler({"action": "add", "requirement": "r1", "kind": "calc", "status": "ok",
+                                                 "label": "AMS1117 at 120 mA: 0.2 W, 30 °C rise in SOT-223", "ref": "docs/power.md"})
+            assert not r.get("is_error"), say(r)
+            r = await tools["evidence"].handler({"action": "add", "requirement": "size", "kind": "hardware", "status": "open",
+                                                 "label": "Fit the board in the enclosure", "ref": "bring-up step 9"})
+            assert not r.get("is_error"), say(r)
+            r = await tools["evidence"].handler({"action": "add", "requirement": "nothing like this", "label": "x y z"})
+            assert r.get("is_error"), say(r)
+            listed = say(await tools["evidence"].handler({"action": "list"}))
+            assert "AMS1117 at 120 mA" in listed and "lim:max_size_mm" in listed, listed
+            st = (await (await c.get(f"/api/projects/{pid}/signoff")).json())
+            r1 = next(x for x in st["requirements"] if x["id"] == "r1")
+            r2 = next(x for x in st["requirements"] if x["id"] == "r2")
+            assert r1["evidence"][0]["kind"] == "calc" and r2["evidence"][0]["status"] == "open", (r1, r2)
+            # the bring-up steps, and the packet
+            os.makedirs(os.path.join(p.root, "docs"), exist_ok=True)
+            with open(os.path.join(p.root, "docs", "bring-up.md"), "w") as fh:
+                fh.write("## Power\n- [x] 5 V at J1 <TP1>\n- [ ] 3.3 V at TP2 = 3.30 V ± 2 %\n")
+            st = (await (await c.get(f"/api/projects/{pid}/signoff")).json())
+            assert st["bringup_steps"] == {"steps": 2, "done": 1}, st["bringup_steps"]
+            r = await c.get(f"/api/projects/{pid}/signoff/packet")
+            html = await r.text()
+            assert r.status == 200 and "design review" in html and "AMS1117 at 120 mA" in html and "&lt;TP1&gt;" in html, html[:400]
+            assert os.path.exists(os.path.join(p.tw.build, "signoff", "review-packet.html"))
+        rt.stop()
+    asyncio.run(go())
+
+
+@test(needs=("kicad",))
 def mentions_list_what_can_be_pointed_at():
     """The message box's @-mentions: the parts from the schematic (each with its sheet and where it is on the
     board), the nets with their kind, the sheets and the project's files; a mention sent with a message reaches

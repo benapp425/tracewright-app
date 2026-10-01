@@ -13,6 +13,7 @@ const P = {
   "frame": '<line x1="22" x2="2" y1="6" y2="6" /><line x1="22" x2="2" y1="18" y2="18" /><line x1="6" x2="6" y1="2" y2="22" /><line x1="18" x2="18" y1="2" y2="22" />',
   "activity": '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />',
   "archive": '<rect width="20" height="5" x="2" y="3" rx="1"/> <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/> <path d="M10 12h4"/>',
+  "arrow-down": '<path d="M12 5v14" /><path d="m19 12-7 7-7-7" />',
   "arrow-down-up": '<path d="m3 16 4 4 4-4" /> <path d="M7 20V4" /> <path d="m21 8-4-4-4 4" /> <path d="M17 4v16" />',
   "arrow-left": '<path d="m12 19-7-7 7-7"/> <path d="M19 12H5"/>',
   "arrow-right": '<path d="M5 12h14"/> <path d="m12 5 7 7-7 7"/>',

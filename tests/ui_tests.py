@@ -401,6 +401,64 @@ async def floorplan_turn_lock_nudge_and_keepouts(t):
 
 
 @test
+async def signoff_reads_like_a_review(t):
+    """The sign-off page: the verdict with what is left and its buttons, each requirement with its evidence, the
+    waivers as cards with plain titles (not finding keys), the reasoning a click away, citations, Approve on the
+    ones waiting for you."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg.setdefault("checks", {})["waive"] = [
+        {"key": "bom:mpnfp:10164227-1004A1RLF", "by": "claude", "severity": "error", "title": "J201 and J202 share a land pattern on purpose",
+         "reason": "Deliberate: J201 and J202 are the same Amphenol part with the same land pattern (PDS 10164227 rev C sheet 4); the CM5-J2 "
+                   "footprint is numbered 101-200 so its pads match the CM5 pin numbers (docs/10). JLC's J2 numbering is mapped by an offset."},
+        {"key": "decoup:far:U303:+3V3", "by": "claude", "severity": "warning",
+         "reason": "u-blox SAM-M10Q integration manual UBX-22020019 R02 s4.4 p.61: nothing closer than 10 mm to each edge of the patch antenna; "
+                   "its supply section asks for no external decoupling. C309 and C310 sit just outside the 10 mm ring."}]
+    cfg["evidence"] = [{"req": "r1", "kind": "calc", "label": "AMS1117 at 120 mA: 0.2 W, 30 °C rise", "ref": "docs/power.md", "status": "ok"}]
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    with open(os.path.join(root, ".tracewright", "canvas.json"), "w") as f:
+        json.dump({"requirements": {"items": [{"label": "Power", "value": "5 V from USB-C, 3.3 V for the MCU"}, {"label": "Port", "value": "Qwiic I2C"}]}}, f)
+    try:
+        await t.open_project()
+        await t.place("checks", "signoff")
+        await t.page.wait("document.querySelector('.so-verdict') && document.querySelectorAll('.so-card').length === 2", 10)
+        got = await t.page.js("""(() => ({
+          todo: [...document.querySelectorAll('.so-todo')].map((e) => e.innerText),
+          titles: [...document.querySelectorAll('.so-ct')].map((e) => e.innerText),
+          groups: [...document.querySelectorAll('.so-wgh')].map((e) => e.innerText),
+          reqs: [...document.querySelectorAll('.so-req')].map((e) => e.innerText),
+          srcs: [...document.querySelectorAll('.so-src')].map((e) => e.innerText),
+          approve: !!document.querySelector('.so-card.proposed button.primary'),
+          sign: document.querySelector('.so-signrow .btn.primary') && document.querySelector('.so-signrow .btn.primary').disabled }))()""")
+        check(any("Approve or reject 1 waiver" in x for x in got["todo"]) and any("Run the checks" in x for x in got["todo"]), got["todo"])
+        check(got["titles"][0] == "J201 and J202 share a land pattern on purpose" and got["titles"][1].startswith("u-blox SAM-M10Q integration manual"), got["titles"])
+        check(not any(":" in ti and " " not in ti for ti in got["titles"]), f"a finding key used as a title: {got['titles']}")
+        check(got["groups"][0].startswith("WAITING FOR YOUR APPROVAL") or got["groups"][0].lower().startswith("waiting for your approval"), got["groups"])
+        check(any("AMS1117 at 120 mA" in x for x in got["reqs"]) and any("No evidence yet" in x for x in got["reqs"]), got["reqs"])
+        check(any("PDS 10164227 rev C sheet 4" in x for x in got["srcs"]) and any("UBX-22020019" in x for x in got["srcs"]), got["srcs"])
+        check(got["approve"] and got["sign"] is True, got)
+        # the reasoning, a click away
+        n0 = await t.page.js("document.querySelectorAll('.so-card')[0].innerText.length")
+        await t.page.js("document.querySelectorAll('.so-card')[0].querySelector('.so-more').click(); 1")
+        await asyncio.sleep(0.2)
+        n1 = await t.page.js("document.querySelectorAll('.so-card')[0].innerText.length")
+        check(n1 > n0 + 40 and "numbered 101-200" in await t.page.js("document.querySelectorAll('.so-card')[0].innerText"), (n0, n1))
+        await t.shot("signoff-review")
+        # the packet, one printable page
+        html = urllib.request.urlopen(urllib.request.Request(t.s.url + f"api/projects/{t.pid}/signoff/packet",
+                                                             headers={"Origin": t.s.url.rstrip("/")})).read().decode()
+        check("design review" in html and "J201 and J202 share a land pattern" in html, html[:300])
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(os.path.join(root, ".tracewright", "canvas.json"))
+
+
+@test
 async def signoff_page_scrolls(t):
     """A long sign-off page (many waivers) scrolls inside its view."""
     root = t.s.demo["root"]

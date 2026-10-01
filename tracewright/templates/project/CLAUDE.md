@@ -20,4 +20,5 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
 - Stages have gates: the `stage` tool only marks a stage done (or moves on past it) when its gate holds -- the
   requirements written, the checks run on the design as it is now with no errors, nothing unrouted, the
   user's sign-off for the release -- and says what is missing otherwise. Waive findings with the `waive`
-  tool, never by editing tracewright.json.
+  tool (with a plain title), never by editing tracewright.json; record what shows each requirement is met with
+  the `evidence` tool as you verify.

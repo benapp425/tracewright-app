@@ -209,12 +209,13 @@ def run(ctx, checks, progress=None):
                                                  hint=getattr(err, "tb", "")[-1200:]).to_json()]})
         else:
             waived = ctx.waivers()
-            kept, waived_n, waived_by = [], 0, {}
+            kept, waived_n, waived_by, held = [], 0, {}, []
             for f in found:
                 w = waived.get(f.key)
                 if w is not None and waiver_holds(w, f.severity):
                     waived_n += 1
                     waived_by[f.severity] = waived_by.get(f.severity, 0) + 1
+                    held.append({"key": f.key, "severity": f.severity, "message": f.message})   # for the sign-off page
                 else:
                     if w is not None:
                         f.waiver = {"reason": w.get("reason", ""), "by": w.get("by") or "claude", "at": w.get("at", "")}
@@ -222,7 +223,7 @@ def run(ctx, checks, progress=None):
             status = "fail" if any(f.severity == "error" for f in kept) else \
                 ("warn" if any(f.severity == "warning" for f in kept) else "pass")
             results.append({**row, "status": status, "findings": [f.to_json() for f in kept], "waived": waived_n,
-                            **({"waived_by": waived_by} if waived_by else {}), "seconds": secs})
+                            **({"waived_by": waived_by, "waived_findings": held} if waived_by else {}), "seconds": secs})
         if progress:
             progress(c, results[-1])
     counts = {s: 0 for s in SEVERITIES}
