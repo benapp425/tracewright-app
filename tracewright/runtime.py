@@ -119,7 +119,19 @@ class ProjectRuntime:
             return None
         key = (os.path.getmtime(path), os.path.getsize(path))
         if self._board is None or self._board[0] != key:
-            b = Board.load(path)
+            for tries in range(25):                       # caught mid-save (KiCad writes in place): read it once it is whole
+                try:
+                    b = Board.load(path)
+                except ValueError:
+                    if tries == 24:
+                        raise
+                    time.sleep(0.12)
+                    key = (os.path.getmtime(path), os.path.getsize(path))
+                    continue
+                now = (os.path.getmtime(path), os.path.getsize(path))
+                if now == key:
+                    break
+                key = now                                 # it changed while it was read: again
             self.version["board"] += 1
             self._board = (key, b, None, self.version["board"])
         return self._board[1]

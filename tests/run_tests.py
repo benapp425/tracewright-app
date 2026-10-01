@@ -3757,6 +3757,37 @@ def board_names_nets_on_copper():
     assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
 
 
+@test(needs=("node", "kicad"))
+def board_editor_routes_round_what_is_in_the_way():
+    """The board editor's walkaround router and clearance check (web/js/boardgeom.js) on the demo board as the board
+    view gets it: every net's pads joined at 45° steps clear of all other copper, crossings seen, keep-outs kept
+    (tests/boardgeom_check.mjs, in Node)."""
+    import subprocess
+    from tracewright.runtime import ProjectRuntime
+
+    class _App:
+        server_mode = True
+
+        class hubs:
+            @staticmethod
+            def get(pid):
+                class H:
+                    listeners = []
+
+                    def emit(self, *a, **k):
+                        pass
+                return H()
+    from tracewright.projects import Project
+    rt = ProjectRuntime(_App(), Project(fixture_copy("geom").root))
+    js = rt.board_json()
+    assert js and js["rules"]["classes"]["Default"]["clearance"], js and js.get("rules")
+    f = os.path.join(TMP, "geom-board.json")
+    with open(f, "w") as fh:
+        json.dump(js, fh)
+    r = subprocess.run(["node", os.path.join(ROOT, "tests", "boardgeom_check.mjs"), f], capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-1500:]
+
+
 @test(needs=("chrome", "kicad"))
 def browser_ui():
     """The real UI in headless Chrome against a throwaway server with the demo (tests/ui_tests.py): the

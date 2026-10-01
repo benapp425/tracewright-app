@@ -647,6 +647,153 @@ async def dictation_writes_into_the_message_box(t):
     check(await t.page.js(f"{ta}.value") == "Route the USB pair first. and the power", await t.page.js(f"{ta}.value"))
 
 
+BV = "document.querySelector('.viewer canvas').__view"
+
+
+async def board_point(page, wx, wy):
+    """Where a board point (mm) is on the page."""
+    return await page.js(f"(() => {{ const v = {BV}, r = v.canvas.getBoundingClientRect(), [sx, sy] = v.toScreen({wx}, {wy}); return [r.left + sx, r.top + sy]; }})()")
+
+
+async def board_drag(page, a, b, steps=10):
+    """A press at board point a, a drag to b, a release (board mm)."""
+    (x0, y0), (x1, y1) = await board_point(page, *a), await board_point(page, *b)
+    await page.call("Input.dispatchMouseEvent", type="mouseMoved", x=x0, y=y0)
+    await page.call("Input.dispatchMouseEvent", type="mousePressed", x=x0, y=y0, button="left", clickCount=1)
+    for i in range(1, steps + 1):
+        await page.call("Input.dispatchMouseEvent", type="mouseMoved", x=x0 + (x1 - x0) * i / steps, y=y0 + (y1 - y0) * i / steps, button="left", buttons=1)
+    await page.call("Input.dispatchMouseEvent", type="mouseReleased", x=x1, y=y1, button="left", clickCount=1)
+
+
+async def settle(page):
+    """Wait for the board view's camera to stop moving (it flies to what is found or picked)."""
+    last = None
+    for _ in range(40):
+        cam = await page.js(f"[{BV}.scale, {BV}.ox, {BV}.oy].map((v) => Math.round(v * 100))")
+        if cam == last:
+            return
+        last = cam
+        await asyncio.sleep(0.12)
+
+
+async def board_click(page, wx, wy):
+    await page.mouse(*(await board_point(page, wx, wy)))
+
+
+@test
+async def board_editor_moves_routes_and_undoes(t):
+    """Editing in the board view: a part dragged 2 mm (saved to the board, one undo step) and put back with ⌘Z; a net's
+    copper deleted and routed again with the route tool, pad to pad, round everything in the way; a keep-out drawn,
+    picked by its edge and deleted; the board as it was at the end."""
+    base = f"api/projects/{t.pid}/board"
+    await t.open_project("board")
+    await t.page.wait(f"{BV} && {BV}.data && {BV}.data.footprints.length", 30)
+    await t.page.click(".tbtn.editbtn")
+    await t.page.wait("document.querySelector('.editbar .tbtn') && document.querySelector('.viewer.editing')", 5)
+    await t.shot("board-edit-bar")
+    board = lambda: t.s.get(base)
+    fp = lambda b, ref: next(f for f in b["footprints"] if f["ref"] == ref)
+    b0 = board()
+    c4 = fp(b0, "C4")
+    cx, cy = (c4["bbox"][0] + c4["bbox"][2]) / 2, (c4["bbox"][1] + c4["bbox"][3]) / 2
+    # 1. C4 found and picked, then dragged 2 mm to the right (from its middle, where a track runs over it)
+    await t.page.click(".findbox input")
+    await t.page.type("C4")
+    await t.page.wait("document.querySelector('.findres .fr')", 5)
+    await t.page.key("Enter", "Enter")
+    await t.page.wait(f"{BV}.sel.has('C4')", 5)
+    await settle(t.page)
+    await board_drag(t.page, (cx, cy), (cx + 2, cy))
+    await t.page.wait(f"!document.querySelector('.estat .spinner')", 20)
+    for _ in range(50):
+        moved = fp(board(), "C4")
+        if abs(moved["x"] - (c4["x"] + 2)) < 0.05:
+            break
+        await asyncio.sleep(0.2)
+    check(abs(moved["x"] - (c4["x"] + 2)) < 0.05 and abs(moved["y"] - c4["y"]) < 0.05, f"C4 at {moved['x']}, {moved['y']}, wanted {c4['x'] + 2}, {c4['y']}")
+    h = t.s.get(base + "/history")
+    check(h["undo"] == 1 and h["undo_label"] == "Move C4", h)
+    # 2. ⌘Z puts it back
+    await t.page.wait(f"{BV}.data && Math.abs({BV}.byRef.C4.x - {c4['x'] + 2}) < 0.05", 10)
+    await t.page.key("z", "KeyZ", modifiers=4)
+    for _ in range(50):
+        back = fp(board(), "C4")
+        if abs(back["x"] - c4["x"]) < 0.01:
+            break
+        await asyncio.sleep(0.2)
+    check(abs(back["x"] - c4["x"]) < 0.01, f"undo left C4 at {back['x']}")
+    await t.page.key("f", "KeyF", text="f")                                          # the whole board in view
+    await settle(t.page)
+    # 3. a two-pad net's copper deleted, then routed again in the view
+    pads = {}
+    for f in b0["footprints"]:
+        for pd in f["pads"]:
+            if pd["net"] and "F.Cu" in pd["l"]:
+                pads.setdefault(pd["net"], []).append((f["ref"], pd))
+    net = next(n for n in ("/MCU/PB3_USB_N", "/MCU/PB4_USB_P") if len(pads.get(n, [])) == 2)
+    (ra, pa), (rb, pb) = pads[net]
+    t.s.post(base + "/edit", {"ops": [{"op": "delete", "nets": [net]}], "label": "Clear " + net})
+    await t.page.wait(f"{BV}.data && !{BV}.data.tracks.some((x) => x[6] === {json.dumps(net)})", 15)
+    rats = [l for l in board()["ratsnest"] if l[4] == net]
+    check(rats, f"no ratsnest line for {net} with its tracks gone")
+    await t.page.key("x", "KeyX", text="x")
+    await t.page.wait("document.querySelector('.editbar .tbtn.on') && " + BV + ".ed.tool === 'route'", 5)
+    await board_click(t.page, pa["x"], pa["y"])
+    await t.page.wait(f"{BV}.ed.route && {BV}.ed.route.net === {json.dumps(net)}", 5)
+    (sx, sy) = await board_point(t.page, pb["x"], pb["y"])
+    await t.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=sx, y=sy)
+    await t.page.wait(f"{BV}.ed.route && {BV}.ed.route.preview && !{BV}.ed.route.blocked", 10)
+    await t.shot("board-edit-route")
+    await t.page.mouse(sx, sy)
+    for _ in range(60):
+        b1 = board()
+        if any(x[6] == net for x in b1["tracks"]) and not any(l[4] == net for l in b1["ratsnest"] or []):
+            break
+        await asyncio.sleep(0.25)
+    check(any(x[6] == net for x in b1["tracks"]), f"{net} was not routed again")
+    check(not any(l[4] == net for l in b1["ratsnest"] or []), f"{net} still has a ratsnest line: {[l for l in b1['ratsnest'] if l[4] == net]}")
+    # 4. a keep-out in a corner of the board, picked by its edge, then deleted
+    bb = b0["bbox"]
+    k0 = [bb[0] + 3, bb[1] + 3]
+    corners = [k0, [k0[0] + 3, k0[1]], [k0[0] + 3, k0[1] + 2]]
+    await t.page.key("Escape", "Escape")
+    await t.page.key("k", "KeyK", text="k")
+    for c in corners:
+        await board_click(t.page, *c)
+    await t.page.key("Enter", "Enter")
+    await t.page.wait("document.querySelector('.epop')", 5)
+    await t.shot("board-edit-keepout")
+    await t.page.js("[...document.querySelectorAll('.epop button')].find((b) => b.textContent.includes('Add the keep-out')).click(); 1")
+    n0 = len([z for z in b0["zones"] if z["rule"]])
+    for _ in range(60):
+        b2 = board()
+        if len([z for z in b2["zones"] if z["rule"]]) == n0 + 1:
+            break
+        await asyncio.sleep(0.25)
+    ko = [z for z in b2["zones"] if z["rule"] and z["name"] == "Keep-out"]
+    check(ko and ko[0]["ko"]["tracks"], f"no keep-out drawn: {[z['name'] for z in b2['zones'] if z['rule']]}")
+    await t.page.wait(f"{BV}.data.zones.some((z) => z.id === {json.dumps(ko[0]['id'])})", 10)
+    await t.page.key("Escape", "Escape")
+    await board_click(t.page, (corners[0][0] + corners[1][0]) / 2, corners[0][1])         # the middle of its top edge
+    await t.page.wait(f"{BV}.ed.items.has('z:' + {json.dumps(ko[0]['id'])})", 5)
+    await t.page.key("Delete", "Delete")
+    for _ in range(60):
+        b3 = board()
+        if not any(z["id"] == ko[0]["id"] for z in b3["zones"]):
+            break
+        await asyncio.sleep(0.25)
+    check(not any(z["id"] == ko[0]["id"] for z in b3["zones"]), "the keep-out was not deleted")
+    # back to the board as it was
+    for _ in range(20):
+        h = t.s.get(base + "/history")
+        if not h["undo"]:
+            break
+        t.s.post(base + "/undo")
+    end = board()
+    check(len(end["tracks"]) == len(b0["tracks"]) and len(end["zones"]) == len(b0["zones"]), "undoing everything did not give the board back")
+    await t.page.click(".tbtn.editbtn")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

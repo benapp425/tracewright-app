@@ -75,6 +75,20 @@ class History:
         self.redo = []
         self.after = self._stamp()
 
+    def can_amend(self):
+        """Can a follow-up (a refill of the pours) join the last edit, as one undo step?"""
+        return bool(self.undo) and self.valid()
+
+    def amend(self):
+        """A follow-up joined the last edit: the history goes on from the board as it is now."""
+        self.after = self._stamp()
+        for f, _ in self.redo:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        self.redo = []
+
     def failed(self, snap):
         try:
             os.remove(snap)

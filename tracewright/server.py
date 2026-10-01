@@ -982,19 +982,25 @@ def make_app():
         if bad:
             return err("not an edit the board view makes: " + ", ".join(bad))
         label = str(body.get("label") or "Edit")[:80]
+        merge = bool(body.get("merge"))                   # a follow-up (the pours filled again): part of the last edit
         async with rt.edit_lock:
             def run():
                 with rt.edits.lock:
-                    snap = rt.edits.before()
-                    rt.mark_app_edit(4)
+                    joined = merge and rt.edits.can_amend()
+                    snap = None if joined else rt.edits.before()
+                    rt.mark_app_edit(10 if any(o.get("op") == "fill" for o in ops) or body.get("fill") else 4)
                     try:
                         res = client.apply(rt.p.tw, ops, save=True, live="auto", fill_after=bool(body.get("fill")))
                     except Exception as e:
                         res = {"ok": False, "error": str(e)}
                     if not res.get("ok"):
-                        rt.edits.failed(snap)
+                        if snap:
+                            rt.edits.failed(snap)
                         return res, None
-                    rt.edits.done(snap, label)
+                    if joined:
+                        rt.edits.amend()
+                    else:
+                        rt.edits.done(snap, label)
                     boardedit.record(rt.p, ops, res.get("changes"))
                     return res, rt.edits.state()
             res, hist = await asyncio.to_thread(run)
@@ -1002,7 +1008,8 @@ def make_app():
             errs = [r.get("error") for r in res.get("results") or [] if isinstance(r, dict) and r.get("error")]
             msg = (errs[0] if errs else res.get("error")) or "the edit did not apply"
             return err(re.sub(r"^\w+(Error|Exception): ", "", str(msg))[:300], 422)
-        rt.user_changes.append("board (the user, in the app): " + boardedit.describe(ops, res.get("changes")))
+        if not merge:
+            rt.user_changes.append("board (the user, in the app): " + boardedit.describe(ops, res.get("changes")))
         return jresp({"ok": True, "via": res.get("via"), "changes": res.get("changes") or [], "history": hist})
 
     async def _board_step(request, back):

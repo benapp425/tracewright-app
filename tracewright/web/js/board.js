@@ -5,6 +5,7 @@ import { h, clear, api, toast, btn } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
 import { FloorplanView } from "./floorplan.js";
+import { BoardEditor } from "./boardedit.js";
 
 const COL = {
   "F.Cu": [226, 64, 64], "B.Cu": [64, 110, 232], "In1.Cu": [214, 170, 48], "In2.Cu": [70, 180, 100], "In3.Cu": [180, 100, 210],
@@ -49,6 +50,8 @@ export class BoardView {
   build() {
     this.canvas = h("canvas");
     this.canvas.__view = this;                         // for debugging from the console
+    this.colors = COL;
+    this.ed = new BoardEditor(this);                   // editing the board in the app (boardedit.js)
     this.ctx = this.canvas.getContext("2d");
     this.tip = h("div.vtip", { style: { display: "none" } });
     this.coords = h("div.coords", "");
@@ -68,7 +71,7 @@ export class BoardView {
       measure: h("button.tbtn", { onclick: () => this.setTool(this.tool === "measure" ? "select" : "measure"), "data-tip": "Measure", "data-kbd": "m" }, icon("ruler", 15)),
       flag: h("button.tbtn", { onclick: () => this.flags.toggle(), "data-tip": "Flag an issue", "data-kbd": "c" }, icon("flag", 15)),
     };
-    const tools = h("div.hudbox", this.sideBtn, h("div.tsep"), find, h("div.tsep"), this.toolBtns.select, this.toolBtns.measure, this.toolBtns.flag, h("div.tsep"),
+    const tools = h("div.hudbox", this.sideBtn, h("div.tsep"), find, h("div.tsep"), this.toolBtns.select, this.toolBtns.measure, this.toolBtns.flag, this.ed.btn, h("div.tsep"),
       h("button.tbtn", { "data-tip": "Zoom out", onclick: () => this.zoomAt(this.w / 2, this.h / 2, 1 / 1.4) }, icon("zoom-out", 15)),
       h("button.tbtn", { "data-tip": "Zoom in", onclick: () => this.zoomAt(this.w / 2, this.h / 2, 1.4) }, icon("zoom-in", 15)),
       h("button.tbtn", { "data-tip": "Fit the board", "data-kbd": "f", onclick: () => this.fit(true) }, icon("scan", 15)), h("div.tsep"),
@@ -79,6 +82,7 @@ export class BoardView {
       h("div.hud.bl", h("div.hudbox", this.coords), this.progress),
       h("div.hud.br", this.selBar), this.tip, this.flash, this.banner, this.measureEl));
     this.viewer = this.el.firstChild;
+    this.ed.mount();
     this.flagLayer = new FlagLayer(this.viewer, this.ws.review, {
       view: "board", project: (x, y) => this.data ? this.toScreen(x, y) : null, showDone: () => this.vis.flags !== false,
       onPin: (f, pin) => { this.flagLayer.mark(f.id); flagEditor(pin, this.ws, { flag: f, onDone: () => this.flagLayer.mark(null) }); } });
@@ -86,13 +90,15 @@ export class BoardView {
       view: "board", surface: this.canvas, layer: this.flagLayer, hud: this.hudTc,
       toWorld: (px, py) => this.data ? this.toWorld(px, py) : null,
       context: (w) => this.context(w), snapshot: (w) => this.snapshot(w),
-      onChange: (on) => { this.viewer.classList.toggle("tool-flag", on); this.toolBtns.flag.classList.toggle("on", on); if (on) this.setTool("select", true); } });
+      onChange: (on) => { this.viewer.classList.toggle("tool-flag", on); this.toolBtns.flag.classList.toggle("on", on); if (on) { this.setTool("select", true); if (this.ed.on) this.ed.setTool("select"); } } });
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(this.viewer);
     this.mouse();
     this.keys = (e) => {
-      if (!this.el.classList.contains("on") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!this.el.classList.contains("on") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
       if (document.querySelector(".modal-bg, .popover, .palette-bg")) return;
+      if (this.ed.key(e)) { e.preventDefault(); e.stopPropagation(); return; }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const k = e.key.toLowerCase();
       if (k === "f") this.fit(true);
       else if (k === "b") this.setSide();
@@ -158,6 +164,7 @@ export class BoardView {
     this.override = {};
     this.live = [];
     this.prepare();
+    this.ed.loaded();
     if (firstData && this.panel === "copper" && !this.solo) this.solo = this.copper[0];
     if (this.spot && !(d.nets || []).includes(this.spot)) this.spot = null;
     this.renderLayers();
@@ -246,6 +253,8 @@ export class BoardView {
     this.fps = d.footprints.map((f) => this.fpCache(f));
     this.byRef = {};
     for (const f of this.fps) this.byRef[f.ref] = f;
+    this.padCentre = new Map();                        // a pad's centre -> the pad: ratsnest ends follow a part being moved
+    for (const f of this.fps) for (const p of f.pads) this.padCentre.set(`${p.x.toFixed(3)},${p.y.toFixed(3)}`, [f, p]);
     const edge = new Path2D();
     for (const l of d.outline) poly(edge, l);
     for (const l of d.outline_open || []) { edge.moveTo(l[0][0], l[0][1]); for (const q of l.slice(1)) edge.lineTo(q[0], q[1]); }
@@ -453,12 +462,14 @@ export class BoardView {
         this.dirty();
         return;
       }
+      if (this.ed.down(e, px, py)) return;
       drag = { x: e.clientX, y: e.clientY, ox: this.ox, oy: this.oy, moved: false, px, py, shift: e.shiftKey };
     });
     addEventListener("mousemove", (e) => {
       const r = c.getBoundingClientRect();
       const px = e.clientX - r.left, py = e.clientY - r.top;
       if (this.measure && this.measure.on) { this.measure.b = this.snapPoint(...this.toWorld(px, py)); this.dirty(); return; }
+      if (this.ed.move(e, px, py)) return;
       if (drag) {
         const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
         if (Math.abs(dx) + Math.abs(dy) > 3) { drag.moved = true; c.classList.add("panning"); this.tip.style.display = "none"; }
@@ -468,18 +479,20 @@ export class BoardView {
       if (px < 0 || py < 0 || px > this.w || py > this.h || !this.el.classList.contains("on")) { this.tip.style.display = "none"; return; }
       const [x, y] = this.toWorld(px, py);
       this.showCoords(x, y);
-      if (!this.flags.active && this.tool === "select") this.hover(px, py, x, y); else this.tip.style.display = "none";
+      if (!this.flags.active && this.tool === "select" && this.ed.tool === "select" && !this.ed.drag) this.hover(px, py, x, y); else if (!this.ed.drag) this.tip.style.display = "none";
     });
     addEventListener("mouseup", (e) => {
       if (this.measure && this.measure.on) { this.measure.on = false; this.dirty(); return; }
+      if (this.ed.up(e)) return;
       if (!drag) return;
       c.classList.remove("panning");
-      if (!drag.moved && e.target === c) this.click(drag.px, drag.py, drag.shift);
+      if (!drag.moved && e.target === c) this.click(drag.px, drag.py, drag.shift, e);
       drag = null;
     });
     c.addEventListener("dblclick", (e) => {
       if (this.flags.active || this.tool !== "select") return;
       const r = c.getBoundingClientRect();
+      if (this.ed.dbl(e, e.clientX - r.left, e.clientY - r.top)) return;
       const [x, y] = this.toWorld(e.clientX - r.left, e.clientY - r.top);
       const f = this.pickFp(x, y);
       if (f) this.flyTo(padBox(f.bbox, 2), 350, 0.6);
@@ -678,7 +691,8 @@ export class BoardView {
     this.tip.style.top = Math.min(py + 14, this.h - 80) + "px";
   }
 
-  click(px, py, shift) {
+  click(px, py, shift, e) {
+    if (this.ed.click(px, py, shift, e)) return;
     const [x, y] = this.toWorld(px, py);
     if (this.panel === "copper" && !shift) { const n = this.netAt(x, y); this.setSpot(n && n !== this.spot ? n : null); return; }
     const f = this.pickFp(x, y);
@@ -705,6 +719,7 @@ export class BoardView {
     const items = [...this.sel].map((r) => ({ ref: r, kind: "footprint" }));
     if (this.selNet) items.push({ net: this.selNet, kind: "net" });
     clear(this.selBar);
+    if (this.ed.on && this.ed.items.size) { this.selBar.style.display = "flex"; this.ed.selBar(this.selBar); return; }
     if (!items.length) { this.selBar.style.display = "none"; return; }
     this.selBar.style.display = "flex";
     const label = items.map((i) => i.ref || "net " + i.net.split("/").pop()).join(", ");
@@ -716,6 +731,7 @@ export class BoardView {
       } }, icon("flag", 14), h("span", "Flag")),
       refs.length ? h("button.tbtn", { "data-tip": "Show in the schematic", onclick: () => { this.ws.show("schematic"); this.ws.view("schematic").probe(refs, "board", true); } }, icon("waypoints", 14)) : null,
       refs.length ? h("button.tbtn", { "data-tip": "Show in the BOM", onclick: () => { this.ws.show("bom"); this.ws.view("bom").probe(refs, "board"); } }, icon("list", 14)) : null,
+      ...this.ed.partActions(refs),
       h("button.tbtn", { "data-tip": "Clear the selection", onclick: () => { this.sel.clear(); this.selNet = null; this.updateSel(); this.dirty(); } }, icon("x", 14)));
   }
 
@@ -815,6 +831,9 @@ export class BoardView {
     }
     return this.override[f.ref] || null;
   }
+
+  // a copper layer's colour (rgba), for the editor
+  layerColor(l, a = 1) { return rgba(COL[l] || [160, 160, 160], a); }
 
   // ------------------------------------------------------------------ the layers panel
   layerOn(l) {
@@ -1306,10 +1325,22 @@ export class BoardView {
     }
     // edge
     c.strokeStyle = rgba(COL.edge, 0.95); c.lineWidth = Math.max(0.15, 1.5 * px); c.stroke(this.edge);
-    // unrouted
-    if (this.vis.unrouted && d.unrouted) {
-      c.strokeStyle = "rgba(255,200,100,.85)"; c.lineWidth = 1.2 * px; c.setLineDash([3 * px, 3 * px]);
-      for (const u of d.unrouted) { c.beginPath(); c.moveTo(u[0], u[1]); c.lineTo(u[2], u[3]); c.stroke(); }
+    // what is still to connect: the ratsnest from the copper (its ends follow a part being moved), else the last DRC's
+    const rats = d.ratsnest || d.unrouted;
+    if (this.vis.unrouted && rats && rats.length) {
+      const routing = this.ed.route && this.ed.route.net;
+      const end = (x, y) => {
+        const hit = this.padCentre && this.padCentre.get(`${x.toFixed(3)},${y.toFixed(3)}`);
+        if (!hit) return [x, y];
+        const p = this.pose(hit[0]);
+        return p ? fwdPose(p, hit[0], x, y) : [x, y];
+      };
+      c.lineWidth = 1.2 * px; c.setLineDash([3 * px, 3 * px]);
+      for (const u of rats) {
+        c.strokeStyle = routing && u[4] === routing ? "rgba(255,240,170,1)" : "rgba(255,200,100,.85)";
+        const a = end(u[0], u[1]), b = end(u[2], u[3]);
+        c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.stroke();
+      }
       c.setLineDash([]);
     }
     // highlight: dim everything, then draw the highlighted copper bright
@@ -1350,6 +1381,7 @@ export class BoardView {
     c.setLineDash([4 * px, 3 * px]);
     for (const r of this.kicadSel) { const f = this.byRef[r]; if (f) this.withPose(c, f, () => { c.strokeStyle = rgba(COL.kicad, 1); const b = f.bbox; c.strokeRect(b[0] - 0.5, b[1] - 0.5, b[2] - b[0] + 1, b[3] - b[1] + 1); }); }
     c.setLineDash([]);
+    if (!this.drawing) this.ed.draw(c, px);
     // screen-space overlays: labels, findings, notes, highlight points, the measurement
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (copperMode) this.drawPourLabels(c);
@@ -1357,6 +1389,7 @@ export class BoardView {
     if (this.vis.findings) for (const f of this.findings) this.marker(c, f.x, f.y, f.sev === "error" ? [240, 101, 96] : f.sev === "warning" ? [232, 184, 74] : [99, 164, 248], 5);
     if (this.vis.notes) for (const n of this.notes) this.note(c, n);
     if (this.hl) for (const p of this.hl.points) { const age = (now - this.hl.t0) / 1000; if (age < 12) { this.marker(c, p.x, p.y, COL.hl, 7 + 4 * Math.abs(Math.sin(age * 4))); animating = true; } }
+    if (!this.drawing) this.ed.drawScreen(c);
     if (this.measure && !this.drawing) this.drawMeasure(c);
     if (!this.drawing) this.flagLayer.update();
     if (animating && !this.drawing) this.dirty();
