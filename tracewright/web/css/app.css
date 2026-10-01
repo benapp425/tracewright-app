@@ -449,6 +449,14 @@ a.brand:hover { text-decoration: none; }
   display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .eprop .gd-sgnote .q { color: var(--hud-muted); }
 .viewer.editing .eprop { bottom: 64px; }
+/* My parts (library.py) */
+.libpart { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; background: var(--surface); }
+.libpart .lp-main { flex: 1; min-width: 0; }
+.libpart .lp-t { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13.5px; }
+.libpart .lp-t span { color: var(--text-3); }
+.libpart .lp-s { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+.libpart .lp-n { font-size: 12.5px; color: var(--text-2); margin-top: 5px; }
+.libpart .lp-f { font-size: 11px; color: var(--text-4); margin-top: 5px; }
 /* a second opinion on a run (reviewer.py) */
 .review2.fine svg.ic { color: var(--ok); }
 .review2.card2 { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; margin: 6px 0; background: var(--surface); font-size: 12.5px; }

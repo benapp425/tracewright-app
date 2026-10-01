@@ -3270,6 +3270,53 @@ def a_second_opinion_on_each_run():
     asyncio.run(run())
 
 
+@test(needs=("kicad",))
+def my_parts_library_saved_and_used_again():
+    """My parts: a part saved from one project (its symbol as the sheet has it, its footprint, its 3D model when the
+    footprint names one, its fields and notes) is found by search and copied into another project's own libraries --
+    the symbol once, the footprint pointing at its model in the project, both libraries in the project's tables."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import library, agent_tools
+    st = ProjectStore()
+    a_id, b_id = st.import_copy(FIXTURE, "Lib A").id, st.import_copy(FIXTURE, "Lib B").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            r = await c.post(f"/api/projects/{a_id}/library", json={"ref": "U1", "notes": "Its tab is the output: pour it."})
+            it = await r.json()
+            assert r.status == 200 and it["symbol"] and it["footprint"] and it["notes"].startswith("Its tab"), it
+            assert (await c.post(f"/api/projects/{a_id}/library", json={"ref": "NOPE"})).status == 400
+            found = (await (await c.get("/api/library", params={"q": it["value"].split("-")[0]})).json())["items"]
+            assert [x["id"] for x in found] == [it["id"]], found
+            rt = app.rt(b_id)
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = await T["library"]({"action": "search", "q": it["value"]})
+            assert it["id"] in out["content"][0]["text"] and "pour it" in out["content"][0]["text"], out
+            out = await T["library"]({"action": "use", "id": it["id"]})
+            res = json.loads(out["content"][0]["text"])
+            stem = rt.p.tw.stem
+            assert res["symbol"] == f"{stem}:{it['symbol']}" and res["footprint"] == f"{stem}:{it['footprint']}", res
+            lib = os.path.join(rt.p.tw.hw, "lib")
+            sym = open(os.path.join(lib, f"{stem}.kicad_sym")).read()
+            assert sym.count(f'(symbol "{it["symbol"]}"') == 1
+            await T["library"]({"action": "use", "id": it["id"]})                     # again: still once
+            assert open(os.path.join(lib, f"{stem}.kicad_sym")).read().count(f'(symbol "{it["symbol"]}"') == 1
+            fp = open(os.path.join(lib, f"{stem}.pretty", it["footprint"] + ".kicad_mod")).read()
+            if it["model"]:
+                assert f"${{KIPRJMOD}}/lib/3d/{it['model']}" in fp and os.path.exists(os.path.join(lib, "3d", it["model"]))
+            from tw.libtable import LibTables
+            lt = LibTables(rt.p.tw.hw)
+            assert lt.footprint_file(res["footprint"]) and lt.symbol_file(res["symbol"]), (res, lt.fp.get(stem), lt.sym.get(stem))
+            r = await c.delete(f"/api/library/{it['id']}")
+            assert r.status == 200 and not library.items()
+            rt.stop()
+    asyncio.run(go())
+
+
 @test()
 def floorplan_turns_locks_and_keepouts():
     """The floorplan's quarter turns, locks and keep-outs: a turned block's area turns (and a one-part block's part

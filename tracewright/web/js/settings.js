@@ -313,6 +313,47 @@ function liveRow(info, live, redraw) {
   } }, "sm"));
 }
 
+// My parts: the parts saved from projects (library.py), to use again
+export class LibraryPage {
+  constructor(root) {
+    root.appendChild(topbar([h("div.crumbs-top", h("span.cs", icon("chevron-right", 14)), h("span.cbtn", { style: { cursor: "default" } }, "My parts"))],
+      [btn("book-open", "Lessons", { onclick: () => go("lessons") }, "ghost sm"), btn("layout-grid", "Projects", { onclick: () => go("") }, "ghost sm")]));
+    this.page = h("div.page");
+    root.appendChild(this.page);
+    this.q = "";
+    this.render();
+  }
+
+  async render() {
+    const r = await api("/api/library" + (this.q ? `?q=${encodeURIComponent(this.q)}` : ""));
+    const list = r.items || [];
+    const inner = h("div.page-inner.narrow");
+    const had = this.search && document.activeElement === this.search;
+    this.search = h("input", { placeholder: "Search my parts", value: this.q,
+      oninput: (e) => { this.q = e.target.value; clearTimeout(this.t); this.t = setTimeout(() => this.render(), 220); } });
+    clear(this.page).appendChild(inner);
+    inner.appendChild(h("div.page-head", h("div.grow", h("h1", "My parts"),
+      h("div.sub", "Parts you checked once: their symbol, footprint, 3D model and pin table, offered to Claude in every project. Save one from a part's card."))));
+    inner.appendChild(h("div.toolbar", h("div.input-icon", { style: { width: "320px" } }, icon("search", 14), this.search), h("div.grow"),
+      h("span.small.muted", `${list.length} part${list.length === 1 ? "" : "s"}`)));
+    if (had) setTimeout(() => { this.search.focus(); this.search.setSelectionRange(this.q.length, this.q.length); }, 0);
+    if (!list.length) inner.appendChild(h("div.empty.plain", h("div.eicon", icon("microchip", 20)), h("h3", this.q ? "Nothing matches" : "No parts yet"),
+      h("p", "Open a part's card in a project and choose Save to my library.")));
+    for (const it of list) {
+      inner.appendChild(h("div.libpart",
+        h("div.lp-main", h("div.lp-t", h("b", it.name), it.value && it.value !== it.name ? h("span", it.value) : null, it.lcsc ? h("span.badge", it.lcsc) : null),
+          h("div.lp-s", [it.manufacturer, it.footprint_id, it.model ? "3D model" : null, it.pins ? `${it.pins}-pin table` : null].filter(Boolean).join(" · ")),
+          it.notes ? h("div.lp-n", it.notes) : null,
+          h("div.lp-f", `From ${it.from.project}, ${it.from.ref} · saved ${it.saved}`)),
+        btn("trash-2", null, { "data-tip": "Remove from my parts", onclick: async () => {
+          if (await confirmDialog({ title: `Remove ${it.name}?`, text: "Projects that use it keep their copy.", ok: "Remove", danger: true })) {
+            await api(`/api/library/${encodeURIComponent(it.id)}`, { method: "DELETE" }); this.render();
+          }
+        } }, "sm ghost")));
+    }
+  }
+}
+
 export class LessonsPage {
   constructor(root) {
     root.appendChild(topbar([h("div.crumbs-top", h("span.cs", icon("chevron-right", 14)), h("span.cbtn", { style: { cursor: "default" } }, "Lessons"))],

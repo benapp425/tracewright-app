@@ -2434,6 +2434,33 @@ def make_app():
         rt.hub.emit("agent.undone", sid=sess.sid, turn=last["turn"], head=new)
         return jresp({"undone": last["turn"], "head": new})
 
+    @routes.get("/api/library")
+    async def library_list(request):
+        """My parts: the parts saved from projects (library.py), matching ?q= when given."""
+        from . import library
+        return jresp({"items": await asyncio.to_thread(library.search, request.query.get("q", ""))})
+
+    @routes.post("/api/projects/{pid}/library")
+    async def library_save(request):
+        """Save one of the project's parts to my library: {ref, notes?}."""
+        from . import library
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            it = await asyncio.to_thread(library.save, rt.p, str(body.get("ref") or ""), body.get("notes") or "")
+        except ValueError as e:
+            return err(str(e))
+        return jresp(it)
+
+    @routes.delete("/api/library/{lid}")
+    async def library_remove(request):
+        from . import library
+        try:
+            await asyncio.to_thread(library.remove, request.match_info["lid"])
+        except KeyError:
+            return err("not in the library", 404)
+        return jresp({"removed": request.match_info["lid"]})
+
     @routes.get("/api/projects/{pid}/estimate")
     async def estimate_request(request):
         """What a message would likely cost, before it is sent (estimate.py): ?text=..."""

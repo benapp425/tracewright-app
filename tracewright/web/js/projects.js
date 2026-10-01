@@ -27,6 +27,7 @@ export class ProjectsPage {
         icon("search", 14), h("span", "Search"), h("span.kbd", "⌘K")),
       h("div.sep-v"),
       btn("calculator", null, { onclick: () => runCommand("calculators"), "data-tip": "Calculators", "data-kbd": "mod+shift+c" }, "ghost sm"),
+      btn("microchip", "My parts", { onclick: () => go("library"), "data-tip": "Parts you saved to use again" }, "ghost sm"),
       btn("book-open", "Lessons", { onclick: () => go("lessons"), "data-tip": "Design lessons" }, "ghost sm"),
       btn("settings", null, { onclick: () => go("settings"), "data-tip": "Settings", "data-kbd": "mod+," }, "ghost sm"),
       info.auth ? btn("log-out", null, { "data-tip": "Sign out", onclick: async () => { await api("/api/logout", { body: {} }); location.href = "/login"; } }, "ghost sm") : null]));

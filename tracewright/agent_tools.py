@@ -753,6 +753,28 @@ def tool_list(rt, app):
         hub.emit("signoff")
         return _text(f"recorded for {req}: {e['kind']} [{e['status']}] {e['label']}")
 
+    @reg("library", "My parts: parts the user saved from earlier projects because they were checked and right -- symbol, "
+         "footprint, 3D model, pin table, the JLC pad map, the user's notes. Look here first when choosing a part. "
+         "action: search (q: words of its part number, value, maker or package) | use (id: copies it into this project's own "
+         "libraries; returns the symbol and footprint lib ids and the fields to put on the schematic symbol). Saving is the "
+         "user's: they do it from a part's card.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["search", "use"]}, "q": {"type": "string"},
+                                           "id": {"type": "string"}}, "required": ["action"]})
+    async def library_t(args):
+        from . import library
+        if args["action"] == "search":
+            found = await run(library.search, args.get("q") or "")
+            if not found:
+                return _text("nothing in the user's library matches" + (f" '{args.get('q')}'" if args.get("q") else ""))
+            return _text("\n".join(f"{x['id']}: {x['name']} ({x.get('value') or ''}) {x.get('footprint_id') or ''}"
+                                   f"{' LCSC ' + x['lcsc'] if x.get('lcsc') else ''}{' -- ' + x['notes'] if x.get('notes') else ''}"
+                                   f" [from {x['from']['project']} {x['from']['ref']}, {x['saved']}]" for x in found[:30]))
+        try:
+            r = await run(library.use, p, args.get("id") or "")
+        except KeyError:
+            return _text(f"no {args.get('id')} in the library: search first", error=True)
+        return _text(_json(r))
+
     @reg("nets", "The net model: what each net is. The checks, the router's net classes and the user's net list read it, "
          "so declare what names can't say: every supply's voltage and the current it carries, heavy-current lines (an "
          "e-match or motor output: kind signal with its current), each pair's partner and impedance, RF lines' "

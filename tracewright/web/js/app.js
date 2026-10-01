@@ -6,7 +6,7 @@ import { icon } from "./icons.js";
 import { native, isNative, events as nativeEvents, initNative } from "./native.js";
 import { ProjectsPage } from "./projects.js";
 import { Workspace } from "./workspace.js";
-import { SettingsPage, LessonsPage } from "./settings.js";
+import { SettingsPage, LessonsPage, LibraryPage } from "./settings.js";
 import { openPalette } from "./palette.js";
 import { Calculators } from "./calc.js";
 import { AuthScreen } from "./auth.js";
@@ -72,6 +72,7 @@ function registerGlobal() {
   command("home", { title: "Go to projects", icon: "house", kbd: "mod+shift+p", group: "General", run: () => go("") });
   command("settings", { title: "Settings", icon: "settings", kbd: "mod+,", group: "General", run: (arg) => go("settings" + (typeof arg === "string" && arg ? "/" + arg : "")) });
   command("lessons", { title: "Lessons", icon: "book-open", kbd: "mod+shift+l", group: "General", run: () => go("lessons") });
+  command("library", { title: "My parts", icon: "microchip", group: "General", run: () => go("library") });
   command("shortcuts", { title: "Keyboard shortcuts", icon: "keyboard", kbd: "mod+/", group: "Help", run: () => shortcutsHelp() });
   let calcs = null;
   command("calculators", { title: "Calculators", icon: "calculator", kbd: "mod+shift+c", group: "General",
@@ -332,6 +333,7 @@ async function route() {
   if (parts[0] === "p" && parts[1]) state.current = new Workspace(root, parts[1], parts[2]);
   else if (parts[0] === "settings") state.current = new SettingsPage(root, parts[1]);
   else if (parts[0] === "lessons") state.current = new LessonsPage(root);
+  else if (parts[0] === "library") state.current = new LibraryPage(root);
   else state.current = new ProjectsPage(root);
   native.context(parts[0] === "p" ? parts[1] : "", "");
   if (state.pending && state.current.command) { const p = state.pending; state.pending = null; setTimeout(() => state.current.command(p.name, p.arg), 60); }

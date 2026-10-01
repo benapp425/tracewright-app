@@ -63,7 +63,20 @@ export class Inspector {
       findingsLine(info),
       h("div.in-acts",
         h("button.btn.sm.primary", { onclick: () => this.open(info) }, icon("fullscreen", 13), "Open"),
-        datasheetButton(this.ws, info, "sm")));
+        datasheetButton(this.ws, info, "sm"), this.libraryButton(info)));
+  }
+
+  // keep this part for other projects (My parts)
+  libraryButton(info) {
+    const b = h("button.btn.sm.ghost", { "data-tip": "Keep its symbol, footprint, 3D model and pin table for other projects", onclick: async () => {
+      b.disabled = true;
+      try {
+        const it = await api(`/api/projects/${enc(this.pid)}/library`, { body: { ref: info.ref } });
+        toast(`${it.name} is in My parts`, "ok", 3500, { label: "Open", run: () => { location.hash = "#/library"; } });
+        b.textContent = "In My parts";
+      } catch (e) { toast(e.message, "error"); b.disabled = false; }
+    } }, icon("bookmark", 13), "Save to my library");
+    return b;
   }
 
   goNet(p) {
