@@ -4,7 +4,7 @@
 // Editing waits while Claude works on the design: two writers on one board would lose one's work.
 import { h, clear, api, toast } from "./util.js";
 import { icon } from "./icons.js";
-import { Obstacles, walk, posture, netClass, segDist, inPoly, polysMeet, bboxOf, fwd } from "./boardgeom.js";
+import { Obstacles, walk, posture, netClass, segDist, inPoly, polysMeet, bboxOf, fwd, offsetPath, pathLength, serpentine } from "./boardgeom.js";
 
 const enc = encodeURIComponent;
 const GRIDS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 1.27, 2.54];
@@ -149,7 +149,8 @@ export class BoardEditor {
       : this.saving ? h("span.estat", h("span.spinner"), this.status || "Saving")
       : this.status ? h("span.estat.ok", icon("check", 13), this.status) : null;
     b.append(
-      tb("select", "mouse-pointer-2", "Select and move"), tb("route", "route", "Route a track", "x"), tb("pour", "paint-bucket", "Draw a pour", "p"),
+      tb("select", "mouse-pointer-2", "Select and move"), tb("route", "route", "Route a track (a pair together)", "x"), tb("tune", "activity", "Tune a track's length", "t"),
+      tb("pour", "paint-bucket", "Draw a pour", "p"),
       tb("keepout", "ban", "Draw a keep-out", "k"), h("div.tsep"),
       h("label.eslab", sw, layerSel), widthSel, gridSel, h("div.tsep"), undo, redo, h("div.tsep"),
       h("button.tbtn", { onclick: (e) => this.suggestPop(e.currentTarget), disabled: dis || undefined, "data-tip": "Let Claude suggest placement" }, icon("sparkles", 15)),
@@ -174,9 +175,12 @@ export class BoardEditor {
   hintText() {
     if (this.busy) return "Claude is working on the design. Leave a flag, or edit when it is done.";
     if (this.tool === "route") {
-      if (!this.route) return "Click a pad, track or via to start";
-      return `${short(this.route.net)} on ${this.route.layer}, ${fmt(this.route.w)} mm · click to fix · V via · / bend · Backspace back · Enter or double-click finishes · Esc cancels`;
+      if (!this.route) return "Click a pad, track or via to start (a pair's pad routes both halves)";
+      const r = this.route;
+      if (r.pair && !r.single) return `The pair ${short(r.net)} / ${short(r.pair.net)} on ${r.layer}, ${fmt(r.w)} mm a ${fmt(r.gap)} mm gap · click to fix · D one half only · Enter or double-click finishes · Esc cancels`;
+      return `${short(r.net)} on ${r.layer}, ${fmt(r.w)} mm · click to fix · V via · / bend · Backspace back${r.pair ? " · D both halves" : ""} · Enter or double-click finishes · Esc cancels`;
     }
+    if (this.tool === "tune") return "Click a straight run of the track to lengthen it";
     if (this.tool === "pour" || this.tool === "keepout") {
       const what = this.tool === "pour" ? "pour" : "keep-out";
       if (!this.shape) return `Click the corners of the ${what}`;
@@ -269,6 +273,7 @@ export class BoardEditor {
       if (k === "Enter") { this.routeFinish(); return true; }
       if (k === "Escape") { this.route = null; this.showHint(); this.v.dirty(); return true; }
       if (k === "/") { this.route.diag = !this.route.diag; this.routeUpdate(); return true; }
+      if (low === "d" && this.route.pair) { this.route.single = !this.route.single; this.showHint(); this.routeUpdate(); return true; }
     }
     if (this.shape) {
       if (k === "Enter") { this.shapeClose(); return true; }
@@ -281,6 +286,7 @@ export class BoardEditor {
       return true;
     }
     if (low === "x") { this.setTool("route"); return true; }
+    if (low === "t") { this.setTool("tune"); return true; }
     if (low === "p") { this.setTool("pour"); return true; }
     if (low === "k") { this.setTool("keepout"); return true; }
     if (low === "r" && this.v.sel.size) { this.rotateSel(); return true; }
@@ -371,6 +377,7 @@ export class BoardEditor {
     if (!this.on || !this.v.data || this.busy) return false;
     const [x, y] = this.v.toWorld(px, py);
     if (this.tool === "route") { this.routeClick(x, y, e); return true; }
+    if (this.tool === "tune") { this.tuneClick(x, y); return true; }
     if (this.tool === "pour" || this.tool === "keepout") { this.shapeClick(x, y, e); return true; }
     const z = this.pickZone(x, y, false);
     if (z) {
@@ -576,6 +583,18 @@ export class BoardEditor {
   segDragMove(d, x, y, sn) {
     let delta = (x - d.x0) * d.n[0] + (y - d.y0) * d.n[1];
     delta = sn(delta);
+    const { ops, preview, hide } = this.segShift(d, delta);
+    if (Math.abs(delta) < 1e-6) { d.ops = []; d.preview = null; d.hit = null; d.hide = null; return; }
+    const obs = this.obstacles(d.layer, d.net);
+    d.hit = null;
+    for (const [a, b] of preview) { const hh = obs.hitSeg(a, b, d.w, netClass(this.v.data.rules || {}, d.net).cl); if (hh) { d.hit = hh; break; } }
+    d.ops = ops; d.preview = preview.map(([a, b]) => ({ a, b, layer: d.layer, w: d.w })); d.hide = hide;
+    this.dragTip(`${short(d.net)}: moved ${fmt(Math.abs(delta))} mm${d.hit ? " · too close to " + describeHit(d.hit) : ""}`, !!d.hit);
+  }
+
+  // a segment moved square to itself by delta: its neighbours slide along their own lines to stay joined (or a
+  // short new segment where a pad, a via or a branch holds the end) -> {ops, preview: [[a, b]], hide}
+  segShift(d, delta) {
     const off = [d.n[0] * delta, d.n[1] * delta];
     const ops = [], preview = [], hide = new Set(["t:" + this.v.data.tid[d.i]]);
     const newEnd = (e) => {
@@ -607,12 +626,38 @@ export class BoardEditor {
         ops.push({ op: "track", net: d.net, layer: d.layer, a: rnd(e.link), b: rnd(e.at), w: d.w });
       }
     }
-    if (Math.abs(delta) < 1e-6) { d.ops = []; d.preview = null; d.hit = null; d.hide = null; return; }
-    const obs = this.obstacles(d.layer, d.net);
-    d.hit = null;
-    for (const [a, b] of preview) { const hh = obs.hitSeg(a, b, d.w, netClass(this.v.data.rules || {}, d.net).cl); if (hh) { d.hit = hh; break; } }
-    d.ops = ops; d.preview = preview.map(([a, b]) => ({ a, b, layer: d.layer, w: d.w })); d.hide = hide;
-    this.dragTip(`${short(d.net)}: moved ${fmt(Math.abs(delta))} mm${d.hit ? " · too close to " + describeHit(d.hit) : ""}`, !!d.hit);
+    return { ops, preview, hide };
+  }
+
+  // the state segShift needs for track i (as a drag would start it), or null for an arc or a dot
+  segState(i) {
+    const t = this.v.data.tracks[i];
+    if (!t || t.length > 7) return null;
+    const A = [t[0], t[1]], B = [t[2], t[3]], L = Math.hypot(B[0] - A[0], B[1] - A[1]);
+    if (L < 1e-6) return null;
+    const dir = [(B[0] - A[0]) / L, (B[1] - A[1]) / L];
+    return { i, net: t[6], layer: t[5], w: t[4], A, B, dir, n: [-dir[1], dir[0]], ends: [A, B].map((P) => this.endInfo(i, P, t)) };
+  }
+
+  // The one track in a new route's way, moved aside just far enough (its neighbours following), when that clears
+  // both: {ops, preview, hide, net} or null. Tried only when there is no way round.
+  shoveFor(r, path) {
+    const obs = this.obstacles(r.layer, r.net);
+    const hit = obs.hitPath(path, r.w, r.cl);
+    if (!hit || hit.what !== "track" || hit.i == null) return null;
+    const st = this.segState(hit.i);
+    if (!st) return null;
+    const d = this.v.data, tw = st.w, ncl = netClass(d.rules || {}, st.net).cl;
+    for (const step of [0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0]) for (const sgn of [1, -1]) {
+      const g = this.segShift(st, sgn * step);
+      const moved = g.preview.map(([a, b]) => ({ a, b, layer: st.layer, w: tw, net: st.net }));
+      const mine = new Obstacles(this.v, r.layer, r.net, { ignore: g.hide, extra: moved });
+      if (mine.hitPath(path, r.w, r.cl)) continue;
+      const theirs = new Obstacles(this.v, st.layer, st.net, { ignore: g.hide, extra: path.slice(0, -1).map((p, k) => ({ a: p, b: path[k + 1], layer: r.layer, w: r.w, net: r.net })) });
+      if (moved.some((m) => theirs.hitSeg(m.a, m.b, tw, ncl))) continue;
+      return { ops: g.ops, preview: moved, hide: g.hide, net: st.net };
+    }
+    return null;
   }
 
   startViaDrag(i, x, y) {
@@ -753,10 +798,26 @@ export class BoardEditor {
   closePop() { if (this.pop) { this.pop.remove(); this.pop = null; } }
 
   // ------------------------------------------------------------------ routing
-  obstacles(layer, net) {
-    const k = layer + "|" + net + "|" + (this.v.data.version || 0);
-    if (!this.obsCache || this.obsCache.k !== k) this.obsCache = { k, o: new Obstacles(this.v, layer, net) };
+  obstacles(layer, net, also) {
+    const k = layer + "|" + net + "|" + (also || "") + "|" + (this.v.data.version || 0);
+    if (!this.obsCache || this.obsCache.k !== k) this.obsCache = { k, o: new Obstacles(this.v, layer, net, { also }) };
     return this.obsCache.o;
+  }
+
+  // a differential pair's other half beside a pad: its net and its pad on the same part, or null
+  pairFor(pd) {
+    const kind = this.v.netKindOf(pd.p.net);
+    if (!kind || kind.kind !== "pair" || !kind.pair) return null;
+    const full = (this.v.data.nets || []).find((n) => n === kind.pair || n.split("/").pop() === String(kind.pair).split("/").pop());
+    if (!full) return null;
+    const f = pd.f, pose = this.v.pose(f);
+    let best = null;
+    for (const p of f.pads) {
+      if (p.net !== full) continue;
+      const c = pose ? fwd(pose, f, p.x, p.y) : [p.x, p.y], dd = Math.hypot(c[0] - pd.c[0], c[1] - pd.c[1]);
+      if (!best || dd < best.d) best = { d: dd, c, polys: p.p.map((q) => (pose ? q.map(([a, b]) => fwd(pose, f, a, b)) : q)) };
+    }
+    return best && best.d < 6 ? { net: full, at: best.c, ends: best.polys } : null;
   }
 
   routeWidth() {
@@ -800,8 +861,12 @@ export class BoardEditor {
       if (s.why) { this.flash(s.why); return; }
       const cls = netClass(this.v.data.rules || {}, s.net);
       this.layer = s.layer;
+      const pair = s.pad ? this.pairFor(s.pad) : null;
+      const rules = this.v.data.rules || {}, cname = (rules.net_class || {})[s.net] || "Default";
+      const gap = Math.max(((rules.classes || {})[cname] || {}).diff_pair_gap || 0, cls.cl);
       this.route = { net: s.net, layer: s.layer, at: s.at, startEnds: s.ends, steps: [], segs: [], vias: [], w: this.width || cls.w, cl: cls.cl,
-                     vd: cls.vd, vdrill: cls.vdrill, diag: true, preview: null, blocked: false };
+                     vd: cls.vd, vdrill: cls.vdrill, diag: true, preview: null, blocked: false, pair, gap, shoves: [],
+                     center: pair ? [[(s.at[0] + pair.at[0]) / 2, (s.at[1] + pair.at[1]) / 2]] : null };
       this.renderBar();
       this.showHint();
       this.routeHover(x, y, e);
@@ -811,15 +876,81 @@ export class BoardEditor {
     this.routeHover(x, y, e, true);
     if (!r.preview || r.preview.length < 2) return;
     if (r.blocked) { this.flash(r.why ? `No clear way: ${r.why}` : "No clear way here: move the cursor, add a via (V) or change layer"); return; }
+    if (r.pair && !r.single) {                         // the pair: the centre line grows; both halves come from it
+      r.center.push(...r.preview.slice(1));
+      r.preview = null;
+      if (r.target) { this.routeFinish(); return; }
+      this.v.dirty();
+      return;
+    }
     this.fixPreview();
     if (r.target) { this.routeFinish(); return; }
+    this.v.dirty();
+  }
+
+  // the pair's two tracks from a centre line: each half offset by half the pitch to its own side, fanned out to its pads
+  pairHalves(center, ends) {
+    const r = this.route, pitch = r.w + r.gap;
+    const a0 = r.at, b0 = r.pair.at, c0 = center[0], c1 = center[1] || center[0];
+    const dir = [c1[0] - c0[0], c1[1] - c0[1]];
+    const sideA = Math.sign(dir[0] * (a0[1] - c0[1]) - dir[1] * (a0[0] - c0[0])) || 1;   // which side the clicked half starts on
+    const ha = offsetPath(center, sideA * pitch / 2), hb = offsetPath(center, -sideA * pitch / 2);
+    const A = [a0, ...ha], B = [b0, ...hb];
+    if (ends) { A.push(ends.a); B.push(ends.b); }
+    const tidy = (pts) => pts.filter((q, i) => i === 0 || Math.hypot(q[0] - pts[i - 1][0], q[1] - pts[i - 1][1]) > 1e-4);
+    return { a: tidy(A), b: tidy(B) };
+  }
+
+  pairUpdate() {
+    const r = this.route, d = this.v.data;
+    const [x, y, free] = r.want;
+    let to = null, ends = null;
+    const pd = this.padAt(x, y);
+    if (pd && (pd.p.net === r.net || pd.p.net === r.pair.net)) {          // the far pads: the pair ends between them
+      const other = this.pairFor(pd);
+      if (other) {
+        const mine = pd.p.net === r.net ? pd.c : other.at, theirs = pd.p.net === r.net ? other.at : pd.c;
+        to = [(mine[0] + theirs[0]) / 2, (mine[1] + theirs[1]) / 2];
+        ends = { a: mine, b: theirs };
+      }
+    }
+    if (!to) to = free ? [x, y] : this.snap(x, y);
+    const at = r.center[r.center.length - 1];
+    if (Math.hypot(to[0] - at[0], to[1] - at[1]) < 1e-6) { r.preview = null; this.v.dirty(); return; }
+    const obs = this.obstacles(r.layer, r.net, r.pair.net), wide = 2 * r.w + r.gap;
+    let path = posture(at, to, r.diag), hit = obs.hitPath(path, wide, r.cl);
+    if (hit) { const alt = posture(at, to, !r.diag); if (!obs.hitPath(alt, wide, r.cl)) { path = alt; hit = null; } }
+    if (hit) { const p2 = walk(obs, at, to, wide, r.cl, {}); if (p2) { path = p2; hit = null; } }
+    const halves = this.pairHalves([...r.center, ...path.slice(1)], ends);
+    const oa = this.obstacles(r.layer, r.net, r.pair.net);
+    const bad = hit || oa.hitPath(halves.a.slice(1), r.w, r.cl) || oa.hitPath(halves.b.slice(1), r.w, r.cl);
+    r.preview = path; r.halves = halves; r.blocked = !!bad; r.target = bad ? null : (ends ? "pad" : null); r.ends = ends;
+    const la = pathLength(halves.a), lb = pathLength(halves.b);
+    r.why = bad ? `too close to ${describeHit(bad)}` : `skew ${fmt(Math.abs(la - lb))} mm`;
+    this.v.dirty();
+  }
+
+  async pairFinish() {
+    const r = this.route;
+    const halves = r.halves && r.preview && !r.blocked ? r.halves : this.pairHalves(r.center, null);
+    if (r.center.length < 2 && !(r.preview && r.preview.length > 1)) { this.route = null; this.showHint(); this.v.dirty(); return; }
+    const seg = (net, pts) => pts.slice(0, -1).map((p, i) => ({ net, layer: r.layer, a: rnd(p), b: rnd(pts[i + 1]), w: r.w }));
+    const ops = [{ op: "tracks", items: [...seg(r.net, halves.a), ...seg(r.pair.net, halves.b)] }];
+    this.route = null;
+    this.pending = { tracks: [...seg(r.net, halves.a), ...seg(r.pair.net, halves.b)].map((t) => ({ ...t, layer: r.layer })) };
+    this.showHint();
+    this.v.dirty();
+    const res = await this.commit(ops, `Route the pair ${short(r.net)} / ${short(r.pair.net)}`, { refill: true });
+    if (!res) this.pending = null;
     this.v.dirty();
   }
 
   fixPreview() {
     const r = this.route, segs = [];
     for (let i = 0; i + 1 < r.preview.length; i++) segs.push({ a: r.preview[i], b: r.preview[i + 1], layer: r.layer });
-    r.steps.push({ kind: "segs", n: segs.length, at: r.at, startEnds: r.startEnds });
+    const shoved = !!r.shove;
+    if (r.shove) { r.shoves.push(r.shove); r.shove = null; }            // a track moved aside goes with the route
+    r.steps.push({ kind: "segs", n: segs.length, at: r.at, startEnds: r.startEnds, shoved });
     r.segs.push(...segs);
     r.at = r.preview[r.preview.length - 1];
     r.startEnds = r.targetEnds || [];
@@ -838,6 +969,7 @@ export class BoardEditor {
   routeUpdate() {
     const r = this.route, d = this.v.data;
     if (!r || !r.want) { this.v.dirty(); return; }
+    if (r.pair && !r.single) { this.pairUpdate(); return; }
     const [x, y, free] = r.want;
     let to = null, target = null, targetEnds = [], foreign = null;
     const pd = this.padAt(x, y);
@@ -858,7 +990,9 @@ export class BoardEditor {
     }
     if (!to) to = free ? [x, y] : this.snap(x, y);
     if (near(to, r.at, 1e-6)) { r.preview = null; r.blocked = false; r.target = null; this.v.dirty(); return; }
-    const obs = this.obstacles(r.layer, r.net);
+    const obs = r.shoves.length                        // a track already moved aside: where it goes now
+      ? new Obstacles(this.v, r.layer, r.net, { ignore: new Set(r.shoves.flatMap((sh) => [...sh.hide])), extra: r.shoves.flatMap((sh) => sh.preview) })
+      : this.obstacles(r.layer, r.net);
     let path = posture(r.at, to, r.diag);
     let hit = obs.hitPath(path, r.w, r.cl);
     if (hit) {
@@ -869,6 +1003,11 @@ export class BoardEditor {
       const p2 = walk(obs, r.at, to, r.w, r.cl, { ends: [...(r.startEnds || []), ...targetEnds] });
       if (p2) { path = p2; hit = null; }
     }
+    r.shove = null;
+    if (hit && !r.shoves.length) {                      // no way round: move the one track in the way aside, if that clears it
+      const sh = this.shoveFor(r, path);
+      if (sh) { r.shove = sh; hit = null; }
+    }
     r.preview = path; r.blocked = !!hit; r.target = hit ? null : target; r.targetEnds = targetEnds;
     r.why = hit ? (foreign || `too close to ${describeHit(hit)}`) : foreign;
     this.v.dirty();
@@ -877,6 +1016,7 @@ export class BoardEditor {
   routeVia(toLayer) {
     const r = this.route;
     if (!r) return;
+    if (r.pair && !r.single) { this.flash("A pair changes layer one half at a time: press D to route one half"); return; }
     if (r.preview && r.preview.length >= 2) {
       if (r.blocked) { this.flash("No clear way to the via's spot"); return; }
       this.fixPreview();
@@ -903,7 +1043,7 @@ export class BoardEditor {
     const s = r.steps.pop();
     if (!s) { this.route = null; this.showHint(); this.v.dirty(); return; }
     if (s.kind === "via") { r.vias.pop(); r.layer = s.layer; this.layer = s.layer; r.startEnds = s.startEnds; this.renderBar(); }
-    else { r.segs.splice(r.segs.length - s.n, s.n); r.at = s.at; r.startEnds = s.startEnds; }
+    else { r.segs.splice(r.segs.length - s.n, s.n); r.at = s.at; r.startEnds = s.startEnds; if (s.shoved) r.shoves.pop(); }
     this.showHint();
     this.routeUpdate();
   }
@@ -911,16 +1051,72 @@ export class BoardEditor {
   async routeFinish() {
     const r = this.route;
     if (!r) return;
+    if (r.pair && !r.single) { await this.pairFinish(); return; }
     if (!r.segs.length) { this.route = null; this.showHint(); this.v.dirty(); return; }
     while (r.vias.length && r.steps.length && r.steps[r.steps.length - 1].kind === "via") { r.steps.pop(); r.vias.pop(); }   // no via at the very end
-    const ops = [{ op: "tracks", items: r.segs.map((s) => ({ net: r.net, layer: s.layer, a: rnd(s.a), b: rnd(s.b), w: r.w })) }];
+    const ops = [...r.shoves.flatMap((sh) => sh.ops), { op: "tracks", items: r.segs.map((s) => ({ net: r.net, layer: s.layer, a: rnd(s.a), b: rnd(s.b), w: r.w })) }];
     if (r.vias.length) ops.push({ op: "vias", items: r.vias.map((v) => ({ net: r.net, x: round(v.x), y: round(v.y), d: r.vd, drill: r.vdrill })) });
     this.route = null;
-    this.pending = { tracks: r.segs.map((s) => ({ ...s, w: r.w })), vias: r.vias.map((v) => ({ ...v, d: r.vd })) };
+    this.pending = { tracks: [...r.segs.map((s) => ({ ...s, w: r.w })), ...r.shoves.flatMap((sh) => sh.preview)], vias: r.vias.map((v) => ({ ...v, d: r.vd })),
+                     hide: new Set(r.shoves.flatMap((sh) => [...sh.hide])) };
     this.showHint();
     this.v.dirty();
-    const res = await this.commit(ops, `Route ${short(r.net)}`, { refill: true });
+    const res = await this.commit(ops, `Route ${short(r.net)}` + (r.shoves.length ? ` (moving ${short(r.shoves[0].net)} aside)` : ""), { refill: true });
     if (!res) this.pending = null;
+    this.v.dirty();
+  }
+
+  // ------------------------------------------------------------------ length tuning
+  netLength(net) {
+    let L = 0;
+    for (const t of this.v.data.tracks) if (t[6] === net) L += Math.hypot(t[2] - t[0], t[3] - t[1]);
+    return L;
+  }
+
+  tuneClick(x, y) {
+    const c = this.pickCopper(x, y);
+    if (!c || c.kind !== "track") { this.flash("Click a straight run of the track to lengthen"); return; }
+    const d = this.v.data, t = d.tracks[c.i];
+    if (t.length > 7) { this.flash("Pick a straight run, not an arc"); return; }
+    const net = t[6], now = this.netLength(net);
+    const kind = this.v.netKindOf(net);
+    const mate = kind && kind.kind === "pair" && kind.pair ? (d.nets || []).find((n) => n === kind.pair || n.split("/").pop() === String(kind.pair).split("/").pop()) : null;
+    const target = h("input.einp", { type: "number", step: "0.05", value: (mate ? Math.max(now, this.netLength(mate)) : now + 1).toFixed(2), style: { width: "90px" } });
+    const side = h("select.esel", h("option", { value: "1" }, "On the left"), h("option", { value: "-1" }, "On the right"));
+    const apply = () => this.tune(c.i, parseFloat(target.value), parseInt(side.value, 10));
+    this.closePop();
+    this.pop = h("div.epop", { onmousedown: (e) => e.stopPropagation() }, h("div.ep-h", icon("activity", 14), `Tune ${short(net)}`),
+      h("div.ep-r", h("span", "Now"), h("span", `${fmt(now)} mm`)), mate ? h("div.ep-r", h("span", "Its pair"), h("span", `${short(mate)} ${fmt(this.netLength(mate))} mm`)) : null,
+      h("label.ep-r", h("span", "Make it"), h("span", target, " mm")), h("label.ep-r", h("span", "Bumps"), side),
+      h("div.ep-b", h("button.btn.sm", { onclick: () => this.closePop() }, "Cancel"), h("button.btn.sm.primary", { onclick: apply }, "Tune it")));
+    const [sx, sy] = this.v.toScreen(x, y);
+    this.pop.style.left = Math.max(10, Math.min(sx - 140, this.v.w - 300)) + "px";
+    this.pop.style.top = Math.max(60, Math.min(sy + 14, this.v.h - 230)) + "px";
+    this.v.viewer.appendChild(this.pop);
+    setTimeout(() => target.focus(), 20);
+  }
+
+  async tune(i, target, side) {
+    const d = this.v.data, t = d.tracks[i], net = t[6];
+    const extra = target - this.netLength(net);
+    if (!(extra > 0.01)) { this.flash("It is that long already: a meander only adds length"); return; }
+    const a = [t[0], t[1]], b = [t[2], t[3]], w = t[4], cl = netClass(d.rules || {}, net).cl;
+    const obs = new Obstacles(this.v, t[5], net, { ignore: new Set(["t:" + d.tid[i]]) });
+    const pitch = Math.max(4 * w, 2 * w + cl, 0.6);
+    let found = null;
+    for (const sd of [side, -side]) for (const amp of [6 * w, 4.5 * w, 3 * w, 2 * w].map((v) => Math.max(v, 0.4))) {
+      const m = serpentine(a, b, extra, pitch, amp, sd);
+      if (m && !m.short && !obs.hitPath(m.pts, w, cl)) { found = m; break; }
+      if (m && !found && m.short < extra && !obs.hitPath(m.pts, w, cl)) found = m;            // as much as fits
+    }
+    if (!found) { this.flash("No room for a meander on this run: pick a longer, clearer one"); return; }
+    this.closePop();
+    const items = found.pts.slice(0, -1).map((p, k) => ({ net, layer: t[5], a: rnd(p), b: rnd(found.pts[k + 1]), w }));
+    this.pending = { tracks: items.map((x) => ({ ...x })), hide: new Set(["t:" + d.tid[i]]) };
+    this.v.dirty();
+    const r = await this.commit([{ op: "delete", uuids: [d.tid[i]], kinds: ["track"] }, { op: "tracks", items }], `Tune ${short(net)} to ${fmt(this.netLength(net) + found.added)} mm`, { refill: true });
+    if (!r) this.pending = null;
+    else if (found.short) this.flash(`Room for ${fmt(found.added)} of the ${fmt(extra)} mm on this run: tune another run for the rest`);
     this.v.dirty();
   }
 
@@ -1178,7 +1374,18 @@ export class BoardEditor {
     }
     // the route being drawn
     const r = this.route;
-    if (r) {
+    if (r && r.pair && !r.single) {
+      const col = r.blocked ? "rgba(240,101,96,.85)" : lit(r.layer, 0.85);
+      const h0 = r.halves || this.pairHalves(r.center, null);
+      for (const half of [h0.a, h0.b]) for (let k = 0; k + 1 < half.length; k++) seg(half[k], half[k + 1], r.w, col);
+      c.strokeStyle = "rgba(255,255,255,.18)"; c.lineWidth = px; c.setLineDash([2 * px, 3 * px]);
+      c.beginPath(); const cc = [...r.center, ...((r.preview || []).slice(1))]; cc.forEach((q, k) => (k ? c.lineTo(q[0], q[1]) : c.moveTo(q[0], q[1]))); c.stroke(); c.setLineDash([]);
+    } else if (r) {
+      for (const sh of [...r.shoves, ...(r.shove ? [r.shove] : [])]) {
+        c.strokeStyle = this.v.panel === "copper" ? "#141a17" : "#16241b"; c.lineCap = "round";
+        for (const k of sh.hide) { const i = d.tid.indexOf(k.slice(2)); if (i >= 0) { const t = d.tracks[i]; c.lineWidth = t[4] + 2 * px; c.beginPath(); c.moveTo(t[0], t[1]); c.lineTo(t[2], t[3]); c.stroke(); } }
+        for (const m of sh.preview) seg(m.a, m.b, m.w, "rgba(255,196,120,.9)");
+      }
       for (const s of r.segs) seg(s.a, s.b, r.w, lit(s.layer));
       for (const v of r.vias) via(v.x, v.y, r.vd, r.vdrill, "rgba(225,228,236,1)");
       if (r.preview && r.preview.length > 1) {

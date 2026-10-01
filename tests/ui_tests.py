@@ -970,6 +970,74 @@ async def placement_suggestion_on_the_board(t):
             t.s.post(f"api/projects/{t.pid}/board/undo")
 
 
+@test
+async def board_editor_routes_a_pair_and_tunes_a_length(t):
+    """A differential pair routed together from its connector: both halves side by side at the pair's pitch; and a
+    track lengthened by a meander to the length asked for."""
+    base = f"api/projects/{t.pid}/board"
+    b0 = t.s.get(base)
+    nets = [n for n in b0["nets"] if n.split("/")[-1] in ("USB_D_P", "USB_D_N")]
+    check(len(nets) == 2, nets)
+    t.s.post(base + "/edit", {"ops": [{"op": "delete", "nets": nets}], "label": "Clear the USB pair"})
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.data && {BV}.netKinds && Object.keys({BV}.netKinds).length)", 30)
+        await t.page.wait(f"!{BV}.data.tracks.some((x) => {json.dumps(nets)}.includes(x[6]))", 15)
+        await t.page.key("f", "KeyF", text="f")
+        await settle(t.page)
+        await t.page.click(".tbtn.editbtn")
+        await t.page.key("x", "KeyX", text="x")
+        j1 = next(f for f in b0["footprints"] if f["ref"] == "J1")
+        pd = next(p for p in j1["pads"] if p["net"] == nets[0] and "F.Cu" in p["l"])
+        await board_click(t.page, pd["x"], pd["y"])
+        await t.page.wait(f"!!({BV}.ed.route && {BV}.ed.route.pair)", 5)
+        check(await t.page.js(f"{BV}.ed.route.pair.net") == nets[1], "the pair's other half was not found")
+        tx, ty = pd["x"] + 4, pd["y"]                       # a clear spot east of the connector
+        sx, sy = await board_point(t.page, tx, ty)
+        await t.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=sx, y=sy)
+        await t.page.wait(f"!!({BV}.ed.route.halves && !{BV}.ed.route.blocked)", 10)
+        await t.shot("board-edit-pair")
+        await t.page.mouse(sx, sy)
+        await t.page.key("Enter", "Enter")
+        for _ in range(60):
+            b1 = t.s.get(base)
+            got = {n: [x for x in b1["tracks"] if x[6] == n] for n in nets}
+            if all(got.values()):
+                break
+            await asyncio.sleep(0.25)
+        check(all(got.values()), f"the pair was not routed: {[(n, len(v)) for n, v in got.items()]}")
+        # the halves run side by side: their longest segments are parallel at the pair's pitch
+        import math
+        la = max(got[nets[0]], key=lambda x: math.hypot(x[2] - x[0], x[3] - x[1]))
+        lb = max(got[nets[1]], key=lambda x: math.hypot(x[2] - x[0], x[3] - x[1]))
+        da = (la[2] - la[0], la[3] - la[1]); db = (lb[2] - lb[0], lb[3] - lb[1])
+        cross = abs(da[0] * db[1] - da[1] * db[0]) / (math.hypot(*da) * math.hypot(*db))
+        check(cross < 0.02, f"the halves are not parallel ({cross:.3f})")
+        # tune: the longest straight run on the board, 2 mm longer
+        await t.page.key("Escape", "Escape")
+        await t.page.key("t", "KeyT", text="t")
+        cand = max((x for x in b1["tracks"] if len(x) == 7 and x[6] not in nets and x[5] == "F.Cu"), key=lambda x: math.hypot(x[2] - x[0], x[3] - x[1]))
+        net = cand[6]
+        before = sum(math.hypot(x[2] - x[0], x[3] - x[1]) for x in b1["tracks"] if x[6] == net)
+        await board_click(t.page, (cand[0] + cand[2]) / 2, (cand[1] + cand[3]) / 2)
+        await t.page.wait("document.querySelector('.epop input.einp')", 5)
+        await t.page.js(f"const i = document.querySelector('.epop input.einp'); i.value = '{before + 2:.3f}'; 1")
+        await t.page.js("[...document.querySelectorAll('.epop button')].find((b) => b.textContent === 'Tune it').click(); 1")
+        for _ in range(60):
+            b2 = t.s.get(base)
+            after = sum(math.hypot(x[2] - x[0], x[3] - x[1]) for x in b2["tracks"] if x[6] == net)
+            if after > before + 0.5:
+                break
+            await asyncio.sleep(0.25)
+        check(abs(after - (before + 2)) < 0.05, f"{net}: {before:.3f} -> {after:.3f}, wanted {before + 2:.3f}")
+        await t.shot("board-edit-tuned")
+    finally:
+        for _ in range(10):
+            if not t.s.get(base + "/history")["undo"]:
+                break
+            t.s.post(base + "/undo")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

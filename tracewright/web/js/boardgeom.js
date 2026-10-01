@@ -80,20 +80,25 @@ const CELL = 2.0;
 // The copper of other nets on one layer, the holes and the keep-outs that bar tracks there, and the board's edge,
 // indexed by a coarse grid. view: the board view (its data, footprints and rules).
 export class Obstacles {
+  // opts: ignore (a set of "t:<id>" / "v:<id>": copper the edit itself moves), skipRefs, also (a second net that is
+  // no obstacle either: a differential pair's partner, routed together)
   constructor(view, layer, net, opts = {}) {
     const d = view.data, rules = d.rules || {};
     this.layer = layer; this.net = net;
+    const mine = (n) => (net && n === net) || (opts.also && n === opts.also);
     this.edgeCl = rules.edge_clearance || 0.3;
     this.items = [];
     this.grid = new Map();
     const clOf = (n) => netClearance(rules, n);
     const ignore = opts.ignore || new Set();           // track/via ids moved by the edit itself
+    // tracks the edit moves to a new place (a shove): obstacles where they go
+    for (const x of opts.extra || []) if (x.layer === layer && !mine(x.net)) this.add({ t: "cap", a: x.a, b: x.b, r: x.w / 2, net: x.net, cl: clOf(x.net), what: "track" });
     d.tracks.forEach((t, i) => {
-      if (t[5] !== layer || (net && t[6] === net) || ignore.has("t:" + d.tid[i])) return;
+      if (t[5] !== layer || mine(t[6]) || ignore.has("t:" + d.tid[i])) return;
       this.add({ t: "cap", a: [t[0], t[1]], b: [t[2], t[3]], r: t[4] / 2, net: t[6], cl: clOf(t[6]), what: "track", i });
     });
     d.vias.forEach((v, i) => {
-      if ((net && v[4] === net) || ignore.has("v:" + d.vid[i])) return;
+      if (mine(v[4]) || ignore.has("v:" + d.vid[i])) return;
       if (v[6] && v[6].length === 2 && !viaSpans(d.copper, v[6], layer)) return;
       this.add({ t: "circ", c: [v[0], v[1]], r: v[2] / 2, net: v[4], cl: clOf(v[4]), what: "via", i });
     });
@@ -103,7 +108,7 @@ export class Obstacles {
       for (const p of f.pads) {
         const onCu = p.l.includes("*.Cu") || p.l.includes(layer) || (p.l.includes("F&B.Cu") && (layer === "F.Cu" || layer === "B.Cu"));
         const hole = p.d && (p.d[0] > 0 || p.d[1] > 0);
-        if (onCu && !(net && p.net === net)) {
+        if (onCu && !mine(p.net)) {
           for (const pl of p.p) this.add({ t: "poly", p: pose ? pl.map(([x, y]) => fwd(pose, f, x, y)) : pl, net: p.net, cl: clOf(p.net), what: "pad", ref: f.ref, pad: p.n });
         } else if (hole && !onCu) {                    // a bare hole (NPTH): kept clear on every layer
           const [x, y] = pose ? fwd(pose, f, p.x, p.y) : [p.x, p.y];
@@ -203,6 +208,66 @@ export function fwd(p, f, x, y) {
   const a = -(p.rot - f.a) * Math.PI / 180, cs = Math.cos(a), sn = Math.sin(a);
   const dx = x - f.x, dy = y - f.y;
   return [p.x + dx * cs - dy * sn, p.y + dx * sn + dy * cs];
+}
+
+// ------------------------------------------------------------------ paths: offsets, length, meanders
+// a path offset sideways by d (positive: to the right of travel, with y down), corners mitred
+export function offsetPath(pts, d) {
+  const n = pts.length;
+  if (n < 2) return pts.slice();
+  const nrm = [];
+  for (let i = 0; i + 1 < n; i++) {
+    const dx = pts[i + 1][0] - pts[i][0], dy = pts[i + 1][1] - pts[i][1], L = Math.hypot(dx, dy) || 1;
+    nrm.push([-dy / L, dx / L]);
+  }
+  const out = [[pts[0][0] + nrm[0][0] * d, pts[0][1] + nrm[0][1] * d]];
+  for (let i = 1; i + 1 < n; i++) {
+    const a = nrm[i - 1], b = nrm[i];
+    let mx = a[0] + b[0], my = a[1] + b[1];
+    const ml = Math.hypot(mx, my);
+    if (ml < 1e-9) { out.push([pts[i][0] + a[0] * d, pts[i][1] + a[1] * d]); continue; }
+    mx /= ml; my /= ml;
+    const k = d / (mx * a[0] + my * a[1]);
+    out.push([pts[i][0] + mx * k, pts[i][1] + my * k]);
+  }
+  out.push([pts[n - 1][0] + nrm[n - 2][0] * d, pts[n - 1][1] + nrm[n - 2][1] * d]);
+  return out;
+}
+
+export function pathLength(pts) {
+  let L = 0;
+  for (let i = 0; i + 1 < pts.length; i++) L += Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]);
+  return L;
+}
+
+// A straight run a -> b made `extra` mm longer with bumps square to it (45° shoulders), a pitch apart, centred, on
+// one side (side 1: left of travel, -1: right), none higher than maxAmp. One bump of height h with shoulders c adds
+// 2h - (8 - 4 sqrt 2) c: the fewest bumps that reach, each the height that makes it exact.
+// {pts, bumps, height, added, short: mm still missing} | null (the run too short for a bump)
+const MEANDER_K = 8 - 4 * Math.SQRT2;
+export function serpentine(a, b, extra, pitch, maxAmp, side = 1) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+  if (L < 3 * pitch || extra <= 0) return null;
+  const ux = dx / L, uy = dy / L, nx = uy * side, ny = -ux * side;
+  let c = pitch / 4;
+  const room = Math.max(1, Math.floor((L - pitch) / (2 * pitch)));
+  const most = 2 * maxAmp - MEANDER_K * c;
+  if (most <= 0) return null;
+  const nb = Math.min(room, Math.max(1, Math.ceil(extra / most)));
+  let hgt = (extra / nb + MEANDER_K * c) / 2, short = 0;
+  if (hgt > maxAmp) { hgt = maxAmp; short = extra - nb * (2 * hgt - MEANDER_K * c); }
+  if (hgt < 2 * c) { c = Math.max(0.01, extra / nb / (4 - MEANDER_K)); hgt = 2 * c; }
+  const used = 2 * nb * pitch - pitch, start = (L - used) / 2;
+  const P = (s0, o) => [a[0] + ux * s0 + nx * o, a[1] + uy * s0 + ny * o];
+  const out = [a];
+  for (let i = 0; i < nb; i++) {
+    const s0 = start + i * 2 * pitch;
+    out.push(P(s0, 0), P(s0 + c, c), P(s0 + c, hgt - c), P(s0 + 2 * c, hgt), P(s0 + pitch - 2 * c, hgt), P(s0 + pitch - c, hgt - c), P(s0 + pitch - c, c), P(s0 + pitch, 0));
+  }
+  out.push(b);
+  const pts = [out[0]];
+  for (const q of out.slice(1)) { const r = pts[pts.length - 1]; if (Math.hypot(q[0] - r[0], q[1] - r[1]) > 1e-6) pts.push(q); }
+  return { pts, bumps: nb, height: hgt, added: pathLength(pts) - L, short: Math.max(0, short) };
 }
 
 // ------------------------------------------------------------------ the two-segment posture and the walkaround

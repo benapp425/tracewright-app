@@ -68,5 +68,23 @@ check(none === null, `a path went through a keep-out: ${JSON.stringify(none)}`);
 const pz = G.posture([0, 0], [3, 1], true);
 check(pz.length === 3 && pz[1][0] === 1 && pz[1][1] === 1, `posture ${JSON.stringify(pz)}`);
 
+// 5. a pair's halves: the path offset to each side keeps its distance from the centre line, corners mitred
+const cl5 = [[0, 0], [10, 0], [15, 5], [15, 15]];
+for (const d of [0.3, -0.3]) {
+  const off = G.offsetPath(cl5, d);
+  for (const q of off) {
+    let m = Infinity;
+    for (let i = 0; i + 1 < cl5.length; i++) m = Math.min(m, G.segDist(q[0], q[1], cl5[i][0], cl5[i][1], cl5[i + 1][0], cl5[i + 1][1]));
+    check(Math.abs(m - 0.3) < 0.03, `offset ${d}: a corner ${m.toFixed(3)} mm from the centre line`);
+  }
+}
+// 6. a meander adds exactly what is asked, while there is room; says how much is missing when there is not
+for (const extra of [0.2, 1, 3, 7.5]) {
+  const m = G.serpentine([0, 0], [20, 0], extra, 1.0, 2.0);
+  check(m && Math.abs(m.added - extra) < 1e-6 && !m.short, `meander for ${extra}: ${m && m.added}`);
+}
+const tight = G.serpentine([0, 0], [6, 0], 10, 1.0, 1.5);
+check(tight && tight.short > 4 && Math.abs(tight.added + tight.short - 10) < 1e-6, `a run too short: ${JSON.stringify(tight && [tight.added, tight.short])}`);
+
 if (fails.length) { console.log(fails.slice(0, 20).join("\n")); process.exit(1); }
 console.log(`ok (${n} nets, ${Math.round(ms / n)} ms each)`);
