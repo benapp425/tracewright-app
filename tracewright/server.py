@@ -1206,12 +1206,17 @@ def make_app():
                     except Exception as e:
                         rt.sch_edits.abandon(snap)               # whatever an op wrote before the one that failed
                         return None, str(e), None
-                    rt.sch_edits.done(snap, str(body.get("label") or (lines[0] if lines else "Edit the schematic"))[:80])
+                    if not lines:                                # it was so already: no undo step for nothing
+                        rt.sch_edits.abandon(snap)
+                        return [], None, rt.sch_edits.state()
+                    rt.sch_edits.done(snap, str(body.get("label") or lines[0])[:80])
                     schedit.record(rt.p, ops)
                     return lines, None, rt.sch_edits.state()
             lines, problem, hist = await asyncio.to_thread(run)
         if problem:
             return err(re.sub(r"^\w+(Error|Exception): ", "", problem)[:300], 422)
+        if not lines:
+            return jresp({"ok": True, "changes": [], "history": hist, "board_out_of_date": False})
         rt.user_changes.append("schematic (the user, in the app): " + schedit.describe(lines))
         rt.hub.emit("schematic.changed", source="app")
         return jresp({"ok": True, "changes": lines, "history": hist,

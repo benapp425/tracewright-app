@@ -31,7 +31,10 @@ class Hub:
         if running is self.loop:
             self._fanout(ev)
         else:
-            self.loop.call_soon_threadsafe(self._fanout, ev)
+            try:
+                self.loop.call_soon_threadsafe(self._fanout, ev)
+            except RuntimeError:                          # the loop has closed (shutting down): nobody left to tell
+                pass
         return ev
 
     def _fanout(self, ev):

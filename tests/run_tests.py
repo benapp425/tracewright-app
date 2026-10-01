@@ -3687,7 +3687,7 @@ def stage_gates_waivers_and_sign_off():
             assert r.status == 200, await r.text()
             so = (await r.json())["signoff"]
             assert so["valid"] and so["by"] == "you" and so["note"] == "checked", so
-            assert gates.gate(p.reload(), "release") == (True, [])
+            assert gates.gate(p.reload(), "release") == (True, []), gates.gate(p, "release")
             r = await c.post(f"/api/projects/{pid}/order/jlc", json={"qty": 5})
             assert r.status != 409, (r.status, await r.text())                    # the sign-off lets it through
             with open(p.tw.pro, "a") as fh:                                      # the design changes afterwards

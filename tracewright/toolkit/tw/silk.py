@@ -14,7 +14,8 @@ from . import font
 
 
 def text_box(cx, cy, text, h, th, rot):
-    w = font.width(text or "M", h, pen=th)
+    """The silk a centred reference covers: its strokes as KiCad draws them (tw.font's ink, with this text's pen)."""
+    w = font.ink_width(text or "M", h) + th - 0.1524 * h / font.SIZE
     hh = h + th
     if int(round(rot)) % 180 == 90:
         w, hh = hh, w

@@ -15,6 +15,7 @@ export async function schEdit(ws, ops, label) {
   ws.inspector && ws.inspector.invalidate();
   const sch = ws.views && ws.views.schematic;
   if (sch) { sch.history = r.history; sch.reload && sch.reload(); }
+  if (!(r.changes || []).length) { toast("Nothing to change", "info", 2500); return r; }
   toast(label, "ok", 6000, { label: "Undo", run: () => schStep(ws, true) });
   if (r.board_out_of_date) setTimeout(() => toast("The board has the old footprint or net names", "info", 9000,
     { label: "Update the board", run: () => updateBoard(ws) }), 400);
