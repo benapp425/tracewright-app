@@ -961,6 +961,89 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.post("/api/projects/{pid}/board/edit")
+    async def board_edit(request):
+        """An edit made in the board view: {ops, label}, the same ops as Claude's board tools (tw/pcb/kpy_ops.py), one
+        undo step. Live in KiCad when it has the board open, else on the file. Waits while Claude works on the design:
+        two writers on one board would lose one's work."""
+        from . import boardedit
+        from tw.pcb import client
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: edit when it is done, or stop it", 409)
+        body = await request.json()
+        ops = body.get("ops") or []
+        if not isinstance(ops, list) or not ops or not all(isinstance(o, dict) for o in ops):
+            return err("no edit")
+        bad = sorted({str(o.get("op")) for o in ops} - boardedit.EDIT_OPS)
+        if bad:
+            return err("not an edit the board view makes: " + ", ".join(bad))
+        label = str(body.get("label") or "Edit")[:80]
+        async with rt.edit_lock:
+            def run():
+                with rt.edits.lock:
+                    snap = rt.edits.before()
+                    rt.mark_app_edit(4)
+                    try:
+                        res = client.apply(rt.p.tw, ops, save=True, live="auto", fill_after=bool(body.get("fill")))
+                    except Exception as e:
+                        res = {"ok": False, "error": str(e)}
+                    if not res.get("ok"):
+                        rt.edits.failed(snap)
+                        return res, None
+                    rt.edits.done(snap, label)
+                    boardedit.record(rt.p, ops, res.get("changes"))
+                    return res, rt.edits.state()
+            res, hist = await asyncio.to_thread(run)
+        if not res.get("ok"):
+            errs = [r.get("error") for r in res.get("results") or [] if isinstance(r, dict) and r.get("error")]
+            msg = (errs[0] if errs else res.get("error")) or "the edit did not apply"
+            return err(re.sub(r"^\w+(Error|Exception): ", "", str(msg))[:300], 422)
+        rt.user_changes.append("board (the user, in the app): " + boardedit.describe(ops, res.get("changes")))
+        return jresp({"ok": True, "via": res.get("via"), "changes": res.get("changes") or [], "history": hist})
+
+    async def _board_step(request, back):
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: undo when it is done, or stop it", 409)
+        async with rt.edit_lock:
+            def run():
+                with rt.edits.lock:
+                    rt.mark_app_edit(4)
+                    label = rt.edits.step(back)
+                    if label is not None:
+                        try:
+                            link = twlive.link_for(rt.p.tw.pcb)
+                            if link is not None:
+                                link.revert()                 # KiCad shows the board file as it is again
+                        except Exception:
+                            traceback.print_exc()
+                    return label, rt.edits.state()
+            label, hist = await asyncio.to_thread(run)
+        if label is None:
+            return err("nothing to " + ("undo" if back else "redo"), 409)
+        rt.user_changes.append(f"board (the user, in the app): {'undid' if back else 'redid'} \"{label}\"")
+        return jresp({"ok": True, "label": label, "history": hist})
+
+    @routes.post("/api/projects/{pid}/board/undo")
+    async def board_undo(request):
+        return await _board_step(request, True)
+
+    @routes.post("/api/projects/{pid}/board/redo")
+    async def board_redo(request):
+        return await _board_step(request, False)
+
+    @routes.get("/api/projects/{pid}/board/history")
+    async def board_history(request):
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_pcb():
+            return jresp({"undo": 0, "redo": 0, "undo_label": "", "redo_label": ""})
+        return jresp(await asyncio.to_thread(rt.edits.state))
+
     @routes.get("/api/projects/{pid}/schematic")
     async def schematic(request):
         rt = app.rt(request.match_info["pid"])

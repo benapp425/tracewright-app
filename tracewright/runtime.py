@@ -50,6 +50,9 @@ class ProjectRuntime:
         self.checks_lock = asyncio.Lock()      # one check run at a time (Checks tab or the agent)
         self.checks_stop = None                # threading.Event of the run in progress
         self.bom_stop = None                   # threading.Event of the parts lookup in progress
+        self.edit_lock = asyncio.Lock()        # one board edit from the app at a time
+        self.app_edit_until = 0.0              # the board view's own edits: the user's, already described
+        self._edits = None
 
     # ------------------------------------------------------------------ lifecycle
     def _tap(self, ev):
@@ -94,6 +97,18 @@ class ProjectRuntime:
         """Tracewright is about to write the design files (agent tools, router, checks)."""
         self.self_until = max(self.self_until, time.time() + seconds)
 
+    def mark_app_edit(self, seconds=3.0):
+        """The user is editing the board in the app: their change, described by the edit itself."""
+        self.app_edit_until = max(self.app_edit_until, time.time() + seconds)
+
+    @property
+    def edits(self):
+        """The board view's undo history (boardedit.History)."""
+        if self._edits is None:
+            from .boardedit import History
+            self._edits = History(self.p)
+        return self._edits
+
     # ------------------------------------------------------------------ board geometry
     def board_path(self):
         return self.p.tw.pcb if self.p.tw.has_pcb() else None
@@ -119,8 +134,36 @@ class ProjectRuntime:
             js["summary"] = b.summary()
             js["version"] = ver
             js["unrouted"] = self._unrouted()
+            from tw import ratsnest
+            try:
+                js["ratsnest"] = ratsnest.ratsnest(b)          # from the copper itself: right after every edit
+            except Exception:
+                traceback.print_exc()
+                js["ratsnest"] = None
+            js["rules"] = self.board_rules()
             self._board = (key, b, js, ver)
         return js
+
+    def board_rules(self):
+        """What the editor holds new copper to: each net class's clearance, width and via, which class each net is in,
+        and the board's minimums (the .kicad_pro)."""
+        from tw.pro import ProjectSettings
+        ps = ProjectSettings.load(self.p.tw.pro) if self.p.tw.pro else ProjectSettings({})
+        classes = {}
+        for name in set(ps.classes) | {"Default"}:
+            c = ps.cls(name)
+            classes[name] = {k: c.get(k) for k in ("clearance", "track_width", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap")}
+        b = self.board()
+        net_class = {}
+        for n in (b.nets if b else []):
+            c = ps.class_of(n)
+            if c != "Default":
+                net_class[n] = c
+        r = ps.rules or {}
+        return {"classes": classes, "net_class": net_class,
+                "min_clearance": r.get("min_clearance", 0.0) or 0.0, "min_track": r.get("min_track_width", 0.0) or 0.0,
+                "min_via": r.get("min_via_diameter", 0.0) or 0.0, "edge_clearance": r.get("min_copper_edge_clearance", 0.0) or 0.0,
+                "hole_clearance": r.get("min_hole_clearance", 0.0) or 0.0}
 
     def _unrouted(self):
         """Unrouted connections from the last DRC, if it is not older than the board: [[x1, y1, x2, y2]]."""
@@ -254,19 +297,21 @@ class ProjectRuntime:
 
     async def _on_change(self, changed):
         tw = self.p.tw
-        source = "tracewright" if time.time() < self.self_until else "user"
+        now = time.time()
+        source = "tracewright" if now < self.self_until else "user"
         loop = asyncio.get_running_loop()
         if tw.pcb in changed and tw.has_pcb():
+            app_edit = source == "user" and now < self.app_edit_until      # the board view's edit, told already
             before = self._fp_state
             b = await loop.run_in_executor(None, self.board)
             after = self.footprint_state(b)
             self._fp_state = after
             diff = _placement_diff(before, after) if before is not None else []
-            if source == "user" and diff:
+            if source == "user" and not app_edit and diff:
                 self.user_changes.append("board: " + "; ".join(diff[:12]) + (" ..." if len(diff) > 12 else ""))
-            elif source == "user":
+            elif source == "user" and not app_edit:
                 self.user_changes.append("board saved (copper or other edits)")
-            self.hub.emit("board.changed", version=self.version["board"], source=source, moved=diff[:40])
+            self.hub.emit("board.changed", version=self.version["board"], source="app" if app_edit else source, moved=diff[:40])
             await loop.run_in_executor(None, self.record_frame, b, "claude" if source == "tracewright" else "you")
         sch_changed = [f for f in changed if f.endswith(".kicad_sch")]
         if sch_changed:

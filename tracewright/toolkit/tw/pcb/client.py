@@ -43,14 +43,25 @@ def apply(project, ops, save=True, live="auto", fill_after=False, stop_on_error=
             first_err = None
     else:
         first_err = None
-    rc, out, err = kicad.kpy("kpy_ops.py", input_json={"board": project.pcb, "ops": ops, "save": save,
-                                                      "fill_after": fill_after, "stop_on_error": stop_on_error},
-                             check=False)
-    res = kicad.last_json(out) or {"ok": False, "error": (err or out)[-2000:]}
+    res = _on_file(project, ops, save, fill_after, stop_on_error)
     res["via"] = "file"
     if first_err:
         res["note"] = first_err
     return res
+
+
+def _on_file(project, ops, save, fill_after, stop_on_error):
+    """The ops on the board file: through the long-running board worker (tw/pcb/worker.py), else KiCad's Python once."""
+    from . import worker
+    if worker.enabled():
+        try:
+            return worker.apply(project.pcb, ops, save=save, fill_after=fill_after, stop_on_error=stop_on_error)
+        except Exception:
+            pass                                          # the one-shot script below
+    rc, out, err = kicad.kpy("kpy_ops.py", input_json={"board": project.pcb, "ops": ops, "save": save,
+                                                      "fill_after": fill_after, "stop_on_error": stop_on_error},
+                             check=False)
+    return kicad.last_json(out) or {"ok": False, "error": (err or out)[-2000:]}
 
 
 def fp_dirs(project, lib_ids):

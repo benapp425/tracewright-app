@@ -102,6 +102,15 @@ class Footprint:
         self.sheetname = ""
         self.sheetfile = ""
         self.description = ""
+        self.jumpers = []            # pad numbers KiCad joins inside the footprint: [{"1", "2"}, ...]
+
+    def jumper_key(self, num):
+        """Pads with one key are joined inside the footprint (KiCad 9+: duplicate_pad_numbers_are_jumpers, or a
+        jumper_pad_groups group), None for a pad that is not."""
+        for i, g in enumerate(self.jumpers):
+            if num in g:
+                return f"g{i}"
+        return f"n{num}" if getattr(self, "dup_jumpers", False) else None
 
     @property
     def dnp(self):
@@ -408,7 +417,8 @@ class Board:
         cu = {n: i for i, n in enumerate(self.copper)}
         zones = []
         for z in self.zones:
-            zones.append({"net": z.net, "l": z.layers, "name": z.name, "pri": z.priority, "rule": z.is_rule_area,
+            zones.append({"id": z.uuid, "net": z.net, "l": z.layers, "name": z.name, "pri": z.priority, "rule": z.is_rule_area,
+                          "cl": round(z.clearance, 4), "mw": round(z.min_thickness, 4),
                           "ko": z.keepout or None, "o": [[[round(x, 3), round(y, 3)] for x, y in pl] for pl in z.outline],
                           "f": {l: [[[round(x, 3), round(y, 3)] for x, y in pl] for pl in pls] for l, pls in z.fills.items()},
                           "own": z.owner})
@@ -427,6 +437,8 @@ class Board:
                        for t in self.tracks],
             "vias": [[round(v.x, 4), round(v.y, 4), round(v.d, 4), round(v.drill, 4), v.net, v.kind, v.layers]
                      for v in self.vias],
+            "tid": [t.uuid for t in self.tracks],           # each track's and via's id, for the editor
+            "vid": [v.uuid for v in self.vias],
             "zones": zones,
             "shapes": [s.to_json() for s in self.shapes],
             "texts": [t.to_json() for t in self.texts if not t.hidden],
@@ -479,6 +491,10 @@ def _footprint(c, netcodes, board):
         fp.attrs = {str(a) for a in attr[1:] if not isinstance(a, list)}
     if flag(c, "dnp"):
         fp.attrs.add("dnp")
+    fp.dup_jumpers = flag(c, "duplicate_pad_numbers_are_jumpers")
+    jg = find(c, "jumper_pad_groups")
+    if jg:
+        fp.jumpers = [{str(x) for x in g} for g in jg[1:] if isinstance(g, list) and len(g) > 1]
     for key, token in (("exclude_from_bom", "exclude_from_bom"), ("exclude_from_pos_files", "exclude_from_pos_files"),
                        ("board_only", "board_only")):
         if flag(c, key):

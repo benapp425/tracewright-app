@@ -25,6 +25,22 @@ def data_dir():
     return d
 
 
+def cache_dir(*parts):
+    """Scratch the app can always make again (board edit undo copies): outside the projects, so a project folder in
+    iCloud never syncs it. macOS ~/Library/Caches/Tracewright."""
+    if os.environ.get("TRACEWRIGHT_CACHE"):
+        d = os.environ["TRACEWRIGHT_CACHE"]
+    elif sys.platform == "darwin":
+        d = os.path.expanduser("~/Library/Caches/Tracewright")
+    elif os.name == "nt":
+        d = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Tracewright", "Cache")
+    else:
+        d = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "tracewright")
+    d = os.path.join(d, *parts)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 DEFAULTS = {
     "workspace": os.path.expanduser("~/Documents/Tracewright Projects"),
     "model": "claude-opus-5-5",

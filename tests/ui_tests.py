@@ -33,7 +33,7 @@ class Server:
             json.dump({"update_check": False, "open_browser": False, "workspace": self.ws, "stock_watch": False}, f)
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}/"
-        env = dict(os.environ, TRACEWRIGHT_HOME=self.home, TW_WORKSPACE=self.ws, TW_ACCOUNTS="0", PYTHONUNBUFFERED="1")
+        env = dict(os.environ, TRACEWRIGHT_HOME=self.home, TRACEWRIGHT_CACHE=os.path.join(self.home, "cache"), TW_WORKSPACE=self.ws, TW_ACCOUNTS="0", PYTHONUNBUFFERED="1")
         env.pop("TW_LOCAL_KEY", None)
         self.log = open(os.path.join(self.tmp, "server.log"), "w")
         self.proc = subprocess.Popen([sys.executable, "-c", SERVER.format(root=ROOT, port=self.port)], env=env,

@@ -13,6 +13,7 @@ sys.path.insert(0, ROOT)
 TMP = tempfile.mkdtemp(prefix="tw-tests-")
 os.environ["TRACEWRIGHT_HOME"] = os.path.join(TMP, "home")
 os.makedirs(os.environ["TRACEWRIGHT_HOME"], exist_ok=True)
+os.environ["TRACEWRIGHT_CACHE"] = os.path.join(TMP, "cache")
 with open(os.path.join(os.environ["TRACEWRIGHT_HOME"], "settings.json"), "w") as f:
     json.dump({"workspace": os.path.join(TMP, "workspace"), "snapshot_each_turn": False, "accounts_required": False, "stock_watch": False}, f)
 
@@ -138,6 +139,127 @@ def board_ops_roundtrip_is_exact():
             return [strip(x) for x in n if not (isinstance(x, list) and x and x[0] in ("uuid", "tstamp"))] if isinstance(n, list) else str(n)
         return strip(sexp.parse(t))
     assert norm(before) == norm(open(p.pcb).read()), "board content changed after an undone edit"
+
+
+@test(needs=("kicad", "kpy"))
+def board_worker_edits_in_milliseconds_and_reloads():
+    """The board worker keeps the board loaded: edits answer with each new item's id, track_set and via_set change what
+    they name, a delete by id takes it off, and an edit made to the file from elsewhere is seen (the worker reloads)."""
+    from tw.pcb import worker, client
+    from tw.board import Board
+    p = fixture_copy("worker")
+    b0 = Board.load(p.pcb)
+    c4, r1 = b0.footprints["C4"], b0.footprints["R1"]
+    res = worker.apply(p.pcb, [{"op": "move", "ref": "C4", "x": c4.x + 1, "y": c4.y},
+                               {"op": "track", "net": "GND", "layer": "B.Cu", "a": [101, 101], "b": [103, 101], "w": 0.3},
+                               {"op": "via", "net": "GND", "x": 103, "y": 101}])
+    assert res["ok"] and res["saved"], res
+    tr = [c for c in res["changes"] if c["kind"] == "track"][0]
+    vi = [c for c in res["changes"] if c["kind"] == "via"][0]
+    assert tr["uuid"] and vi["uuid"], res["changes"]
+    t0 = time.time()
+    res = worker.apply(p.pcb, [{"op": "track_set", "uuid": tr["uuid"], "w": 0.5, "b": [104, 101]},
+                               {"op": "via_set", "uuid": vi["uuid"], "x": 104}])
+    assert res["ok"], res
+    assert time.time() - t0 < 2.0, "the worker should not start KiCad's Python again"
+    b1 = Board.load(p.pcb)
+    t = [t for t in b1.tracks if t.uuid == tr["uuid"]][0]
+    assert abs(t.w - 0.5) < 1e-6 and abs(t.b[0] - 104) < 1e-6, (t.w, t.b)
+    assert any(abs(v.x - 104) < 1e-6 and v.uuid == vi["uuid"] for v in b1.vias)
+    # an edit to the file the worker did not make: the worker picks it up before its next one
+    one = client.kicad.kpy("kpy_ops.py", input_json={"board": p.pcb, "ops": [{"op": "move", "ref": "R1", "x": r1.x + 2, "y": r1.y}],
+                                                     "save": True}, check=False)
+    assert client.kicad.last_json(one[1])["ok"], one
+    res = worker.apply(p.pcb, [{"op": "delete", "uuids": [tr["uuid"], vi["uuid"]]}])
+    assert res["ok"], res
+    b2 = Board.load(p.pcb)
+    assert abs(b2.footprints["R1"].x - (r1.x + 2)) < 1e-6, "the worker saved over an edit made elsewhere"
+    assert abs(b2.footprints["C4"].x - (c4.x + 1)) < 1e-6
+    assert not [t for t in b2.tracks if t.uuid == tr["uuid"]] and not [v for v in b2.vias if v.uuid == vi["uuid"]]
+    bad = worker.apply(p.pcb, [{"op": "track_set", "uuid": "00000000-0000-0000-0000-000000000000", "w": 1}])
+    assert not bad["ok"], bad
+
+
+@test(needs=("kicad", "kpy"))
+def ratsnest_from_the_copper_agrees_with_drc():
+    """The board view's ratsnest comes from the copper (pads, tracks, vias, filled pours): none on the routed demo, as
+    KiCad's DRC says; take a track off and the connection it made shows, one line per break, as DRC counts them."""
+    from tw import ratsnest, kicad
+    from tw.board import Board
+    from tw.pcb import worker
+    p = fixture_copy("ratsnest")
+    assert ratsnest.ratsnest(Board.load(p.pcb)) == []
+    b = Board.load(p.pcb)
+    cut = [t for t in b.tracks if t.net.split("/")[-1] not in ("GND",) and t.length() > 2][:2]
+    res = worker.apply(p.pcb, [{"op": "delete", "uuids": [t.uuid for t in cut]}])
+    assert res["ok"], res
+    b = Board.load(p.pcb)
+    links = ratsnest.ratsnest(b)
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc-rats.json"))
+    assert links and len(links) == len(d["unconnected_items"]), (len(links), len(d["unconnected_items"]))
+    nets = {l[4] for l in links}
+    assert nets == {t.net for t in cut}, (nets, {t.net for t in cut})
+
+
+@test(needs=("kicad", "kpy"))
+def board_edits_from_the_app_undo_and_redo():
+    """The board view's edits: applied (one undo step each), told to Claude in words, remembered as the user's own
+    (handmade.json); undo and redo put the board back and forth; an edit from elsewhere ends the history; refused
+    while Claude works, and for ops the board view does not make."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import boardedit
+    from tw.board import Board
+    from tw.pcb import client
+    pid = ProjectStore().import_copy(FIXTURE, "Edit demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            base = f"/api/projects/{pid}/board"
+            rt = app.rt(pid)
+            pcb = rt.p.tw.pcb
+            u = Board.load(pcb).footprints["C4"]
+            h = await (await c.get(base + "/history")).json()
+            assert h["undo"] == 0 and h["redo"] == 0, h
+            r = await c.post(base + "/edit", json={"ops": [{"op": "move", "ref": "C4", "x": u.x + 1.5, "y": u.y, "rot": 90}], "label": "Move C4"})
+            d = await r.json()
+            assert r.status == 200 and d["ok"] and d["history"]["undo"] == 1 and d["history"]["undo_label"] == "Move C4", d
+            assert abs(Board.load(pcb).footprints["C4"].x - (u.x + 1.5)) < 1e-6
+            said = " ".join(rt.user_changes)
+            assert "moved C4 to" in said and "90°" in said, said
+            assert "C4" in boardedit.handmade(rt.p)["footprints"]
+            r = await c.post(base + "/edit", json={"ops": [{"op": "track", "net": "GND", "layer": "B.Cu", "a": [101, 101], "b": [104, 101], "w": 0.3}],
+                                                   "label": "Draw a track"})
+            d = await r.json()
+            assert r.status == 200 and d["history"]["undo"] == 2, d
+            uid = [x for x in d["changes"] if x["kind"] == "track"][0]["uuid"]
+            assert uid in boardedit.handmade(rt.p)["tracks"]
+            r = await c.post(base + "/undo")
+            d = await r.json()
+            assert r.status == 200 and d["label"] == "Draw a track" and d["history"]["redo"] == 1, d
+            assert not [t for t in Board.load(pcb).tracks if t.uuid == uid]
+            d = await (await c.post(base + "/undo")).json()
+            assert d["label"] == "Move C4" and abs(Board.load(pcb).footprints["C4"].x - u.x) < 1e-6, d
+            assert (await c.post(base + "/undo")).status == 409                        # nothing more to undo
+            d = await (await c.post(base + "/redo")).json()
+            assert d["label"] == "Move C4" and abs(Board.load(pcb).footprints["C4"].x - (u.x + 1.5)) < 1e-6, d
+            assert d["history"] == {"undo": 1, "redo": 1, "undo_label": "Move C4", "redo_label": "Draw a track"}, d
+            # an edit from elsewhere (Claude, KiCad): the history ends there
+            client.kicad.kpy("kpy_ops.py", input_json={"board": pcb, "ops": [{"op": "move", "ref": "R1", "x": 120, "y": 100}], "save": True}, check=False)
+            h = await (await c.get(base + "/history")).json()
+            assert h["undo"] == 0 and h["redo"] == 0, h
+            assert (await c.post(base + "/redo")).status == 409
+            r = await c.post(base + "/edit", json={"ops": [{"op": "outline", "rect": [0, 0, 10, 10]}]})
+            assert r.status == 400 and "outline" in (await r.json())["error"]
+            r = await c.post(base + "/edit", json={"ops": [{"op": "move", "ref": "NOPE", "x": 1, "y": 1}]})
+            assert r.status == 422 and (await (await c.get(base + "/history")).json())["undo"] == 0
+            app.agent_busy = lambda _pid: True
+            r = await c.post(base + "/edit", json={"ops": [{"op": "move", "ref": "C4", "x": u.x, "y": u.y}]})
+            assert r.status == 409 and "Claude is working" in (await r.json())["error"]
+    asyncio.run(go())
 
 
 @test(needs=("kicad", "kpy"))

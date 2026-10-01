@@ -11,10 +11,13 @@ Ops (coordinates in board mm, KiCad axes: y down, angles CCW in degrees):
   {"op": "tracks", "items": [{net, layer, a, b, w}, ...]}
   {"op": "via", "net": "GND", "x": 1, "y": 2, "d": 0.6, "drill": 0.3}
   {"op": "delete", "nets": [...], "uuids": [...], "region": [x0, y0, x1, y1], "kinds": ["track", "via"], "all": false}
+  {"op": "track_set", "uuid": "...", "a": [x, y], "b": [x, y], "w": 0.3, "layer": "B.Cu", "net": "GND"}
+  {"op": "via_set", "uuid": "...", "x": 1, "y": 2, "d": 0.6, "drill": 0.3}
+  {"op": "zone_set", "uuid": "...", "polygon": [[x, y], ...], "net": "GND", "priority": 1, "layers": [...]}
   {"op": "zone", "net": "GND", "layers": ["B.Cu"], "polygon": [[x, y], ...], "name": "", "priority": 0,
                  "clearance": 0.25, "min_width": 0.25, "connect": "thermal"|"solid"|"tht", "remove_islands": true}
   {"op": "rule_area", "name": "keepout", "layers": ["F.Cu"], "polygon": [...], "no_tracks": true, "no_vias": true,
-                      "no_pour": true, "no_footprints": false}
+                      "no_pour": true, "no_footprints": false, "add": false}   (add: keep others of the same name)
   {"op": "outline", "rect": [x0, y0, x1, y1], "radius": 1.0}  |  {"op": "outline", "polygon": [[x, y], ...]}
   {"op": "text", "text": "REV A", "x": 1, "y": 2, "layer": "F.SilkS", "size": 1.0, "thickness": 0.15, "rot": 0}
   {"op": "floorplan", "rects": [{"rect": [x0, y0, x1, y1], "label": "MCU"}, ...], "layer": "Dwgs.User"}
@@ -113,7 +116,7 @@ def add_track(b, t, changes):
         tr.SetNet(n)
     b.Add(tr)
     changes.append({"kind": "track", "net": t.get("net", ""), "layer": t.get("layer", "F.Cu"), "a": t["a"], "b": t["b"],
-                    "w": t.get("w", 0.25)})
+                    "w": t.get("w", 0.25), "uuid": tr.m_Uuid.AsString()})
 
 
 def add_via(b, v, changes):
@@ -127,7 +130,7 @@ def add_via(b, v, changes):
     if n is not None:
         via.SetNet(n)
     b.Add(via)
-    changes.append({"kind": "via", "net": v.get("net", ""), "x": v["x"], "y": v["y"], "d": v.get("d", 0.6)})
+    changes.append({"kind": "via", "net": v.get("net", ""), "x": v["x"], "y": v["y"], "d": v.get("d", 0.6), "uuid": via.m_Uuid.AsString()})
 
 
 def _xy(v):
@@ -162,9 +165,10 @@ def do_delete(b, op, changes):
             victims.append(t)
     if "zone" in kinds:
         for z in list(b.Zones()):
-            if z.GetIsRuleArea():
+            named = bool(uuids) and z.m_Uuid.AsString() in uuids
+            if z.GetIsRuleArea() and not named:          # a keep-out goes only when it is named
                 continue
-            if everything or (nets and z.GetNetname() in nets) or (uuids and z.m_Uuid.AsString() in uuids):
+            if everything or (nets and z.GetNetname() in nets) or named:
                 victims.append(z)
     for v in victims:
         b.Remove(v)
@@ -208,15 +212,98 @@ def do_zone(b, op, changes):
         z.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
     _poly(z, op["polygon"])
     b.Add(z)
-    changes.append({"kind": "zone", "net": op.get("net", ""), "layers": op.get("layers")})
+    changes.append({"kind": "zone", "net": op.get("net", ""), "layers": op.get("layers"), "uuid": z.m_Uuid.AsString()})
+
+
+def _by_uuid(b, uid):
+    """A track, via or zone by its uuid, or None."""
+    for t in b.GetTracks():
+        if t.m_Uuid.AsString() == uid:
+            return t
+    for z in b.Zones():
+        if z.m_Uuid.AsString() == uid:
+            return z
+    return None
+
+
+def do_track_set(b, op, changes):
+    """{"op": "track_set", "uuid", "a"?, "b"?, "w"?, "layer"?, "net"?}: change a track segment in place."""
+    t = _by_uuid(b, op["uuid"])
+    if t is None or t.GetClass() not in ("PCB_TRACK", "PCB_ARC"):
+        raise ValueError(f"no track {op['uuid']}")
+    before = {"a": list(_xy(t.GetStart())), "b": list(_xy(t.GetEnd())), "w": TO(t.GetWidth()), "layer": b.GetLayerName(t.GetLayer())}
+    if op.get("a"):
+        t.SetStart(P(*op["a"]))
+    if op.get("b"):
+        t.SetEnd(P(*op["b"]))
+    if op.get("w"):
+        t.SetWidth(MM(float(op["w"])))
+    if op.get("layer"):
+        t.SetLayer(layer_id(b, op["layer"]))
+    if op.get("net"):
+        n = net(b, op["net"])
+        if n is not None:
+            t.SetNet(n)
+    changes.append({"kind": "track_set", "uuid": op["uuid"], "from": before})
+    return True
+
+
+def do_via_set(b, op, changes):
+    """{"op": "via_set", "uuid", "x"?, "y"?, "d"?, "drill"?}: move or resize a via."""
+    v = _by_uuid(b, op["uuid"])
+    if v is None or v.GetClass() != "PCB_VIA":
+        raise ValueError(f"no via {op['uuid']}")
+    before = {"x": TO(v.GetPosition().x), "y": TO(v.GetPosition().y), "d": TO(v.GetWidth())}
+    if "x" in op or "y" in op:
+        v.SetPosition(P(op.get("x", before["x"]), op.get("y", before["y"])))
+    if op.get("d"):
+        v.SetWidth(MM(float(op["d"])))
+    if op.get("drill"):
+        v.SetDrill(MM(float(op["drill"])))
+    changes.append({"kind": "via_set", "uuid": op["uuid"], "from": before})
+    return True
+
+
+def do_zone_set(b, op, changes):
+    """{"op": "zone_set", "uuid", "polygon"?, "net"?, "priority"?, "layers"?, "clearance"?, "min_width"?, "name"?}:
+    change a pour or rule area in place (its fill is stale until the next fill)."""
+    z = _by_uuid(b, op["uuid"])
+    if z is None or z.GetClass() != "ZONE":
+        raise ValueError(f"no zone {op['uuid']}")
+    if op.get("polygon"):
+        z.Outline().RemoveAllContours()
+        _poly(z, op["polygon"])
+        z.UnFill()
+    if op.get("net") and not z.GetIsRuleArea():
+        n = net(b, op["net"])
+        if n is not None:
+            z.SetNet(n)
+            z.UnFill()
+    if op.get("priority") is not None:
+        z.SetAssignedPriority(int(op["priority"]))
+    if op.get("layers"):
+        ls = pcbnew.LSET()
+        for l in op["layers"]:
+            ls.AddLayer(layer_id(b, l))
+        z.SetLayerSet(ls)
+        z.UnFill()
+    if op.get("clearance") is not None and not z.GetIsRuleArea():
+        z.SetLocalClearance(MM(float(op["clearance"])))
+    if op.get("min_width") is not None and not z.GetIsRuleArea():
+        z.SetMinThickness(MM(float(op["min_width"])))
+    if op.get("name") is not None:
+        z.SetZoneName(str(op["name"]))
+    changes.append({"kind": "zone_set", "uuid": op["uuid"]})
+    return True
 
 
 def do_rule_area(b, op, changes):
     name = op.get("name", "keepout")
-    old = [z for z in list(b.Zones()) if z.GetIsRuleArea() and z.GetZoneName() == name]
-    for z in old:
-        b.Remove(z)
-    GRAVE.extend(old)
+    if not op.get("add"):                        # one of the same name is replaced, not doubled
+        old = [z for z in list(b.Zones()) if z.GetIsRuleArea() and z.GetZoneName() == name]
+        for z in old:
+            b.Remove(z)
+        GRAVE.extend(old)
     z = pcbnew.ZONE(b)
     z.SetIsRuleArea(True)
     ls = pcbnew.LSET()
@@ -231,7 +318,7 @@ def do_rule_area(b, op, changes):
     z.SetDoNotAllowFootprints(bool(op.get("no_footprints", False)))
     _poly(z, op["polygon"])
     b.Add(z)
-    changes.append({"kind": "rule_area", "name": op.get("name", "keepout")})
+    changes.append({"kind": "rule_area", "name": op.get("name", "keepout"), "uuid": z.m_Uuid.AsString()})
 
 
 def do_outline(b, op, changes):
@@ -346,19 +433,11 @@ def do_fill(b, changes):
     changes.append({"kind": "fill", "zones": len(zones)})
 
 
-def main():
-    req = json.loads(sys.stdin.read())
-    path = req["board"]
-    pro = os.path.splitext(path)[0] + ".kicad_pro"
-    keep = {}
-    for f in (pro,):
-        if os.path.exists(f):
-            keep[f] = open(f, "rb").read()
-    b = pcbnew.LoadBoard(path)
-    find_fp(b, "")                                    # index the footprints now, before anything is removed
-    results, changes = [], []
+def apply_ops(b, ops, changes, stop_on_error=True):
+    """Apply ops to a loaded board; (ok, results)."""
+    results = []
     ok = True
-    for op in req.get("ops", []):
+    for op in ops:
         kind = op.get("op")
         try:
             if kind == "move":
@@ -379,6 +458,12 @@ def main():
                 r = len(op.get("items", []))
             elif kind == "delete":
                 r = do_delete(b, op, changes)
+            elif kind == "track_set":
+                r = do_track_set(b, op, changes)
+            elif kind == "via_set":
+                r = do_via_set(b, op, changes)
+            elif kind == "zone_set":
+                r = do_zone_set(b, op, changes)
             elif kind == "zone":
                 do_zone(b, op, changes)
                 r = True
@@ -431,8 +516,23 @@ def main():
         except Exception as e:
             ok = False
             results.append({"op": kind, "ok": False, "error": f"{type(e).__name__}: {e}"})
-            if req.get("stop_on_error", True):
+            if stop_on_error:
                 break
+    return ok, results
+
+
+def main():
+    req = json.loads(sys.stdin.read())
+    path = req["board"]
+    pro = os.path.splitext(path)[0] + ".kicad_pro"
+    keep = {}
+    for f in (pro,):
+        if os.path.exists(f):
+            keep[f] = open(f, "rb").read()
+    b = pcbnew.LoadBoard(path)
+    find_fp(b, "")                                    # index the footprints now, before anything is removed
+    changes = []
+    ok, results = apply_ops(b, req.get("ops", []), changes, req.get("stop_on_error", True))
     saved = False
     if req.get("save", True) and (ok or not req.get("stop_on_error", True)):
         if req.get("fill_after"):
