@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tracewright"
-version = "0.4.0"
+version = "1.0.0"
 description = "An AI pair designer for KiCad PCBs: projects, live board and schematic, design checks, and Claude working with you in KiCad"
 readme = "README.md"
 requires-python = ">=3.10"

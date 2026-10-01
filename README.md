@@ -9,7 +9,7 @@ Describe a board or open one you have. Claude designs, places, routes and checks
 live in KiCad, then sends it to the fab.</p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.4.0-eb8a50">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.0.0-eb8a50">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-12%2B-lightgrey">
   <img alt="KiCad" src="https://img.shields.io/badge/KiCad-9%20%7C%2010-314cb0">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-43c283">
@@ -24,12 +24,19 @@ live in KiCad, then sends it to the fab.</p>
 - **Start from a floorplan.** Drag the board's outline, mounting holes, connectors and main parts into place. Claude lays the board out from it.
 - **Live in KiCad.** Placement and routing appear in KiCad's PCB Editor as Claude works.
 - **You stay in control.** Claude keeps a visible plan, asks questions as cards and reads the notes you send while it works. Each turn shows what it changed and can be undone.
+- **Edit it yourself.** Move, turn and lock parts, route tracks and pairs, tune lengths, draw pours and keep-outs on the board; change a part's value or footprint and rename nets on the schematic. ⌘Z undoes each step.
+- **Flags as threads.** Flag a spot on the board or schematic with a request or a question, and draw on it: where a track should go, what to keep clear. Claude answers in the thread.
+- **Needs your OK.** Nothing interrupts a run. Afterwards, a short list shows what Claude went ahead with that you may want to see (a swapped part, a moved connector, your own work changed), to keep or undo.
+- **Up to 10 layers.** Claude plans the stack-up (signal layers and their directions, planes and their nets) and routes every signal layer.
+- **Cost before you run.** See a request's likely cost and share of your plan's limit before you send it.
+- **My parts.** Save parts you have checked, with their footprints, 3D models and notes, for every project.
 - **Talk, attach, point.** Dictate a message, drop in pictures and data sheets, or type @ to point Claude at a part, net or sheet.
 - **Run monitor.** A full-screen view of a run: the plan, the stages, the board as it grows, and how much of your Claude plan's limit is used.
 
 **Check it**
 - **56 design checks.** Schematic integrity (pinouts, packages, voltage domains), BOM, placement, routing quality, fab limits, assembly, signal integrity and power (regulators, heat, voltage drop, switchers, pours). Each says what it examined, and each is tested against a planted fault.
-- **Sign-off.** Before anything is ordered: what the checks found, the waivers you approved, and what only the built board can show.
+- **Simulation.** Claude simulates circuits with KiCad's ngspice to show a requirement holds: a filter's corner, a divider's output, a supply's start-up.
+- **Sign-off.** Before anything is ordered: the verdict, every requirement with its evidence (checks, calculations, simulations, regulator heat), the waivers you approved, and what only the built board can show.
 - **Compare versions.** See what moved and which copper changed since any checkpoint.
 - **Bring-up.** A checklist for the built board, with each reading checked against the plan, and a firmware starter: the pin map and a bring-up sketch from the schematic.
 

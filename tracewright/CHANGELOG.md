@@ -3,6 +3,35 @@
 All notable changes to Tracewright. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] - 2026-10-01
+
+Edit the board and the schematic yourself, talk to Claude on the design itself, and see what Claude changed before you keep it.
+
+### Added
+- **Board editing.** Move, turn, flip and lock parts. Route tracks that find their way round what is in the way, change layer with a via, and delete copper. Draw and reshape pours and keep-outs. Every edit is one undo step (⌘Z), and reaches KiCad live when it has the board open.
+- **Differential pairs and length tuning.** Route a pair as one, at its net class's gap. Tune a track to a length with meanders. Shove a track aside to make room.
+- **Up to 10 layers.** Claude plans the stack-up: which layers carry signals and in which direction, which are planes and for which nets, on the fab's standard build. The router routes every signal layer, and the Order tab prices 6, 8 and 10 layers.
+- **Flags as threads.** A flag is a request or a question, with drawings: a pen, an arrow, a box, text. Sketch where a track should go, or an area to keep clear. Claude answers in the thread: done (green), or why not (red). You can still say do it anyway.
+- **Needs your OK.** Nothing interrupts a run. Afterwards, a short list shows what Claude went ahead with that you may want to see: a part swapped after the parts were agreed, a connector moved after the floorplan, a change to your own work, a looser rule. Keep it, or Undo and Claude puts it back. Changes to the agreed limits are asked, and kept as agreed until you approve. Settings choose what is listed.
+- **Suggested layouts.** Suggest a layout on the floorplan, or Suggest placement in the board editor. Claude's proposal appears as ghosts with a note on each item. Take all of it, some, or none.
+- **Cost before you run.** The message box estimates a request's cost and its share of your plan's limit from your past requests of the same kind. A run close to the limit finishes its step and pauses.
+- **Second opinion.** Optional, in Settings: a separate reviewer reads each run and lists up to four concerns under it.
+- **My parts.** Save a part you have checked from its card: its symbol, footprint, 3D model, pin table and your notes. Every project can use it again, and Claude looks there first.
+- **Simulation.** Claude simulates circuits with KiCad's ngspice (a filter's corner, a divider's output, an RC delay, a supply's start-up) to show a requirement holds. The plot, the verdict and the netlist are under Docs › Simulations, and the result counts as the requirement's evidence. Edit the netlist and run it again.
+- **Regulator heat on the sign-off page.** Each linear regulator's junction temperature, worked out at the top of the operating range, appears with the temperature requirements.
+- **Schematic editing.** Change a part's value, footprint, part number, LCSC code and DNP from its card. Click a net label to rename the net; KiCad's netlist confirms nothing else changed before it is saved. ⌘Z undoes it.
+- **The design in one read.** Claude reads every part and net at once in a compact form, which uses less of your plan.
+
+### Changed
+- **Sign-off.** Rebuilt as a review: the verdict and what is left, each with its button; every requirement with its evidence; waivers as cards with plain titles and their sources; a printable packet.
+- **Floorplan.** Everything can be dragged, turned (R) and locked, keep-outs move too, and the page keeps its place while you work.
+- **Schematic text.** Measured with KiCad's own font, glyph by glyph, so what the layout places clear is clear on the plot. Every redraw also reports any text that overlaps on KiCad's plot.
+- **3D view.** Its model is cached outside the project folder, so a project in iCloud no longer uploads a new copy after every change.
+
+### Fixed
+- **Docs panel.** Sections no longer appear twice when the panel loads twice at once.
+- **Sign-off page.** Scrolls on small windows.
+
 ## [0.4.0] - 2026-09-29
 
 A simpler workspace, a floorplan to start from, and a sign-off before anything is ordered.
