@@ -992,6 +992,7 @@ def board_model_for_the_3d_view_and_dropped_files():
             first = app.rt(pid).glb()
             t0 = os.path.getmtime(first)
             assert app.rt(pid).glb() == first and os.path.getmtime(first) == t0       # cached
+            assert not first.startswith(app.rt(pid).p.root), first                     # not in the project (iCloud)
             r = await c.post(f"/api/projects/{pid}/add-files", json={"paths": [drop, "/nonexistent/x.pdf"]})
             assert (await r.json())["saved"] == ["uploads/datasheet-test.pdf"]
             root = ProjectStore().get(pid).root
@@ -3316,6 +3317,25 @@ def my_parts_library_saved_and_used_again():
             assert r.status == 200 and not library.items()
             rt.stop()
     asyncio.run(go())
+
+
+@test(needs=("kicad",))
+def the_design_in_one_compact_read():
+    """Claude's design tool (./tw design): every part with its value, part number, footprint, sheet and board place,
+    every net with its kind and pins, one line each -- the whole demo in a few thousand characters; one part's pins
+    with their names and nets; one net's pins."""
+    from tw import design
+    p = fixture_copy("design-model")
+    t = design.text(p)
+    lines = t.splitlines()
+    assert lines[0].startswith("PARTS 21") and len(t) < 4000, (lines[0], len(t))
+    assert any(l.startswith("U1 AMS1117-3.3  AMS1117-3.3 C6186  SOT-223-3_TabPin2  /Power/  (119.50, 117.50) F") for l in lines), t
+    assert any(l.startswith("+3V3  power 3.3 V: ") for l in lines) and any(l.startswith("USB_D_P  pair USB with USB_D_N") for l in lines), t
+    u2 = design.text(p, ref="U2")
+    assert "VCC" in u2 and "+3V3  power 3.3 V" in u2 and "not connected" in u2, u2
+    n = design.text(p, net="I2C_SDA")
+    assert n.startswith("I2C_SDA  signal  3 pins") and "U2.5" in n, n
+    assert design.text(p, ref="NOPE") == "no NOPE in the schematic"
 
 
 @test(needs=("kicad",))

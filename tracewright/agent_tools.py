@@ -103,6 +103,18 @@ def tool_list(rt, app):
         return _text(_json(out))
 
     # ------------------------------------------------------------------ board queries
+    @reg("design", "The design in one read, compact: every part (value, part number and LCSC code, footprint, sheet, "
+         "where it is on the board, not fitted) and every net (its kind -- a supply's voltage and current, a pair's partner "
+         "-- and its pins). Read it first instead of querying part by part. ref: one part with every pin's name and net; "
+         "net: one net with every pin.",
+         {"type": "object", "properties": {"ref": {"type": "string"}, "net": {"type": "string"}}})
+    async def design_q(args):
+        from tw import design
+        tw = proj()
+        if not tw.has_sch():
+            return _text("There is no schematic yet.", error=True)
+        return _text(await run(design.text, tw, args.get("ref") or None, args.get("net") or None))
+
     @reg("board", "Query the board. what: summary | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
          "ref: pads with nets and positions) | nets (net -> pads) | net (one net: pads, tracks, vias, length) | "
          "outline | unrouted (from the last DRC) | zones. Coordinates in mm (KiCad axes, y down). When KiCad has the "

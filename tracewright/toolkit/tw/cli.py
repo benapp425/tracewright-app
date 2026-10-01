@@ -296,6 +296,13 @@ def cmd_floorplan(a):
     return 0
 
 
+def cmd_design(a):
+    """The design in one read: every part and net, compact (tw/design.py)."""
+    from tw import design
+    print(design.text(env.project(), ref=a.ref, net=a.net))
+    return 0
+
+
 def cmd_sim(a):
     """Run a SPICE netlist with KiCad's ngspice and print each probe's summary. A run kept in docs/sim (by Claude's
     simulate tool) is run again in place, with its probes and pass criterion unless others are given."""
@@ -494,6 +501,10 @@ def main(argv=None):
     fpp = sub.add_parser("floorplan", help="the guided start's floorplan: show (board coordinates) | apply (outline, areas, connectors, holes)")
     fpp.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
     fpp.add_argument("--outline", action="store_true", help="replace the board's outline with the floorplan's")
+    dg = sub.add_parser("design", help="the design in one read: every part (value, part number, footprint, sheet, board "
+                                       "position) and net (kind, pins); --ref U2 or --net +3V3 for one")
+    dg.add_argument("--ref")
+    dg.add_argument("--net")
     sm = sub.add_parser("sim", help="run a SPICE netlist with KiCad's ngspice: sim file.cir [v(out) i(v1) ...]")
     sm.add_argument("netlist")
     sm.add_argument("probes", nargs="*")

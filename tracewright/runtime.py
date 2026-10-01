@@ -209,14 +209,20 @@ class ProjectRuntime:
     def glb(self, components=True):
         """The board as a 3D model for the 3D view (KiCad's GLB export, its primitives merged per mesh and
         material so the browser draws a few hundred instead of tens of thousands), kept until the board
-        changes."""
+        changes -- in the app's cache folder, not the project's: a project in iCloud would upload every one."""
         from tw import glbopt
+        from . import config
         pcb = self.board_path()
         if not pcb:
             return None
         kind = "parts" if components else "bare"
         key = f"{int(os.path.getmtime(pcb) * 1000)}-{os.path.getsize(pcb)}"
-        d = self.p.state_dir("cache")
+        d = config.cache_dir("glb", str(self.p.id))
+        for old in glob.glob(os.path.join(self.p.root, ".tracewright", "cache", "board-*.glb*")):     # where 0.x kept them
+            try:
+                os.remove(old)
+            except OSError:
+                pass
         out = os.path.join(d, f"board-{kind}-m1-{key}.glb")
         with self._glb_lock:
             if os.path.exists(out) and os.path.getsize(out) > 0:

@@ -27,7 +27,7 @@ function kindOf(name) {
 const fileUrl = (pid, path) => `/api/projects/${encodeURIComponent(pid)}/file?path=${encodeURIComponent(path)}&raw=1`;
 const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
 
-export const ICON = { status: "info", board: "circuit-board", show: "target", annotate: "map-pin", place: "move", route: "route", copper: "layers",
+export const ICON = { status: "info", design: "list", board: "circuit-board", show: "target", annotate: "map-pin", place: "move", route: "route", copper: "layers",
   sync_board: "refresh-cw", silk: "pencil", run_checks: "list-checks", render: "image", parts: "microchip", stage: "list-todo", lessons: "book-open",
   snapshot: "bookmark", kicad: "plug", outputs: "package", review: "flag", agenda: "list-todo", stackup: "layers", simulate: "activity",
   evidence: "badge-check", waive: "shield-check", library: "bookmark", nets: "waypoints", canvas: "layout-grid",
@@ -85,6 +85,7 @@ export function stepText(name, inp) {
       parts: "Updated the parts list" }[inp.section] || "Updated the canvas"];
     case "ready_to_start": return ["Ready to start"];
     case "outputs": return ["Generated fab outputs"];
+    case "design": return [inp.ref ? `Read ${inp.ref}'s pins` : inp.net ? `Read the net ${inp.net}` : "Read the design"];
     case "stackup": return [{ plan: `Planned the stack-up${inp.layers ? `: ${inp.layers} layers` : ""}`, apply: "Put the stack-up on the board" }[inp.action] || "Looked at the stack-up", inp.action === "plan" ? inp.why : ""];
     case "simulate": return [`Simulated ${inp.label || inp.name || "a circuit"}`, arr(inp.probes).join(", ")];
     case "evidence": return [inp.action === "add" ? `Recorded evidence for ${inp.requirement || "a requirement"}` : inp.action === "remove" ? "Removed evidence" : "Read the requirements' evidence", inp.action === "add" ? inp.label : ""];
