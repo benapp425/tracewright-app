@@ -13,7 +13,12 @@ description: Verify the finished design and produce the fab release - full check
    bullets of docs/requirements.md, the limits) and what it has. For each one without evidence, record what shows
    it is met -- a check that covers it, a calculation with its numbers, a data sheet page, a simulation -- or, when
    only the built board can show it, kind hardware with the bring-up step (status open). The limits get theirs
-   from the req.limits check by themselves.
+   from the req.limits check by themselves; the temperature requirements get each linear regulator's junction
+   temperature from power.thermal (declare the load currents in checks.currents so it can work them out).
+   A simulation: `simulate` with the circuit as a SPICE netlist (the real values; a part's data sheet model or
+   a simple equivalent you name), the probes, a pass criterion (`check`: {probe, at, min, max} or {probe,
+   corner: {min, max}} for a -3 dB point) and the requirement with a label. A FAIL is a finding: fix the
+   circuit, then run it again (`./tw sim docs/sim/<name>.cir` re-runs one in place).
 2. `./tw selftest` passes (the checks can still catch their planted faults).
 3. `docs/review.md`: verified from the files / needs the built board / open issues. `docs/bring-up.md`: the test
    order for the first board, as `## ` sections of `- [ ]` steps, each naming the value to expect where

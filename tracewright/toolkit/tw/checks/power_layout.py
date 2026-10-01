@@ -2,7 +2,7 @@
 capacity along the current paths, switching converters laid out around their hot loop, and pours that
 are connected and stitched."""
 import math, re, collections
-from . import check, Finding, NotApplicable, examined, plural
+from . import check, Finding, NotApplicable, examined, measured, plural
 from .. import geom
 from .power import (ipc2221_width, _currents, _current_for, copper_thickness, _cap_between, rail_voltages,
                     _pads_for, _terminals, _source)
@@ -152,6 +152,19 @@ def theta_ja(ctx, ref, fp_lib):
     return None, None
 
 
+def ambient(ctx):
+    """(the air temperature round the board in C, whether it came from the operating range): checks.ambient_c when
+    set, else the top of the operating temperature limit, else 25 C."""
+    set_ = ctx.setting("checks.ambient_c", None)
+    if set_ is not None:
+        return float(set_), False
+    from .. import constraints
+    rng = constraints.get(ctx.cfg).get("temp_c")
+    if isinstance(rng, (list, tuple)) and len(rng) == 2 and rng[1] is not None:
+        return float(rng[1]), True
+    return 25.0, False
+
+
 def _rail_current(ctx, net):
     amps = _current_for(net, _currents(ctx))
     if amps is not None:
@@ -174,10 +187,10 @@ def power_thermal(ctx):
     if not lin:
         raise NotApplicable("no linear regulators")
     volts = rail_voltages(ctx)
-    ta = float(ctx.setting("checks.ambient_c", 25.0))
+    ta, hot = ambient(ctx)
     tj_max = float(ctx.setting("checks.tj_max_c", 125.0))
     board = ctx.board if ctx.available("pcb") else None
-    out, unverified = [], []
+    out, unverified, nums = [], [], []
     for r in lin:
         ref = r["ref"]
         vin = max((volts.get(n) for _, n in r["ins"] if volts.get(n) is not None), default=None)
@@ -197,17 +210,20 @@ def power_thermal(ctx):
             continue
         p = max(0.0, vin - vout) * amps
         tj = ta + p * th
-        if tj > tj_max:
-            sev = "error"
-        elif tj > tj_max - 25:
-            sev = "warning"
-        else:
+        sev = "error" if tj > tj_max else "warning" if tj > tj_max - 25 else None
+        nums.append({"ref": ref, "vin": vin, "vout": vout, "amps": amps, "watts": round(p, 3), "tj": round(tj, 1),
+                     "tj_max": tj_max, "ambient": ta, "hot": hot, "package": pkg, "theta": th,
+                     "status": "fail" if sev == "error" else "warn" if sev else "ok"})
+        if sev is None:
             continue
         out.append(Finding("power.thermal", sev,
                            f"{ref} drops {vin:g} V to {vout:g} V at {amps:g} A: {p:.2f} W, about {tj:.0f} C at the junction "
-                           f"({pkg}, {th:g} C/W, {ta:g} C ambient)", {"ref": ref, "net": net},
+                           f"({pkg}, {th:g} C/W, {ta:g} C {'at the hottest it must work' if hot else 'ambient'})", {"ref": ref, "net": net},
                            hint="Use a switching regulator, a bigger package on more copper (thermal vias under the tab), "
                                 "or drop part of the voltage elsewhere.", key=f"thermal:{ref}"))
+    for u in unverified:
+        nums.append({"ref": u.split(" ", 1)[0], "status": "open", "why": u.split(" ", 1)[1].strip("()") if " " in u else ""})
+    measured(ctx, nums)
     if unverified:
         out.append(Finding("power.thermal", "info", f"temperature not verified for {', '.join(unverified[:6])}"
                            f"{' ...' if len(unverified) > 6 else ''}", key="thermal:unverified",

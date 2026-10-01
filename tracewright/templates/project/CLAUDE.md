@@ -21,6 +21,9 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
   requirements written, the checks run on the design as it is now with no errors, nothing unrouted, the
   user's sign-off for the release -- and says what is missing otherwise. Waive findings with the `waive`
   tool (with a plain title), never by editing tracewright.json; record what shows each requirement is met with
-  the `evidence` tool as you verify.
+  the `evidence` tool as you verify. Where a circuit's behaviour is the requirement (a filter's corner, a
+  divider or sense amplifier's output, an RC delay, an LED's current, a supply's start-up), show it with the
+  `simulate` tool (KiCad's ngspice): it keeps the netlist and plot in docs/sim and records the result as the
+  requirement's evidence. The regulators' heat (power.thermal) goes with the temperature requirements by itself.
 - The copper layers (2 to 10) are a plan you make with the `stackup` tool -- signal layers and their routing
   directions, planes and their nets, the fab's build -- before the board is made; the router follows it.

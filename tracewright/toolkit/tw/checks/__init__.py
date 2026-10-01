@@ -74,6 +74,17 @@ def examined(ctx, what):
     return what
 
 
+def measured(ctx, items):
+    """Record the numbers the running check worked out, one dict per item ({ref, ..., status}); kept with its result
+    so the sign-off page can show them as evidence (a regulator's junction temperature, a path's drop)."""
+    cid = getattr(_current, "id", None)
+    if cid and items:
+        if not isinstance(getattr(ctx, "measures", None), dict):
+            ctx.measures = {}
+        ctx.measures[cid] = list(items)
+    return items
+
+
 def plural(n, noun, many=None):
     """'1 net', '3 nets', '2 buses' (many= for irregular plurals)."""
     return f"{n} {noun if n == 1 else (many or noun + 's')}"
@@ -167,6 +178,8 @@ def run(ctx, checks, progress=None):
     t_all = time.time()
     if not isinstance(getattr(ctx, "scopes", None), dict):
         ctx.scopes = {}
+    if not isinstance(getattr(ctx, "measures", None), dict):
+        ctx.measures = {}
     base = float(ctx.setting("checks.timeout_s", 0) or 0)
     for c in checks:
         t0 = time.time()
@@ -187,11 +200,15 @@ def run(ctx, checks, progress=None):
             progress(c, {**row, "status": "running", "findings": []})
         limit = max(base, c.timeout or DEFAULT_TIMEOUT)
         ctx.scopes.pop(c.id, None)
+        ctx.measures.pop(c.id, None)
         found, err = _call(c, ctx, limit)
         secs = round(time.time() - t0, 2)
         scope = ctx.scopes.pop(c.id, None)
         if scope:
             row["scope"] = scope
+        nums = ctx.measures.pop(c.id, None)
+        if nums and err is None:
+            row["measured"] = nums
         if isinstance(err, NotApplicable):
             results.append({**row, "status": "skipped", "reason": str(err) or "not applicable", "findings": [],
                             "seconds": secs, "na": True})

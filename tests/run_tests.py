@@ -3317,6 +3317,95 @@ def my_parts_library_saved_and_used_again():
     asyncio.run(go())
 
 
+@test(needs=("kicad",))
+def simulation_and_regulator_heat_as_evidence():
+    """Simulation with KiCad's own ngspice, each run in a process of its own: an operating point (a divider), a
+    transient (an RC at one time constant: 63 %), an AC sweep (its -3 dB point at 1/(2 pi RC)); a broken netlist is
+    reported, not a crash. Claude's simulate tool keeps the netlist, waveforms, plot and result in docs/sim, judges
+    its pass criterion and records it as the requirement's evidence; run again (the app, ./tw sim) after the netlist
+    changes, the evidence follows; removed, it goes. The regulators' heat (power.thermal, worked out at the top of the
+    operating range) is evidence for the temperature requirements."""
+    import math
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools, signoff
+    from tw import sim, cli as twcli
+    from tw.checks import runner
+    assert sim.library(), "no libngspice in KiCad"
+    r = sim.run("divider\nV1 in 0 DC 10\nR1 in mid 10k\nR2 mid 0 10k\n.op\n.end\n", ["v(mid)", "i(v1)"])
+    assert r["ok"] and abs(sim.summary(r, "v(mid)")["final"] - 5.0) < 1e-6, r
+    assert abs(sim.summary(r, "i(v1)")["final"] + 0.5e-3) < 1e-9, sim.summary(r, "i(v1)")
+    r = sim.run("rc\nV1 in 0 PULSE(0 10 0 1n 1n 1 2)\nR1 in out 1k\nC1 out 0 1u\n.tran 10u 5m\n.end\n", ["v(out)"])
+    assert r["ok"] and r["scale"] == "time" and abs(sim.at(r, "v(out)", 1e-3) - 6.321) < 0.06, sim.at(r, "v(out)", 1e-3)
+    lowpass = "lowpass\nV1 in 0 AC 1\nR1 in out 1k\nC1 out 0 {c}\n.ac dec 50 10 1meg\n.end\n"
+    r = sim.run(lowpass.format(c="100n"), ["v(out)"])
+    fc = 1 / (2 * math.pi * 1e3 * 100e-9)
+    assert r["ok"] and r["scale"] == "frequency" and abs(sim.corner(r, "v(out)") - fc) / fc < 0.01, sim.corner(r, "v(out)")
+    bad = sim.run("broken\nR1 a\nX9 q w nosuchmodel\n.op\n.end\n", ["v(a)"])
+    assert not bad["ok"] and bad.get("error"), bad
+    pid = ProjectStore().import_copy(FIXTURE, "Sim demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            p = rt.p
+            p.cfg["constraints"] = {"temp_c": [-20, 70]}
+            p.cfg.setdefault("checks", {})["currents"] = {"+3V3": 0.2}
+            p.save()
+            with open(os.path.join(p.root, "docs", "requirements.md"), "w") as f:
+                f.write("# Requirements\n\n- Battery sense filter: corner between 1 kHz and 2 kHz\n- Survives a hot car\n- USB-C power\n")
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            ask = {"netlist": lowpass.format(c="100n"), "probes": ["v(out)"], "name": "sense filter",
+                   "check": {"probe": "v(out)", "corner": {"min": 1000, "max": 2000}}, "requirement": "r1", "label": "Battery sense RC filter"}
+            out = await T["simulate"]({**ask, "requirement": "r9"})
+            assert out.get("is_error") and "no requirement r9" in out["content"][0]["text"], out
+            out = await T["simulate"](ask)
+            txt = out["content"][0]["text"]
+            assert not out.get("is_error") and "PASS: v(out) -3 dB at 15" in txt and "recorded for r1" in txt, txt
+            d = os.path.join(p.root, "docs", "sim")
+            assert all(os.path.exists(os.path.join(d, "sense-filter." + e)) for e in ("cir", "csv", "svg", "json")), os.listdir(d)
+            assert open(os.path.join(d, "sense-filter.csv")).readline().strip() == "frequency,v(out)"
+            ev = lambda rid: next(r_ for r_ in signoff.status(p)["requirements"] if r_["id"] == rid)["evidence"]
+            e = [x for x in ev("r1") if x["kind"] == "sim"]
+            assert len(e) == 1 and e[0]["status"] == "ok" and e[0]["label"].startswith("Battery sense RC filter (PASS") and e[0]["ref"] == "docs/sim/sense-filter.cir", e
+            items = (await (await c.get(f"/api/projects/{pid}/sims")).json())["items"]
+            assert [x["name"] for x in items] == ["sense-filter"] and items[0]["status"] == "ok" and items[0]["files"]["svg"] == "sense-filter.svg", items
+            # the netlist changes (a bigger capacitor: the corner falls to 340 Hz): run again, the evidence follows
+            with open(os.path.join(d, "sense-filter.cir"), "w") as f:
+                f.write(lowpass.format(c="470n"))
+            info = await (await c.post(f"/api/projects/{pid}/sims/sense-filter", json={"action": "run"})).json()
+            assert info["status"] == "fail" and info["check"].startswith("FAIL: v(out) -3 dB at 33"), info
+            e = [x for x in ev("r1") if x["kind"] == "sim"]
+            assert e[0]["status"] == "fail" and "(FAIL: v(out) -3 dB at 33" in e[0]["label"] and e[0]["label"].count("(PASS") == 0, e
+            cwd = os.getcwd()
+            os.chdir(p.root)
+            try:
+                assert twcli.main(["sim", "docs/sim/sense-filter.cir"]) == 1             # still failing, in place
+                with open(os.path.join(d, "sense-filter.cir"), "w") as f:
+                    f.write(lowpass.format(c="100n"))
+                assert twcli.main(["sim", "docs/sim/sense-filter.cir"]) == 0
+            finally:
+                os.chdir(cwd)
+            assert json.load(open(os.path.join(d, "sense-filter.json")))["status"] == "ok"
+            assert (await c.post(f"/api/projects/{pid}/sims/nope", json={"action": "run"})).status == 404
+            r_ = await (await c.post(f"/api/projects/{pid}/sims/sense-filter", json={"action": "delete"})).json()
+            assert r_["evidence"] == 1 and not os.listdir(d) and not [x for x in ev("r1") if x["kind"] == "sim"], (r_, os.listdir(d))
+            # the regulator's heat, at the top of the operating range, for the temperature requirements
+            res = runner.run_all(p.tw, only=["power.thermal"], offline=True, write=True)
+            th = next(x for x in res["checks"] if x["id"] == "power.thermal")
+            m = th["measured"][0]
+            assert m["ref"] == "U1" and m["ambient"] == 70 and m["hot"] and abs(m["watts"] - 0.34) < 0.01 and m["status"] == "ok", th
+            heat = [x for x in ev("lim:temp_c") if x["ref"] == "power.thermal"]
+            assert len(heat) == 1 and heat[0]["kind"] == "calc" and "U1 drops 5 V to 3.3 V at 0.2 A: 0.34 W, about 90 °C" in heat[0]["label"] \
+                and "70 °C air, the top of the operating range" in heat[0]["label"], heat
+            assert [x for x in ev("r2") if x["ref"] == "power.thermal"] and not [x for x in ev("r3") if x["ref"] == "power.thermal"]
+            rt.stop()
+    asyncio.run(go())
+
+
 @test()
 def floorplan_turns_locks_and_keepouts():
     """The floorplan's quarter turns, locks and keep-outs: a turned block's area turns (and a one-part block's part

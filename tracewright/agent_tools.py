@@ -753,6 +753,43 @@ def tool_list(rt, app):
         hub.emit("signoff")
         return _text(f"recorded for {req}: {e['kind']} [{e['status']}] {e['label']}")
 
+    @reg("simulate", "Simulate a circuit with KiCad's ngspice to show a requirement holds: a filter's corner, a divider's "
+         "or a sense amplifier's output, an RC delay, an LED's current, a regulator's start-up into its load. netlist: a "
+         "SPICE netlist with its analysis (.op, .tran, .ac, .dc); probes: vectors to read (v(out), i(v1)); name: short, for "
+         "docs/sim/<name>.cir/.json/.svg (kept, re-run with ./tw sim); check: {probe, at?: a time / frequency / sweep "
+         "value, min?, max?, corner?: {min?, max?} for an AC probe's -3 dB point} -- the pass criterion; requirement and "
+         "label: record the result as that requirement's evidence (kind sim). Use real part values and, for parts, "
+         "their data sheet's model or a simple equivalent you say you used.",
+         {"type": "object", "properties": {"netlist": {"type": "string"}, "probes": {"type": "array", "items": {"type": "string"}},
+                                           "name": {"type": "string"}, "check": {"type": "object"}, "requirement": {"type": "string"},
+                                           "label": {"type": "string"}}, "required": ["netlist", "probes", "name"]})
+    async def simulate_t(args):
+        from tw import sim
+        from . import signoff
+        import re as _re
+        name = _re.sub(r"[^A-Za-z0-9_-]+", "-", args.get("name") or "sim").strip("-")[:40] or "sim"
+        probes = [str(x) for x in args.get("probes") or []][:8]
+        req = (args.get("requirement") or "").strip()
+        proj()                                            # the config as it is on disk now
+        if req:
+            st = await run(signoff.status, p)
+            if not any(r["id"] == req or r["text"].lower() == req.lower() or r["text"].lower().startswith(req.lower()) for r in st["requirements"]):
+                return _text(f"no requirement {req}; evidence action list shows them", error=True)
+        label = (args.get("label") or "").strip()
+        info = await run(sim.simulate, os.path.join(p.root, "docs", "sim"), name, args["netlist"], probes, label or name,
+                         args.get("check") or None, req)
+        hub.emit("sims")
+        if info.get("error"):
+            return _text("the simulation failed: " + info["error"] + "\n" + "\n".join(info.get("log") or []), error=True)
+        lines = list(info["lines"])
+        if req and label:
+            await run(signoff.add_evidence, p, req, "sim", label + (f" ({info['check']})" if info.get("check") else ""),
+                      f"docs/sim/{name}.cir", info["status"])
+            hub.emit("signoff")
+            lines.append(f"recorded for {req} (docs/sim/{name}.cir)")
+        return _text("\n".join(lines) + f"\nsaved docs/sim/{name}.cir (the netlist), .csv (the waveforms)"
+                     + (", .svg (the plot)" if info.get("scale") else "") + "; the user sees it under Docs > Simulations")
+
     @reg("library", "My parts: parts the user saved from earlier projects because they were checked and right -- symbol, "
          "footprint, 3D model, pin table, the JLC pad map, the user's notes. Look here first when choosing a part. "
          "action: search (q: words of its part number, value, maker or package) | use (id: copies it into this project's own "

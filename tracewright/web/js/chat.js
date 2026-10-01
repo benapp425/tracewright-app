@@ -29,7 +29,8 @@ const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").r
 
 export const ICON = { status: "info", board: "circuit-board", show: "target", annotate: "map-pin", place: "move", route: "route", copper: "layers",
   sync_board: "refresh-cw", silk: "pencil", run_checks: "list-checks", render: "image", parts: "microchip", stage: "list-todo", lessons: "book-open",
-  snapshot: "bookmark", kicad: "plug", outputs: "package", review: "flag", agenda: "list-todo",
+  snapshot: "bookmark", kicad: "plug", outputs: "package", review: "flag", agenda: "list-todo", stackup: "layers", simulate: "activity",
+  evidence: "badge-check", waive: "shield-check", library: "bookmark", nets: "waypoints", canvas: "layout-grid",
   Bash: "terminal", Read: "file-text", Grep: "search", Glob: "search", Edit: "pencil", Write: "pencil", MultiEdit: "pencil", NotebookEdit: "pencil",
   WebFetch: "external-link", WebSearch: "search", TodoWrite: "list-todo", Skill: "sparkles", Task: "bot", Agent: "bot", TaskOutput: "terminal", TaskStop: "circle-stop" };
 const LIVE_STEPS = 3;                              // a burst of work in progress shows its latest steps
@@ -84,6 +85,12 @@ export function stepText(name, inp) {
       parts: "Updated the parts list" }[inp.section] || "Updated the canvas"];
     case "ready_to_start": return ["Ready to start"];
     case "outputs": return ["Generated fab outputs"];
+    case "stackup": return [{ plan: `Planned the stack-up${inp.layers ? `: ${inp.layers} layers` : ""}`, apply: "Put the stack-up on the board" }[inp.action] || "Looked at the stack-up", inp.action === "plan" ? inp.why : ""];
+    case "simulate": return [`Simulated ${inp.label || inp.name || "a circuit"}`, arr(inp.probes).join(", ")];
+    case "evidence": return [inp.action === "add" ? `Recorded evidence for ${inp.requirement || "a requirement"}` : inp.action === "remove" ? "Removed evidence" : "Read the requirements' evidence", inp.action === "add" ? inp.label : ""];
+    case "waive": return [inp.action === "propose" ? `Proposed a waiver: ${inp.title || inp.key || ""}` : inp.action === "withdraw" ? "Withdrew a waiver" : "Read the waivers"];
+    case "library": return [inp.action === "use" ? `Used ${inp.id || "a part"} from your parts` : `Looked in your parts${inp.q ? ": " + inp.q : ""}`];
+    case "nets": return [inp.action === "declare" ? `Declared ${cut ? "nets" : plural(arr(inp.items).length, "net")}` : inp.action === "classes" ? (inp.apply ? "Wrote the net classes" : "Previewed the net classes") : `Read the nets${inp.net ? ": " + inp.net : inp.kind ? " (" + inp.kind + ")" : ""}`];
     case "review": return [inp.action === "resolve" ? `Resolved review flag ${inp.id || ""}` : inp.action === "add" ? "Added a review flag" : "Read review flags"];
     case "Bash": { const d = inp.description || fromCut(inp, "description"), raw = inp.command || fromCut(inp, "command"), c = shortCmd(raw);
       return d ? [d, c] : cmdLabel(raw) ? [cmdLabel(raw), c] : [c || "Ran a command"]; }

@@ -10,7 +10,7 @@ source, approved, approved_at}; Claude writes them with its `waive` tool, the us
 Requirements (the guided start's list, else the bullets of docs/requirements.md, and the limits the user set) are
 shown with their evidence (tracewright.json "evidence": {req, kind: check | calc | datasheet | sim | hardware,
 label, ref, status: ok | warn | fail | open, by, at}, written by Claude's `evidence` tool; each limit's evidence comes
-from the req.limits check itself)."""
+from the req.limits check itself; the regulators' heat from power.thermal goes with the temperature requirements)."""
 import datetime, hashlib, json, os, re, time
 
 from . import gates
@@ -243,7 +243,38 @@ def requirements(project, res=None, fresh=False):
             else:
                 r["evidence"].append({"kind": "check", "label": "The limits check found it met" + ("" if fresh else " (before the last change)"),
                                       "ref": "req.limits", "status": "ok" if fresh else "warn", "by": "check"})
+    # the regulators' heat (power.thermal's numbers), for the temperature requirements
+    heat = heat_evidence(res, fresh)
+    if heat:
+        for r in reqs:
+            if (r["kind"] == "limit" and r.get("limit") == "temp_c") or (r["kind"] == "brief" and _HOT.search(f"{r['text']} {r['value']}")):
+                r["evidence"] += heat
     return reqs
+
+
+_HOT = re.compile(r"temperat|°\s?C\b|\bdeg(?:rees)?\s?C\b|\bambient|\bhot\b|\boverheat|\bthermal (?:limit|budget|design|rise)|\bruns? (?:cool|warm)", re.I)
+
+
+def heat_evidence(res, fresh=True):
+    """One line per linear regulator from the power.thermal check: what it burns and how hot its junction runs."""
+    chk = next((c for c in (res or {}).get("checks", []) if c.get("id") == "power.thermal"), None)
+    if not chk or chk.get("status") not in ("pass", "warn", "fail"):
+        return []
+    out = []
+    for m in chk.get("measured") or []:
+        if m.get("status") == "open":
+            out.append({"kind": "calc", "label": f"{m['ref']}'s temperature not worked out: {m.get('why') or 'no numbers'}",
+                        "ref": "power.thermal", "status": "open", "by": "check"})
+            continue
+        air = f"{m['ambient']:g} °C air" + (", the top of the operating range" if m.get("hot") else "")
+        label = (f"{m['ref']} drops {m['vin']:g} V to {m['vout']:g} V at {m['amps']:g} A: {m['watts']:.2f} W, about "
+                 f"{m['tj']:.0f} °C at the junction of {m['tj_max']:g} °C allowed ({m['package']}, {m['theta']:g} °C/W, {air})")
+        st = m.get("status") or "ok"
+        if not fresh:
+            label += " (before the last change)"
+            st = "warn" if st == "ok" else st
+        out.append({"kind": "calc", "label": label, "ref": "power.thermal", "status": st, "by": "check"})
+    return out
 
 
 def add_evidence(project, req, kind, label, ref="", status="ok", by="claude"):
@@ -264,6 +295,31 @@ def remove_evidence(project, req, label=None):
     project.cfg["evidence"] = kept
     project.save()
     return len(items) - len(kept)
+
+
+def follow_sim(project, ref, status=None, verdict=None, remove=False):
+    """Bring the evidence that cites a kept simulation (ref docs/sim/<name>.cir) up to date after it ran again (its
+    status, and the PASS / FAIL in its label), or remove it with the simulation. Returns how many entries changed."""
+    items = project.cfg.get("evidence") or []
+    n, kept = 0, []
+    for e in items:
+        if not (isinstance(e, dict) and e.get("ref") == ref):
+            kept.append(e)
+            continue
+        n += 1
+        if remove:
+            continue
+        if status:
+            e["status"] = status if status in ("ok", "warn", "fail", "open") else "fail"
+        if verdict:
+            base = re.sub(r"\s*\((?:PASS|FAIL): .*\)$", "", e.get("label") or "")
+            e["label"] = f"{base} ({verdict})"[:240]
+        e["at"] = now()
+        kept.append(e)
+    if n:
+        project.cfg["evidence"] = kept
+        project.save()
+    return n
 
 
 def bringup_steps(project):

@@ -2287,3 +2287,31 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .alt .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
 .alt .lib { margin-left: 8px; }
 .alt-n { text-align: right; min-width: 70px; font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- simulations (Docs > Simulations, sims.js) */
+.fview > .sim-head, .fview > .sim-verdict, .fview > .sim-plot, .fview > .sim-tab, .fview > .sim-sec, .fview > .sim-log { margin-left: 26px; margin-right: 26px; }
+.sim-head { display: flex; align-items: center; gap: 8px; padding: 20px 0 12px; flex-wrap: wrap; row-gap: 10px; }
+.sim-head > .grow { min-width: 240px; }
+.sim-title { display: flex; align-items: center; gap: 8px; font-size: 15px; } .sim-title svg.ic { color: var(--accent); }
+.sim-sub { display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 12px; color: var(--text-3); flex-wrap: wrap; }
+.sim-sub > span { display: inline-flex; align-items: center; gap: 4px; }
+.sim-tag { font-weight: 600; } .sim-tag.ok { color: var(--ok); } .sim-tag.fail { color: var(--err); } .sim-tag.none { color: var(--text-2); }
+.sim-verdict { display: flex; align-items: flex-start; gap: 8px; padding: 9px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 14px;
+  border: 1px solid var(--line); background: var(--surface); }
+.sim-verdict svg.ic { flex: none; margin-top: 2px; }
+.sim-verdict.ok { background: var(--ok-soft); border-color: transparent; } .sim-verdict.ok svg.ic { color: var(--ok); }
+.sim-verdict.fail { background: var(--err-soft); border-color: transparent; } .sim-verdict.fail svg.ic { color: var(--err); }
+.sim-plot { display: block; width: calc(100% - 52px); max-width: 760px; border-radius: 8px; border: 1px solid var(--line); cursor: zoom-in; background: #fff; }
+.sim-tab { border-collapse: collapse; font-size: 12.5px; margin-top: 16px; min-width: 360px; }
+.sim-tab th { text-align: left; font-weight: 500; color: var(--text-3); font-size: 11.5px; padding: 4px 14px 6px 0; border-bottom: 1px solid var(--line); }
+.sim-tab td { padding: 5px 14px 5px 0; border-bottom: 1px solid var(--line); }
+.sim-tab td.mono { font-family: var(--mono); font-size: 12px; }
+.sim-sec { margin-top: 18px; margin-bottom: 26px; } .sim-sec .label { margin-bottom: 6px; }
+.sim-net, .sim-log { max-height: 340px; overflow: auto; }
+.fitem .sz.sim-dot { display: inline-flex; } .fitem .sim-dot.ok svg.ic { color: var(--ok); } .fitem .sim-dot.fail svg.ic { color: var(--err); } .fitem .sim-dot.none svg.ic { color: var(--text-3); }
+.so-evr.link { background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.so-evr.link:hover { color: var(--accent); }
+/* the numbers a check worked out (checks.js MEASURED) */
+.measured { margin: 2px 4px 8px; display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--text-2); }
+.mrow { display: flex; align-items: flex-start; gap: 8px; } .mrow .sev { margin-top: 5px; } .sev.ok { background: var(--ok); }
+.mrow.open { color: var(--text-3); }

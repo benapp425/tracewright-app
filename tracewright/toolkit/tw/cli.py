@@ -296,6 +296,35 @@ def cmd_floorplan(a):
     return 0
 
 
+def cmd_sim(a):
+    """Run a SPICE netlist with KiCad's ngspice and print each probe's summary. A run kept in docs/sim (by Claude's
+    simulate tool) is run again in place, with its probes and pass criterion unless others are given."""
+    import json as _json
+    from tw import sim
+    text = open(a.netlist, encoding="utf-8").read()
+    folder, base = os.path.split(os.path.abspath(a.netlist))
+    name, ext = os.path.splitext(base)
+    kept = os.path.join(folder, name + ".json")
+    if ext == ".cir" and os.path.exists(kept):
+        old = _json.load(open(kept))
+        info = sim.simulate(folder, name, text, a.probes or old.get("probes") or [], old.get("title") or name,
+                            old.get("criteria"), old.get("requirement") or "")
+        if info.get("error"):
+            print("FAILED: " + info["error"])
+            print("\n".join(info.get("log") or []))
+            return 1
+        print("\n".join(info["lines"]))
+        print(f"updated {name}.csv, .svg and .json beside it")
+        return 0 if info.get("status") != "fail" else 1
+    res = sim.run(text, probes=a.probes or None)
+    if not res.get("ok"):
+        print("FAILED: " + (res.get("error") or "ngspice"))
+        print("\n".join(res.get("log", [])[-12:]))
+        return 1
+    print("\n".join(sim.report(res, a.probes or [n for n in res["vectors"] if n != res.get("scale")][:8])))
+    return 0
+
+
 def cmd_stackup(a):
     """The stack-up: show the plan (or a starting point for N layers), or put the saved plan on the board."""
     from tw import stackup, constraints
@@ -465,6 +494,9 @@ def main(argv=None):
     fpp = sub.add_parser("floorplan", help="the guided start's floorplan: show (board coordinates) | apply (outline, areas, connectors, holes)")
     fpp.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
     fpp.add_argument("--outline", action="store_true", help="replace the board's outline with the floorplan's")
+    sm = sub.add_parser("sim", help="run a SPICE netlist with KiCad's ngspice: sim file.cir [v(out) i(v1) ...]")
+    sm.add_argument("netlist")
+    sm.add_argument("probes", nargs="*")
     su = sub.add_parser("stackup", help="the copper layers: show (the plan, or a starting point) | apply (the saved plan onto the board)")
     su.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
     su.add_argument("--layers", type=int, choices=[2, 4, 6, 8, 10])

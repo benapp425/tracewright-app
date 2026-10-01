@@ -7,6 +7,7 @@ import { state } from "./app.js";
 import { OrderPanel } from "./order.js";
 import { Compare } from "./compare.js";
 import { BringUpView } from "./bringup.js";
+import { SimView, simRuns, simState } from "./sims.js";
 
 const enc = encodeURIComponent;
 const IMG = /\.(png|jpe?g|gif|svg|webp)$/i;
@@ -244,36 +245,64 @@ export class OutputsPanel {
 
 export class DocsPanel {
   constructor(el, ws) {
-    this.pid = ws.pid; this.ws = ws;
+    this.pid = ws.pid; this.ws = ws; this.el = el;
     this.list = h("div.flist", { style: { width: "250px" } }); this.view = h("div.fview");
     el.appendChild(h("div.split2", this.list, this.view));
+    ws.ev.on("sims", () => { if (el.classList.contains("on")) { this.reopen = (this.current || "").startsWith("sim:"); this.load(); } });
     this.load();
   }
   shown() { this.load(); }
 
+  // open one of the simulations (from the sign-off page's evidence)
+  openSim(name) { this.current = "sim:" + name; this.reopen = true; this.ws.show("docs"); }
+
+  // Everything is fetched first and the list drawn in one go: loads that overlap (shown, an event) never double it.
   async load() {
+    const seq = this.seq = (this.seq || 0) + 1;
     const ls = (path) => api(`/api/projects/${enc(this.pid)}/files?path=${path}`).then((d) => d.entries).catch(() => []);
-    const [top, docsDir, build] = await Promise.all([ls(""), ls("docs"), ls("build")]);
+    const hasSch = this.ws.p && this.ws.p.has_sch;
+    const [top, docsDir, build, sims, fw, lib] = await Promise.all([ls(""), ls("docs"), ls("build"), simRuns(this.pid), hasSch ? ls("firmware") : [],
+      api(`/api/projects/${enc(this.pid)}/datasheets`).then((d) => d.items || []).catch(() => [])]);
+    const bring = fw.some((e) => e.name === "bringup" && e.dir) ? await ls("firmware/bringup") : [];
+    if (seq !== this.seq) return;                                   // a newer load is on its way
+    const list = document.createDocumentFragment();
+    const pick = (it) => { this.list.querySelectorAll(".fitem").forEach((x) => x.classList.remove("on")); it.classList.add("on"); };
     const md = (e) => !e.dir && /\.md$/i.test(e.name);
     const docs = [...top.filter((e) => md(e) && /^(BRIEF|README)\.md$/i.test(e.name)).sort((a, b) => (a.name < b.name ? -1 : 1)),
       ...docsDir.filter(md), ...build.filter((e) => e.name === "readiness.md").map((e) => ({ ...e, name: "readiness (last check)" }))];
-    clear(this.list);
-    this.list.appendChild(h("div.listhead", h("b", "Brief & docs")));
-    if (!docs.length) this.list.appendChild(h("div.small.muted", { style: { padding: "12px 14px" } }, "No documents yet."));
+    list.appendChild(h("div.listhead", h("b", "Brief & docs")));
+    if (!docs.length) list.appendChild(h("div.small.muted", { style: { padding: "12px 14px" } }, "No documents yet."));
     const title = (n) => n.replace(/\.md$/, "").replace(/^(\w)/, (c) => c.toUpperCase()).replace(/-/g, " ");
     const open = (path) => path === "docs/bring-up.md" ? new BringUpView(this.ws, clear(this.view)) : viewFile(this.ws, path, this.view);
     const bu = docs.find((e) => e.path === "docs/bring-up.md");
     if (bu) { docs.splice(docs.indexOf(bu), 1); docs.unshift({ ...bu, name: "Bring-up checklist", special: true }); }
+    let first = null;
     for (const e of docs) {
-      const it = h("div.fitem" + (e.special ? ".special" : ""), { onclick: () => { this.list.querySelectorAll(".fitem").forEach((x) => x.classList.remove("on")); it.classList.add("on"); this.current = e.path; open(e.path); } },
+      const it = h("div.fitem" + (e.special ? ".special" : ""), { onclick: () => { pick(it); this.current = e.path; open(e.path); } },
         icon(e.special ? "list-checks" : "file-text", 14), h("span.fn", e.special ? e.name : title(e.name)), h("span.sz", fmtTime(e.mtime)));
       if (e.path === this.current) it.classList.add("on");
-      this.list.appendChild(it);
+      first = first || it;
+      list.appendChild(it);
+    }
+    // the simulations Claude ran (docs/sim): each one's plot, verdict and netlist
+    let reopen = null;
+    if (sims.length) {
+      list.appendChild(h("div.listhead", h("b", "Simulations")));
+      for (const r of sims) {
+        const key = "sim:" + r.name, [cls, ic] = simState(r);
+        const show = () => {
+          pick(it); this.current = key;
+          new SimView(this.ws, clear(this.view), r, (gone) => { if (gone) this.current = null; this.load(); });
+        };
+        const it = h("div.fitem", { "data-tip": r.check || r.error || "", onclick: show },
+          icon("activity", 14), h("span.fn", r.title || r.name), h("span.sz.sim-dot." + cls, icon(ic, 12)));
+        list.appendChild(it);
+        if (key === this.current) { it.classList.add("on"); if (this.reopen) reopen = show; }
+      }
     }
     // the firmware starter: the pin map from the schematic, pins.h and a bring-up sketch (tw/firmware.py)
-    if (this.ws.p && this.ws.p.has_sch) {
-      const fw = await ls("firmware");
-      const bring = fw.some((e) => e.name === "bringup" && e.dir) ? await ls("firmware/bringup") : [];
+    let fwOpen = null;
+    if (hasSch) {
       const items = [...fw.filter((e) => e.name === "PINS.md"), ...fw.filter((e) => e.name.endsWith(".h")), ...bring.filter((e) => e.name.endsWith(".ino"))];
       const make = btn(items.length ? "refresh-cw" : "cpu", null, { "data-tip": items.length ? "Update the pin map from the schematic" : "Write the pin map and a bring-up sketch from the schematic",
         onclick: async () => {
@@ -281,29 +310,31 @@ export class DocsPanel {
           try { const r = await api(`/api/projects/${enc(this.pid)}/firmware`, { body: {} }); toast(`Wrote ${r.written.length} files in firmware/`, "ok"); this.current = "firmware/PINS.md"; this.load(); }
           catch (e) { toast(e.message, "error"); make.disabled = false; }
         } }, "sm ghost");
-      this.list.appendChild(h("div.listhead", h("b.grow", "Firmware"), make));
-      if (!items.length) this.list.appendChild(h("div.small.muted", { style: { padding: "6px 14px 12px" } }, "A pin map and a bring-up sketch, from the schematic."));
+      list.appendChild(h("div.listhead", h("b.grow", "Firmware"), make));
+      if (!items.length) list.appendChild(h("div.small.muted", { style: { padding: "6px 14px 12px" } }, "A pin map and a bring-up sketch, from the schematic."));
       for (const e of items) {
         const label = e.name === "PINS.md" ? "Pin map" : e.name;
-        const it = h("div.fitem", { onclick: () => { this.list.querySelectorAll(".fitem").forEach((x) => x.classList.remove("on")); it.classList.add("on"); this.current = e.path; viewFile(this.ws, e.path, this.view); } },
+        const it = h("div.fitem", { onclick: () => { pick(it); this.current = e.path; viewFile(this.ws, e.path, this.view); } },
           icon(e.name.endsWith(".md") ? "table-2" : "file-code", 14), h("span.fn", label), h("span.sz", fmtTime(e.mtime)));
-        if (e.path === this.current) { it.classList.add("on"); viewFile(this.ws, e.path, this.view); }
-        this.list.appendChild(it);
+        if (e.path === this.current) { it.classList.add("on"); fwOpen = e.path; }
+        list.appendChild(it);
       }
     }
     // the data sheet library: each part's data sheet, and whether its pin table was read from it
-    const lib = (await api(`/api/projects/${enc(this.pid)}/datasheets`).catch(() => ({ items: [] }))).items || [];
     if (lib.length) {
-      this.list.appendChild(h("div.listhead", h("b", "Data sheets")));
+      list.appendChild(h("div.listhead", h("b", "Data sheets")));
       for (const d of lib) {
         const path = d.pdf || d.pins_file;
         const it = h("div.fitem", { "data-tip": d.pins ? `Pin table: ${d.pins} pins, from ${d.source}` : "No pin table saved", onclick: () => {
-          this.list.querySelectorAll(".fitem").forEach((x) => x.classList.remove("on")); it.classList.add("on"); this.current = path; viewFile(this.ws, path, this.view); } },
+          pick(it); this.current = path; viewFile(this.ws, path, this.view); } },
           icon(d.pdf ? "file-text" : "table-2", 14), h("span.fn", d.name), d.pins ? h("span.sz", `${d.pins} pins`) : h("span.sz", d.size ? fmtSize(d.size) : ""));
         if (path === this.current) it.classList.add("on");
-        this.list.appendChild(it);
+        list.appendChild(it);
       }
     }
-    if (!this.current && docs.length) { this.current = docs[0].path; this.list.querySelector(".fitem").classList.add("on"); open(docs[0].path); }
+    clear(this.list).appendChild(list);
+    if (reopen) { this.reopen = false; reopen(); }
+    else if (fwOpen) viewFile(this.ws, fwOpen, this.view);
+    else if (!this.current && first) { this.current = docs[0].path; first.classList.add("on"); open(docs[0].path); }
   }
 }

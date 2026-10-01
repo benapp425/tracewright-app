@@ -1055,6 +1055,55 @@ async def second_opinion_card(t):
     await t.page.js("document.querySelector('.composer textarea').value = ''; 1")
 
 
+@test
+async def simulation_under_docs_and_in_signoff(t):
+    """A simulation Claude kept (docs/sim) is listed under Docs > Simulations with its verdict: the plot, the pass
+    criterion's PASS line, each probe's values and the netlist; the sign-off page's evidence opens it."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    d = os.path.join(root, "docs", "sim")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "sense-filter.cir"), "w") as f:
+        f.write("lowpass\nV1 in 0 AC 1\nR1 in out 1k\nC1 out 0 100n\n.ac dec 50 10 1meg\n.end\n")
+    with open(os.path.join(d, "sense-filter.json"), "w") as f:
+        json.dump({"name": "sense-filter", "title": "Battery sense RC filter", "probes": ["v(out)"], "requirement": "r1",
+                   "criteria": {"probe": "v(out)", "corner": {"min": 1000, "max": 2000}}}, f)
+    cfg = json.loads(before)
+    cfg["evidence"] = [{"req": "r1", "kind": "sim", "label": "Battery sense RC filter", "ref": "docs/sim/sense-filter.cir", "status": "open"}]
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    with open(os.path.join(root, ".tracewright", "canvas.json"), "w") as f:
+        json.dump({"requirements": {"items": [{"label": "Battery sense", "value": "filtered, corner 1 to 2 kHz"}]}}, f)
+    try:
+        info = t.s.post(f"api/projects/{t.pid}/sims/sense-filter", {"action": "run"})
+        check(info["status"] == "ok" and info["check"].startswith("PASS: v(out) -3 dB at 15"), info)
+        await t.open_project()
+        await t.place("project", "docs")
+        await t.page.wait("[...document.querySelectorAll('.flist .listhead b')].some((b) => b.textContent === 'Simulations')", 10)
+        await t.page.js("[...document.querySelectorAll('.flist .fitem')].find((e) => e.textContent.includes('Battery sense RC filter')).click(); 1")
+        await t.page.wait("document.querySelector('.sim-plot') && document.querySelector('.sim-plot').complete && document.querySelector('.sim-plot').naturalWidth > 0", 10)
+        await t.page.wait("document.querySelector('.sim-net') && document.querySelector('.sim-net').textContent.includes('.ac dec')", 10)
+        got = await t.page.js("""(() => ({ verdict: document.querySelector('.sim-verdict.ok') && document.querySelector('.sim-verdict.ok').innerText,
+          tag: document.querySelector('.sim-tag').innerText, rows: [...document.querySelectorAll('.sim-tab tbody tr')].map((r) => r.innerText) }))()""")
+        check(got["verdict"] and got["verdict"].startswith("PASS: v(out) -3 dB at 15") and got["tag"].strip() == "Passes", got)
+        check(len(got["rows"]) == 1 and "v(out)" in got["rows"][0] and "kHz" in got["rows"][0], got["rows"])
+        await t.shot("simulation")
+        # the sign-off page: the evidence followed the run, and opens it
+        await t.place("checks", "signoff")
+        await t.page.wait("[...document.querySelectorAll('.so-evr.link')].some((e) => e.textContent.includes('docs/sim/'))", 10)
+        ev = await t.page.js("[...document.querySelectorAll('.so-ev')].map((e) => e.innerText).join(' | ')")
+        check("Simulation" in ev and "Battery sense RC filter (PASS: v(out) -3 dB at 15" in ev, ev)
+        await t.page.js("[...document.querySelectorAll('.so-evr.link')].find((e) => e.textContent.includes('docs/sim/')).click(); 1")
+        await t.page.wait("document.querySelector('.view.on .sim-title') && document.querySelector('.view.on .sim-title').innerText.includes('Battery sense RC filter')", 10)
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(os.path.join(root, ".tracewright", "canvas.json"))
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

@@ -1219,6 +1219,61 @@ def make_app():
         rt.hub.emit("datasheets")
         return jresp({"saved": f})
 
+    @routes.get("/api/projects/{pid}/sims")
+    async def sims_list(request):
+        """The simulations kept in docs/sim (Claude's simulate tool): each one's probes, results, pass criterion and
+        verdict, and its files."""
+        from tw import sim
+        from . import signoff
+        rt = app.rt(request.match_info["pid"])
+
+        def runs():
+            items = sim.runs(os.path.join(rt.p.root, "docs", "sim"))
+            if any(x.get("requirement") for x in items):
+                names = {r["id"]: r["text"] for r in signoff.requirements(rt.p.reload())}
+                for x in items:
+                    x["requirement_text"] = names.get(x.get("requirement") or "")
+            return items
+        return jresp({"items": await asyncio.to_thread(runs)})
+
+    @routes.post("/api/projects/{pid}/sims/{name}")
+    async def sims_act(request):
+        """{action: run | delete}: run a kept simulation again (its netlist as docs/sim/<name>.cir has it now), or
+        remove it. The evidence that cites it follows: its result, or its removal."""
+        from tw import sim
+        from . import signoff
+        rt = app.rt(request.match_info["pid"])
+        name = request.match_info["name"]
+        d = os.path.join(rt.p.root, "docs", "sim")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", name) or not os.path.exists(os.path.join(d, name + ".cir")):
+            return err("no such simulation", 404)
+        body = await request.json()
+        ref = f"docs/sim/{name}.cir"
+        if body.get("action") == "delete":
+            for ext in ("cir", "csv", "svg", "json"):
+                if os.path.exists(os.path.join(d, f"{name}.{ext}")):
+                    os.remove(os.path.join(d, f"{name}.{ext}"))
+            n = await asyncio.to_thread(signoff.follow_sim, rt.p.reload(), ref, remove=True)
+            rt.hub.emit("sims")
+            if n:
+                rt.hub.emit("signoff")
+            return jresp({"removed": name, "evidence": n})
+        if body.get("action") != "run":
+            return err("action: run or delete")
+        try:
+            old = json.load(open(os.path.join(d, name + ".json")))
+        except (OSError, ValueError):
+            old = {}
+        text = open(os.path.join(d, name + ".cir"), encoding="utf-8").read()
+        info = await asyncio.to_thread(sim.simulate, d, name, text, old.get("probes") or [], old.get("title") or name,
+                                       old.get("criteria"), old.get("requirement") or "")
+        n = await asyncio.to_thread(signoff.follow_sim, rt.p.reload(), ref, status="fail" if info.get("error") else info.get("status") or "ok",
+                                    verdict=info.get("check") or ("FAIL: the simulation did not run" if info.get("error") else None))
+        rt.hub.emit("sims")
+        if n:
+            rt.hub.emit("signoff")
+        return jresp(info)
+
     @routes.get("/api/projects/{pid}/mentions")
     async def mentions(request):
         """What the message box can @-mention: the parts (from the schematic, with where each is on the board),

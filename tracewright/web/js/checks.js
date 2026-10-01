@@ -8,6 +8,12 @@ const ORDER = ["KiCad", "Schematic", "Parts & BOM", "Placement", "Routing", "Pow
 const ST_ICON = { pass: "circle-check", warn: "triangle-alert", fail: "circle-x", error: "bug", skipped: "circle-dot", na: "circle-minus", notrun: "circle", queued: "clock", running: null };
 const enc = encodeURIComponent;
 
+// the numbers a check worked out, one line each (its result's "measured")
+const MEASURED = {
+  "power.thermal": (m) => m.status === "open" ? `${m.ref}: not worked out (${m.why || "no numbers"})`
+    : `${m.ref}: ${m.vin} V to ${m.vout} V at ${m.amps} A burns ${(+m.watts).toFixed(2)} W, about ${Math.round(m.tj)} °C at the junction (${m.tj_max} °C allowed, ${m.ambient} °C air)`,
+};
+
 export class ChecksPanel {
   constructor(el, ws) {
     this.el = el; this.ws = ws; this.pid = ws.pid; this.open = new Set(); this.running = {}; this.filter = "all"; this.sel = new Map();
@@ -103,7 +109,7 @@ export class ChecksPanel {
     const key = st === "not run" ? "notrun" : st === "skipped" && c.na && !run ? "na" : st;
     const nf = (c.findings || []).length;
     const worst = (c.findings || []).some((f) => f.severity === "error") ? "err" : (c.findings || []).some((f) => f.severity === "warning") ? "warn" : "";
-    const el = h("div.crow" + (this.open.has(c.id) ? ".open" : ""),
+    const el = h("div.crow" + (this.open.has(c.id) ? ".open" : ""), { "data-id": c.id },
       h("div.ch", { onclick: () => { el.classList.toggle("open"); if (el.classList.contains("open")) this.open.add(c.id); else this.open.delete(c.id); } },
         h("span.sti." + key, key === "running" ? h("span.spinner", { style: { width: "14px", height: "14px" } }) : icon(ST_ICON[key] || "circle", 16)),
         h("span.t.ellipsis", c.title, key === "running" ? h("span.el.muted", this.elapsed()) : c.scope && !inRun ? h("span.scope", c.scope) : null),
@@ -115,6 +121,7 @@ export class ChecksPanel {
         c.status === "skipped" ? h("div.small.muted", { style: { margin: "0 4px 8px" } }, (c.na ? "Not applicable: " : "Skipped: ") + (c.reason || "")) : null,
         c.status === "not run" ? h("div.small.muted", { style: { margin: "0 4px 8px" } }, c.new ? "New check. Not run on this project yet." : "Not run yet.") : null,
         !nf && c.status === "pass" ? h("div.small.ok-t", { style: { margin: "0 4px 6px" } }, c.scope ? `Checked ${c.scope}: nothing found.` : "No findings.") : null,
+        MEASURED[c.id] && (c.measured || []).length ? h("div.measured", c.measured.map((m) => h("div.mrow." + (m.status || "ok"), h("span.sev." + ({ fail: "error", warn: "warning", open: "info" }[m.status] || "ok")), MEASURED[c.id](m)))) : null,
         ...(c.findings || []).slice(0, 300).map((f, i) => this.finding(c, f, i)),
         nf > 300 ? h("div.small.muted", `${nf - 300} more in build/checks_report.md`) : null,
         h("div.row", { style: { margin: "8px 4px 0" } },
@@ -141,6 +148,14 @@ export class ChecksPanel {
           catch (e) { toast(e.message, "error"); }
         } }, "sm ghost"),
         btn("flag", null, { "data-tip": "Add to review", onclick: async () => { await this.ws.review.fromFinding(c, f); toast("Added to review", "ok", 2500, { label: "Show", run: () => this.ws.toggleReview(true) }); } }, "sm ghost")));
+  }
+
+  // open one check and bring it into view (from the sign-off page's evidence)
+  focus(id) {
+    this.filter = "all"; this.open.add(id);
+    if (this.data) this.render();
+    const go = () => { const row = this.box.querySelector(`.crow[data-id="${CSS.escape(id)}"]`); if (row) row.scrollIntoView({ block: "center" }); return !!row; };
+    if (!go()) setTimeout(go, 400);
   }
 
   async waiver(action, f) {

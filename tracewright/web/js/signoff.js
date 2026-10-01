@@ -85,13 +85,23 @@ export class SignoffView {
   }
 
   // ------------------------------------------------------------------ requirements and their evidence
+  // where the evidence is: a kept simulation opens under Docs, a check's results on the Checks page
+  evRef(e) {
+    if (!e.ref) return null;
+    const sim = e.kind === "sim" && /^docs\/sim\/([\w-]+)\.cir$/.exec(e.ref);
+    if (sim) return h("button.so-evr.link", { onclick: () => this.ws.view("docs").openSim(sim[1]), "data-tip": "Show the simulation" }, e.ref);
+    if (/^[a-z]+\.[a-z_]+$/.test(e.ref) && (e.by === "check" || e.kind === "check" || e.kind === "calc"))
+      return h("button.so-evr.link", { onclick: () => { this.ws.show("checks"); const v = this.ws.view("checks"); v.focus && v.focus(e.ref); }, "data-tip": "Show the check" }, e.ref);
+    return h("span.so-evr", e.ref);
+  }
+
   requirements(reqs) {
     if (!reqs.length) return this.section("badge-check", "Requirements", h("div.small.muted",
       "No requirements recorded yet: the guided start's list, the bullets of docs/requirements.md and the limits you set appear here."));
     const rows = reqs.map((r) => h("div.so-req",
       h("div.so-rq", h("div.so-rqt", r.text, r.kind === "limit" ? h("span.so-tag", "Limit") : null), r.value ? h("div.so-rqv", r.value) : null),
       h("div.so-evs", r.evidence.length ? r.evidence.map((e) => h("div.so-ev." + (e.status || "ok"),
-        h("span.so-evd"), h("span.so-evk", EV_KIND[e.kind] || "Note"), h("span.so-evl", e.label || ""), e.ref ? h("span.so-evr", e.ref) : null))
+        h("span.so-evd"), h("span.so-evk", EV_KIND[e.kind] || "Note"), h("span.so-evl", e.label || ""), this.evRef(e)))
         : h("div.so-ev.none", h("span.so-evd"), h("span.so-evl", "No evidence yet")))));
     const n = reqs.filter((r) => r.evidence.length).length;
     return this.section("badge-check", "Requirements", h("div.so-reqs", rows), `${n} of ${reqs.length} with evidence`);
