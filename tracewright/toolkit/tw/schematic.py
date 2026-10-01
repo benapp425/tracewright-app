@@ -164,10 +164,11 @@ class SchFile:
         for kind in ("label", "global_label", "hierarchical_label", "directive_label", "netclass_flag"):
             for l in findall(t, kind):
                 at = find(l, "at")
-                self.labels.append({"kind": kind, "text": str(l[1]) if len(l) > 1 and not isinstance(l[1], list) else "",
-                                    "x": _f(at[1]) if at else 0.0, "y": _f(at[2]) if at else 0.0,
-                                    "rot": _f(at[3]) if at and len(at) > 3 else 0.0,
-                                    "shape": str(value(l, "shape", "") or "")})
+                lab = {"kind": kind, "text": str(l[1]) if len(l) > 1 and not isinstance(l[1], list) else "",
+                       "x": _f(at[1]) if at else 0.0, "y": _f(at[2]) if at else 0.0,
+                       "rot": _f(at[3]) if at and len(at) > 3 else 0.0, "shape": str(value(l, "shape", "") or "")}
+                lab["box"] = label_box(lab)
+                self.labels.append(lab)
         self.texts = []
         for tx in findall(t, "text") + findall(t, "text_box"):
             at = find(tx, "at")
@@ -188,6 +189,25 @@ class SchFile:
 def _pts(node):
     p = find(node, "pts")
     return [(_f(q[1]), _f(q[2])) for q in (findall(p, "xy") if p else [])]
+
+
+def label_box(lab, size=1.27):
+    """The page area a label covers -- its text at KiCad's own glyph widths, with a global or hierarchical
+    label's flag -- reading away from its anchor in the label's direction."""
+    from . import font
+    flag = lab["kind"] in ("global_label", "hierarchical_label")
+    along = font.width(lab["text"] or "M", size) + (size * 2.6 if flag else size * 0.25)
+    a0, a1 = (-size * 1.05, size * 1.05) if flag else (-size * 1.45, size * 0.35)     # across: the text sits above a local label's wire
+    x, y, r = lab["x"], lab["y"], int(round(lab.get("rot") or 0)) % 360
+    if r == 0:
+        return [round(x, 3), round(y + a0, 3), round(x + along, 3), round(y + a1, 3)]
+    if r == 180:
+        return [round(x - along, 3), round(y + a0, 3), round(x, 3), round(y + a1, 3)]
+    if not flag:                                          # upright text beside a vertical wire: either side
+        a0, a1 = -size * 1.45, size * 1.45
+    if r == 90:                                           # reads upwards
+        return [round(x + a0, 3), round(y - along, 3), round(x + a1, 3), round(y, 3)]
+    return [round(x + a0, 3), round(y, 3), round(x + a1, 3), round(y + along, 3)]
 
 
 class Sheet:

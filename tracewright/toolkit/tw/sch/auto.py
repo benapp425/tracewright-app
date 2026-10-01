@@ -29,10 +29,10 @@ than one sheet gets a global label, which tw.sch.finish() redraws in the project
 import copy, math, re
 from . import kisch
 from .kisch import snap, rot_vec
+from .. import font
 from .builder import stock, power as power_symbol
 
 P = 2.54
-TEXT_W = 1.1                 # stroke-font advance for 1.27 mm text, mm per character
 GROUNDS = ("GND", "AGND", "DGND", "PGND", "GNDA", "GNDD", "VSS", "EARTH", "CHASSIS")
 UP, DOWN, LEFT, RIGHT = (0, -1), (0, 1), (-1, 0), (1, 0)
 
@@ -71,7 +71,7 @@ def _seg_box(a, b):
 
 def _label_box(name, pt, d, flag=True):
     """The page area a label covers (a global label's flag outline included)."""
-    w = len(name) * TEXT_W + (3.4 if flag else 0.4)
+    w = font.ink_width(name) + (3.4 if flag else 0.4)
     x, y = pt
     h0, h1 = (1.55, 0.95) if flag else (1.5, 0.0)
     if d == RIGHT:
@@ -85,9 +85,9 @@ def _label_box(name, pt, d, flag=True):
 
 def _text_box(s, at, size=1.27):
     lines = str(s).split("\n")
-    w = max(len(l) for l in lines) * TEXT_W * size / 1.27
+    a, z = font.ink(s, size)                       # the strokes, from the anchor
     h = len(lines) * size * 1.65
-    return (at[0], at[1] - size * 0.3, at[0] + w, at[1] + h)
+    return (at[0] + a, at[1] - size * 0.3, at[0] + z, at[1] + h)
 
 
 def _gap(k1, k2):
@@ -436,16 +436,16 @@ class Group:
         and text, a series part and its label, an LED's resistor and LED), held as a wire so nothing crosses it or
         sits on it; a top or bottom pin's supply symbol, as wide as its name."""
         kind, tag = rq["kind"], ("lane", rq["inst"].ref, pin)
-        label = lambda n: len(str(n)) * TEXT_W + 3.4 if n else 0
+        label = lambda n: font.ink_width(str(n)) + 3.4 if n else 0
         if d[1] == 0 or kind == "net":
             if kind == "series":
-                lead = math.ceil((len(rq["before"]) * TEXT_W + 2 * P) / P) * P if rq.get("before") else P
+                lead = math.ceil((font.ink_width(rq["before"]) + 2 * P) / P) * P if rq.get("before") else P
                 L = lead + 7.62 + P + label(rq.get("net"))
             else:
                 L = {"net": P + label(rq.get("name")), "indicator": 3 * P + 2 * 7.62,
                      "pull": 3 * P + label(rq.get("net"))}.get(kind, 2 * P)
             return [("wire", _seg_box(_add(p, d, P), _add(p, d, max(2 * P, L))), tag)]
-        half = max(1.3, len(str(rq.get("rail") or "")) * TEXT_W / 2 + 0.3)
+        half = max(1.3, font.ink_width(str(rq.get("rail") or "")) / 2 + 0.3)
         f = _add(p, d, 3 * P if kind == "decouple" else 2 * P)
         return [("vlane", (min(p[0], f[0]) - half, min(p[1], f[1]), max(p[0], f[0]) + half, max(p[1], f[1])), tag)]
 
@@ -797,7 +797,7 @@ class Group:
                         items.append(("label", _label_box(net, end, d), None))
                         if before:
                             lp = _add(c2, d, 1.27)
-                            if lead * P < len(before) * TEXT_W + 2.54:
+                            if lead * P < font.ink_width(before) + 2.54:
                                 continue
                             ops.append(("llabel", before, lp, d))
                             items.append(("label", _label_box(before, lp, d, flag=False), None))
@@ -822,9 +822,9 @@ class Group:
         self._connect(near, inst.ref, pin)
         self._connect(near, ref, "1")
         self._connect(net, ref, "2")
-        leads = sorted({math.ceil(((len(before) * TEXT_W + 2 * P) if before else P) / P) * P} | {k * P for k in range(1, 17)})
+        leads = sorted({math.ceil(((font.ink_width(before) + 2 * P) if before else P) / P) * P} | {k * P for k in range(1, 17)})
         if before:
-            leads = [l for l in leads if l >= math.ceil((len(before) * TEXT_W + 2 * P) / P) * P]
+            leads = [l for l in leads if l >= math.ceil((font.ink_width(before) + 2 * P) / P) * P]
         for lead in leads:
             a = _add(p, d, lead)
             r = self._two(key, ref, a, _dir_name(d))
@@ -856,7 +856,7 @@ class Group:
         p, d = inst.pin(pin), inst.pin_dir(pin)
         down = is_ground(to)
         near = before or f"{inst.ref}_{pin}"
-        first = math.ceil(((len(before) * TEXT_W + 2 * P) if before else 2 * P) / P) * P
+        first = math.ceil(((font.ink_width(before) + 2 * P) if before else 2 * P) / P) * P
         for reach in [first + k * P for k in range(0, 10)]:
             t = _add(p, d, reach)
             for lead in (2 * P, 3 * P, 4 * P):

@@ -745,8 +745,9 @@ MM = UNIT
 
 
 def _text_w(text, size=1.27):
-    """Width of 1.27 mm stroke-font text on the page (KiCad's default font; measured on renders)."""
-    return round(len(text) * 1.1 * size / 1.27 * UNIT)
+    """Width of stroke-font text on the page, in file units (KiCad's default font, its own glyph widths)."""
+    from .. import font
+    return round(font.ink_width(text, size) * UNIT)
 
 
 def _label_box(kind, text, pt, rot, size=1.27):

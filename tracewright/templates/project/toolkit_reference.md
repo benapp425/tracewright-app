@@ -59,7 +59,11 @@ Coordinates are board millimetres, KiCad axes (y down), angles counter-clockwise
   (kinds: power, ground, pair, clock, fast, rf, analog, signal; fields: voltage, current, pair, iface, impedance,
   class, note). A check (`nets.model`) flags declarations that match no net and supplies with no voltage.
 - `tw.sch.edit.set_fields(project, {"R1": {"LCSC": "C25744"}})` -- change fields in an existing schematic,
-  keeping the file's formatting.
+  keeping the file's formatting. `set_flags(project, {"R9": {"dnp": True}})` for DNP / in_bom / on_board;
+  `rename_net(project, "SDA", "I2C_SDA", kind="global_label")` renames what names a net (a sheet's local labels,
+  every global label, or a hierarchical label with its sheet pins), proved against KiCad's netlist first.
+- `tw.font.width(text, size)` / `tw.font.ink(text, size)` -- KiCad's stroke font measured: the box and the ink of
+  text as KiCad draws it, for anything you place beside text.
 - `tw.pcb.client.apply(project, ops)` -- the board operations above (live into KiCad when it has the board open).
 - `tw.route.driver.route(project, nets=[...], on_progress=print)` -- the grid router.
 - `tw.checks` -- write project checks in `design/checks/*.py`:

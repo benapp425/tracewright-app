@@ -3,6 +3,7 @@
 import { h, clear, api, toast, menu, confirmDialog, modal } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
+import { renameLabel, schStep } from "./schedit.js";
 
 export const PAPER = { A5: [210, 148], A4: [297, 210], A3: [420, 297], A2: [594, 420], A1: [841, 594], A0: [1189, 841],
   A: [279.4, 215.9], B: [431.8, 279.4], C: [558.8, 431.8], D: [863.6, 558.8], E: [1117.6, 863.6],
@@ -41,9 +42,12 @@ export class SchematicView {
       style: { display: "none" } });
     this.styleSep = h("div.tsep", { style: { display: "none" } });
     this.hudTc = h("div.hud.tc");
+    this.undoBtn = h("button.tbtn", { onclick: () => schStep(this.ws, true), "data-tip": "Undo", "data-kbd": "mod+z", disabled: true }, icon("undo-2", 15));
+    this.redoBtn = h("button.tbtn", { onclick: () => schStep(this.ws, false), "data-tip": "Redo", "data-kbd": "mod+shift+z", disabled: true }, icon("redo-2", 15));
     this.el.appendChild(h("div.viewer.paper", this.svg,
       h("div.hud.tl", this.tabs),
-      h("div.hud.tr", h("div.hudbox", this.styleBtn, this.styleSep, h("div.findbox", icon("search", 13), this.findIn, this.findRes), h("div.tsep"), this.flagBtn, h("div.tsep"),
+      h("div.hud.tr", h("div.hudbox", this.styleBtn, this.styleSep, h("div.findbox", icon("search", 13), this.findIn, this.findRes), h("div.tsep"),
+        this.undoBtn, this.redoBtn, h("div.tsep"), this.flagBtn, h("div.tsep"),
         h("button.tbtn", { "data-tip": "Zoom out", onclick: () => this.zoom(1.4) }, icon("zoom-out", 15)),
         h("button.tbtn", { "data-tip": "Zoom in", onclick: () => this.zoom(1 / 1.4) }, icon("zoom-in", 15)),
         h("button.tbtn", { "data-tip": "Fit the sheet", "data-kbd": "f", onclick: () => this.fit() }, icon("scan", 15)))),
@@ -60,8 +64,14 @@ export class SchematicView {
       onChange: (on) => { this.viewer.classList.toggle("tool-flag", on); this.flagBtn.classList.toggle("on", on); this.svg.style.cursor = on ? "crosshair" : "grab"; } });
     this.mouse();
     this.keys = (e) => {
-      if (!this.el.classList.contains("on") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!this.el.classList.contains("on") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
       if (document.querySelector(".modal-bg, .popover, .palette-bg")) return;
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "z") {      // the app's own schematic edits
+        e.preventDefault();
+        if (this.history && (e.shiftKey ? this.history.redo : this.history.undo)) schStep(this.ws, !e.shiftKey);
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const k = e.key.toLowerCase();
       if (k === "f") this.fit();
       else if (k === "c") this.flags.toggle();
@@ -101,7 +111,22 @@ export class SchematicView {
     const m = 25;
     this.setVB(x0 - m, y0 - m, x1 - x0 + 2 * m, y1 - y0 + 2 * m, true);
   }
-  reload() { if (!this.el.classList.contains("on")) { this.stale = true; return; } this.load(true); }
+  reload() { this.loadHistory(); if (!this.el.classList.contains("on")) { this.stale = true; return; } this.load(true); }
+
+  // what Undo and Redo would do (the app's schematic edits; schedit.py)
+  async loadHistory() {
+    try { this.history = await api(`/api/projects/${encodeURIComponent(this.pid)}/schematic/history`); } catch { return; }
+    this.paintHistory();
+  }
+  set history(v) { this._history = v; this.paintHistory(); }
+  get history() { return this._history; }
+  paintHistory() {
+    const hs = this._history || {};
+    if (!this.undoBtn) return;
+    this.undoBtn.disabled = !hs.undo; this.redoBtn.disabled = !hs.redo;
+    this.undoBtn.dataset.tip = hs.undo ? `Undo: ${hs.undo_label}` : "Undo";
+    this.redoBtn.dataset.tip = hs.redo ? `Redo: ${hs.redo_label}` : "Redo";
+  }
   focusFind() { this.findIn.focus(); this.findIn.select(); }
 
   async load(keepView) {
@@ -116,6 +141,7 @@ export class SchematicView {
       return;
     }
     this.loading.style.display = "none";
+    if (!this._history) this.loadHistory();
     this.version = d.version;
     this.sheets = d.sheets;
     if (!this.cur || !this.sheets.find((s) => s.name_path === this.cur)) this.cur = this.sheets[0].name_path;
@@ -292,6 +318,22 @@ export class SchematicView {
       r.addEventListener("click", (e) => { if (this.flags.active) return; e.stopPropagation(); this.toggle(sym.ref, e.shiftKey); });
       this.overlay.appendChild(r);
       this.boxes.push({ sym, r });
+    }
+    // net labels: click one to rename its net
+    for (const lab of s.labels || []) {
+      if (!lab.box || !lab.text || !["label", "global_label", "hierarchical_label"].includes(lab.kind)) continue;
+      const [x0, y0, x1, y1] = lab.box;
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", x0); r.setAttribute("y", y0); r.setAttribute("width", x1 - x0); r.setAttribute("height", y1 - y0);
+      r.setAttribute("rx", 0.5); r.setAttribute("fill", "rgba(0,0,0,0)"); r.setAttribute("stroke", "rgba(0,0,0,0)"); r.setAttribute("stroke-width", 0.35);
+      r.setAttribute("class", "sch-label"); r.dataset.text = lab.text;
+      r.style.cursor = "text";
+      const kind = { label: "label", global_label: "global label", hierarchical_label: "hierarchical label" }[lab.kind];
+      r.addEventListener("mouseenter", (e) => { if (this.flags.active) return; r.setAttribute("stroke", "rgba(91,155,248,.7)");
+        this.showTip(e, null, `<b>${escH(lab.text)}</b> <span class="k">${kind}</span><br><span class="k">click to rename the net</span>`); });
+      r.addEventListener("mouseleave", () => { r.setAttribute("stroke", "rgba(0,0,0,0)"); this.tip.style.display = "none"; });
+      r.addEventListener("click", (e) => { if (this.flags.active) return; e.stopPropagation(); this.tip.style.display = "none"; renameLabel(this.ws, r, lab, this.cur); });
+      this.overlay.appendChild(r);
     }
     for (const ch of s.children || []) {
       const r = document.createElementNS(NS, "rect");

@@ -53,6 +53,7 @@ class ProjectRuntime:
         self.edit_lock = asyncio.Lock()        # one board edit from the app at a time
         self.app_edit_until = 0.0              # the board view's own edits: the user's, already described
         self._edits = None
+        self._sch_edits = None
 
     # ------------------------------------------------------------------ lifecycle
     def _tap(self, ev):
@@ -108,6 +109,14 @@ class ProjectRuntime:
             from .boardedit import History
             self._edits = History(self.p)
         return self._edits
+
+    @property
+    def sch_edits(self):
+        """The schematic view's undo history (schedit.SchHistory)."""
+        if self._sch_edits is None:
+            from .schedit import SchHistory
+            self._sch_edits = SchHistory(self.p)
+        return self._sch_edits
 
     # ------------------------------------------------------------------ board geometry
     def board_path(self):

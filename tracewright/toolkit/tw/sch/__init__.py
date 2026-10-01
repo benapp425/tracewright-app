@@ -12,10 +12,11 @@ from . import style
 from .. import kicad
 
 
-def finish(project, erc=True):
+def finish(project, erc=True, plot=True):
     """Upgrade every sheet in place, redraw it in the project's schematic style when the script drew
     the other one (tracewright.json schematic.style: "hierarchical" or "flat"; see style.py), export
-    the netlist, run ERC; returns a short summary."""
+    the netlist, run ERC and read the sheets as KiCad plots them (plot: text that overlaps text, wires,
+    symbols or block borders, from the strokes themselves -- the sch.render check); returns a short summary."""
     out = {"sheets": [], "erc": None}
     for f in project.sheets():
         kicad.sch_upgrade(f)
@@ -41,4 +42,21 @@ def finish(project, erc=True):
         for x in v:
             by[x["type"]] = by.get(x["type"], 0) + 1
         out["erc"] = {"violations": len(v), "by_type": by}
+    if plot:
+        out["plot"] = plot_check(project)
     return out
+
+
+def plot_check(project):
+    """The sch.render check on the sheets as KiCad plots them now: {sheets, overlaps: [where: what], count}."""
+    try:
+        from ..checks import load_all
+        from ..checks.context import Context
+        chk = next(c for c in load_all() if c.id == "sch.render")
+        ctx = Context(project, offline=True)
+        found = [f for f in chk.fn(ctx) if f.severity in ("error", "warning")]
+        return {"sheets": len(ctx.svgs), "count": len(found),
+                "overlaps": [f"{(f.where or {}).get('sheet', '')} ({(f.where or {}).get('x')}, {(f.where or {}).get('y')}): {f.message}"
+                             for f in found[:12]]}
+    except Exception as e:                          # no kicad-cli to plot with: say so, do not fail the run
+        return {"error": f"{type(e).__name__}: {e}"[:200]}

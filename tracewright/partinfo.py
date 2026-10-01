@@ -56,7 +56,7 @@ def part_info(p, board, ref, fetch=False):
             "lcsc": lcsc, "datasheet": part.get("datasheet") or fields.get("Datasheet") or "",
             "description": part.get("description") or fields.get("Description") or "",
             "sheet": part.get("sheet") or (fp.sheetname if fp is not None else ""),
-            "dnp": bool(part.get("dnp") or (fp is not None and fp.dnp)),
+            "dnp": bool(part.get("dnp") or (fp is not None and fp.dnp)), "in_schematic": bool(part),
             "fields": {k: v for k, v in fields.items() if v and k not in ("Reference", "Value", "Footprint", "Datasheet", "Description")
                        and not re.match(r"^(ki_|KiLib|Sim\.|Sheet)", k)}}
     try:

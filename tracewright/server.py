@@ -1178,6 +1178,110 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.post("/api/projects/{pid}/schematic/edit")
+    async def schematic_edit(request):
+        """An edit made in the schematic view: {ops, label} (schedit.py: a part's fields, its DNP / BOM / board flags, a
+        net's name), one undo step. Waits while Claude works on the design, and while KiCad has the schematic open (it
+        would write its own copy over this one when saved)."""
+        from . import schedit
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if not rt.p.tw.has_sch():
+            return err("there is no schematic yet", 404)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: edit when it is done, or stop it", 409)
+        if (rt.live or {}).get("sch_open"):
+            return err("The schematic is open in KiCad: edit it there, or close it in KiCad to edit it here", 409)
+        body = await request.json()
+        ops = body.get("ops") or []
+        if not isinstance(ops, list) or not ops or not all(isinstance(o, dict) and o.get("op") in schedit.OPS for o in ops):
+            return err("no edit")
+        async with rt.edit_lock:
+            def run():
+                with rt.sch_edits.lock:
+                    snap = rt.sch_edits.before()
+                    rt.mark_self(4)
+                    try:
+                        lines = schedit.apply(rt.p, ops)
+                    except Exception as e:
+                        rt.sch_edits.abandon(snap)               # whatever an op wrote before the one that failed
+                        return None, str(e), None
+                    rt.sch_edits.done(snap, str(body.get("label") or (lines[0] if lines else "Edit the schematic"))[:80])
+                    schedit.record(rt.p, ops)
+                    return lines, None, rt.sch_edits.state()
+            lines, problem, hist = await asyncio.to_thread(run)
+        if problem:
+            return err(re.sub(r"^\w+(Error|Exception): ", "", problem)[:300], 422)
+        rt.user_changes.append("schematic (the user, in the app): " + schedit.describe(lines))
+        rt.hub.emit("schematic.changed", source="app")
+        return jresp({"ok": True, "changes": lines, "history": hist,
+                      "board_out_of_date": rt.p.tw.has_pcb() and any(o.get("op") == "rename" or "Footprint" in (o.get("fields") or {})
+                                                                      or "on_board" in o for o in ops)})
+
+    @routes.post("/api/projects/{pid}/board/sync")
+    async def board_sync(request):
+        """Update the board from the schematic (after the user changed a footprint or a net's name there): one undo
+        step on the board."""
+        from tw.pcb import client
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: update the board when it is done", 409)
+        async with rt.edit_lock:
+            def run():
+                with rt.edits.lock:
+                    snap = rt.edits.before()
+                    rt.mark_app_edit(20)
+                    try:
+                        res = client.sync(rt.p.tw)
+                    except Exception as e:
+                        res = {"ok": False, "error": str(e)}
+                    if not res.get("ok"):
+                        rt.edits.failed(snap)
+                        return res, None
+                    rt.edits.done(snap, "Update from the schematic")
+                    return res, rt.edits.state()
+            res, hist = await asyncio.to_thread(run)
+        if not res.get("ok"):
+            return err(re.sub(r"^\w+(Error|Exception): ", "", str(res.get("error") or "the update did not apply"))[:300], 422)
+        rt.user_changes.append("board (the user, in the app): updated the board from the schematic")
+        rt.hub.emit("board.changed", version=-1, source="app")
+        return jresp({"ok": True, "result": res, "history": hist})
+
+    async def _sch_step(request, back):
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: undo when it is done, or stop it", 409)
+        if (rt.live or {}).get("sch_open"):
+            return err("The schematic is open in KiCad: undo there, or close it in KiCad", 409)
+        async with rt.edit_lock:
+            def run():
+                with rt.sch_edits.lock:
+                    rt.mark_self(4)
+                    return rt.sch_edits.step(back), rt.sch_edits.state()
+            label, hist = await asyncio.to_thread(run)
+        if label is None:
+            return err("nothing to " + ("undo" if back else "redo"), 409)
+        rt.user_changes.append(f"schematic (the user, in the app): {'undid' if back else 'redid'} \"{label}\"")
+        rt.hub.emit("schematic.changed", source="app")
+        return jresp({"ok": True, "label": label, "history": hist})
+
+    @routes.post("/api/projects/{pid}/schematic/undo")
+    async def schematic_undo(request):
+        return await _sch_step(request, True)
+
+    @routes.post("/api/projects/{pid}/schematic/redo")
+    async def schematic_redo(request):
+        return await _sch_step(request, False)
+
+    @routes.get("/api/projects/{pid}/schematic/history")
+    async def schematic_history(request):
+        rt = app.rt(request.match_info["pid"])
+        return jresp(rt.sch_edits.state() if rt.p.tw.has_sch() else {"undo": 0, "redo": 0, "undo_label": None, "redo_label": None})
+
     @routes.post("/api/projects/{pid}/firmware")
     async def firmware_make(request):
         """The firmware starter from the schematic (tw/firmware.py): pins.h, PINS.md, a bring-up sketch."""

@@ -4,7 +4,8 @@ middle of it. Read from the history checkpoints before and after the run (like t
 Gone ahead, confirm later (in the design already; Keep, or Undo: Claude puts it back and redoes what hung on it):
   parts       a part's value, MPN, LCSC number or footprint changed once the parts were agreed (a stand-in too)
   floorplan   the outline, a mounting hole or a connector moved once the floorplan was agreed
-  handmade    the user's own work changed: a part they placed or locked, a track, via or pour they drew
+  handmade    the user's own work changed: a part they placed or locked, a track, via or pour they drew, a part's
+              value, footprint or part number they set on the schematic
   rules       design rules made looser than before the run (a clearance, a track width, a via)
 Asked, kept as agreed meanwhile (put back at the end of the run; Approve applies it):
   limits      the agreed limits (board size, layers, height ...) changed
@@ -20,7 +21,7 @@ from . import history
 KINDS = {"parts": "confirm", "floorplan": "confirm", "handmade": "confirm", "rules": "confirm", "limits": "ask", "signed": "confirm"}
 DEFAULTS = {"parts": True, "floorplan": True, "handmade": True, "rules": True, "limits": True, "signed": True}
 LABELS = {"parts": "Part swaps once the parts are agreed", "floorplan": "The outline, holes or connectors moved once the floorplan is agreed",
-          "handmade": "Changes to what you made by hand (parts you placed or locked, copper you drew)",
+          "handmade": "Changes to what you made by hand (parts you placed or locked, copper you drew, fields you set)",
           "rules": "Design rules made looser", "limits": "Changes to the agreed limits (kept as agreed until you approve)",
           "signed": "Every change after you sign off"}
 CONNECTOR = re.compile(r"^(J|P|CN|CON|USB|X)\d", re.I)
@@ -191,17 +192,24 @@ def review_run(project, base, head, summary=None, on=None, handmade=None):
     parts_agreed = (stages.get("parts") or {}).get("status") == "done"
     floor_agreed = (cfg_a.get("start") or {}).get("phase") == "done" or (stages.get("placement") or {}).get("status") == "done"
     pcb = os.path.relpath(project.tw.pcb, root) if project.tw.pcb else None
-    # parts swapped once agreed
+    # parts swapped once agreed, and fields the user set by hand
     sheets = [p for p in files if p.endswith(".kicad_sch")]
-    if on.get("parts") and parts_agreed and sheets:
+    mine = ((handmade or {}).get("fields") or {}) if on.get("handmade") else {}
+    if sheets and ((on.get("parts") and parts_agreed) or mine):
         pa, pb = _parts_at(root, base, sheets), _parts_at(root, head, sheets)
+        word = lambda k: k if k in ("MPN", "LCSC") else k.lower()
         for ref in sorted(set(pa) & set(pb), key=_natural):
             ch = [(k, pa[ref][k], pb[ref][k]) for k in _FIELDS if pa[ref][k] != pb[ref][k]]
             if not ch:
                 continue
-            title = f"{ref}: " + "; ".join(f"{k.lower() if k != 'MPN' and k != 'LCSC' else k} {a or '(none)'} -> {b or '(none)'}" for k, a, b in ch)
-            items.append({"kind": "parts", "title": title, "ref": ref, "before": pa[ref], "after": pb[ref],
-                          "detail": "A part you had agreed was changed."})
+            title = f"{ref}: " + "; ".join(f"{word(k)} {a or '(none)'} -> {b or '(none)'}" for k, a, b in ch)
+            by_hand = [k for k, a, _ in ch if str((mine.get(ref) or {}).get(k, "\0")) == a]
+            if by_hand:
+                items.append({"kind": "handmade", "title": title, "ref": ref, "before": pa[ref], "after": pb[ref],
+                              "detail": f"You set its {', '.join(word(k) for k in by_hand)} by hand."})
+            elif on.get("parts") and parts_agreed:
+                items.append({"kind": "parts", "title": title, "ref": ref, "before": pa[ref], "after": pb[ref],
+                              "detail": "A part you had agreed was changed."})
     # the board
     if pcb and pcb in files:
         ba, bb = _board_at(root, base, pcb), _board_at(root, head, pcb)

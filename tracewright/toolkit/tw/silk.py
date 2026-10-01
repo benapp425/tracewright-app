@@ -10,11 +10,11 @@ clear one inside the board wins. References that find no clear spot are reported
 import math
 from . import geom
 
-CHAR_W = 0.78          # KiCad stroke font: advance per character / text height (average, with spacing)
+from . import font
 
 
 def text_box(cx, cy, text, h, th, rot):
-    w = max(1, len(text)) * h * CHAR_W + th
+    w = font.width(text or "M", h, pen=th)
     hh = h + th
     if int(round(rot)) % 180 == 90:
         w, hh = hh, w

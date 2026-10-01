@@ -10,6 +10,7 @@ schematic does not depend on the user's global libraries.
 """
 import os, sys, uuid, copy, hashlib, math, datetime
 from .. import sexp, env
+from .. import font as stroke
 from ..sexp import Q, find, findall
 
 GRID = 1.27
@@ -152,16 +153,14 @@ def load_stock(libfile, name):
     return LibSymbol(name, s)
 
 
-CHAR_W = 1.1          # stroke-font advance for 1.27 mm text, mm per character (measured on renders)
-
-
 def _visible(entries):
     return [e for e in entries if e is None or not (len(e) > 3 and e[3] == "hide")]
 
 
-def _namelen(entries):
-    n = [len(e[1].replace("~{", "").replace("}", "")) for e in entries if e]
-    return max(n) if n else 0
+def _namew(entries):
+    """How far the widest pin name of a side reaches from where it starts, as KiCad draws it (mm at 1.27 mm)."""
+    n = [stroke.ink(e[1])[1] for e in entries if e]
+    return max(n) if n else 0.0
 
 
 def make_ic(name, units, ref="U", value=None, footprint="", datasheet="", description="",
@@ -181,11 +180,11 @@ def make_ic(name, units, ref="U", value=None, footprint="", datasheet="", descri
         L, Rr = _visible(u.get("left", [])), _visible(u.get("right", []))
         T, B = _visible(u.get("top", [])), _visible(u.get("bottom", []))
         rows = max(len(L), len(Rr), 1)
-        text_w = (_namelen(u.get("left", [])) + _namelen(u.get("right", []))) * CHAR_W + 2 * 1.016 + 2.54
+        text_w = _namew(u.get("left", [])) + _namew(u.get("right", [])) + 2 * 1.016 + 2.54
         w = max(u.get("width", 10.16), text_w, (max(len(T), len(B)) + 1) * 2.54)
         w = math.ceil(w / 2.54) * 2.54
-        top_extra = math.ceil(((_namelen(u.get("top", [])) * CHAR_W + 1.016) if T else 0) / 2.54) * 2.54
-        bot_extra = math.ceil(((_namelen(u.get("bottom", [])) * CHAR_W + 1.016) if B else 0) / 2.54) * 2.54
+        top_extra = math.ceil(((_namew(u.get("top", [])) + 1.016) if T else 0) / 2.54) * 2.54
+        bot_extra = math.ceil(((_namew(u.get("bottom", [])) + 1.016) if B else 0) / 2.54) * 2.54
         title_extra = 2.54 if u.get("title") else 0
         geo.append(dict(w=w, rows=rows, top_extra=top_extra + title_extra, bot_extra=bot_extra,
                         title=u.get("title")))
@@ -344,16 +343,17 @@ class Inst:
         return rpos, rj, vpos, vj
 
     def field_boxes(self, size=1.27):
-        """Approximate page boxes of the visible Reference and Value text (stroke font ~0.87 h a char)."""
+        """Page boxes of the visible Reference and Value text (the stroke font's own widths)."""
         rpos, rj, vpos, vj = self.field_layout()
         out = []
         shown = [(self.ref, rpos, rj)] if not self.ref.startswith("#") else []
         if not self.hide_value:
             shown.append((self.value, vpos, vj))
         for s, (px, py), j in shown:
-            w = len(s) * size * 0.87
-            x0 = px if j == "left" else (px - w if j == "right" else px - w / 2)
-            out.append((x0, py - size * 0.65, x0 + w, py + size * 0.65))
+            a, z = stroke.ink(s, size)                  # the strokes of the text, left-justified at px
+            w = stroke.width(s, size)
+            shift = 0.0 if j == "left" else (-w if j == "right" else -w / 2)
+            out.append((px + shift + a, py - size * 0.65, px + shift + z, py + size * 0.65))
         return out
 
     def pins_by_name(self, name):

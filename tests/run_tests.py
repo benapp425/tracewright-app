@@ -2446,6 +2446,7 @@ def schematic_laid_out_by_rule():
     r = finish(proj)
     assert r.get("connections") == "as asked", r.get("connections")
     assert not r.get("crowded"), r.get("crowded")
+    assert r["plot"].get("sheets", 0) >= 2 and r["plot"]["count"] == 0, r["plot"]      # clear on KiCad's own plot
     from tw.netlist import Netlist
     nl = Netlist.load(os.path.join(proj.build, "demo.net"))
     assert nl.net_of("R1", "1") == "CC1" and nl.net_of("R7", "2") == nl.net_of("J1", "A7") and nl.net_of("C2", "1") == "+3V3"
@@ -3313,6 +3314,96 @@ def my_parts_library_saved_and_used_again():
             assert lt.footprint_file(res["footprint"]) and lt.symbol_file(res["symbol"]), (res, lt.fp.get(stem), lt.sym.get(stem))
             r = await c.delete(f"/api/library/{it['id']}")
             assert r.status == 200 and not library.items()
+            rt.stop()
+    asyncio.run(go())
+
+
+@test(needs=("kicad",))
+def schematic_edits_in_the_app_with_undo():
+    """Editing the schematic in the app: a part's fields and its DNP flag written in place, a net renamed by its labels
+    (a local label's sheet, a hierarchical label with the sheet pins that meet it) with KiCad's netlist proving the
+    connections hold; a name already used, or a supply's, is refused; each edit one undo step (undo, redo); refused
+    while Claude works or while KiCad has the schematic open; Claude hears what the user did; a field the user set
+    that Claude later changes is listed for their OK. The text the engine places is measured with KiCad's own
+    glyph widths."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import approvals, boardedit, history
+    from tw import font
+    from tw.netlist import Netlist
+    from tw import kicad as twkicad
+    from tw.sch.style import _netlist_partition
+    assert abs(font.width("I2C_SDA") - 7.8232) < 1e-3 and abs(font.ink_width("U101_2") - 6.744) < 1e-3     # KiCad's numbers
+    assert font.width("~{RESET}") == font.width("RESET") and font.width("WWW") > 2 * font.width("iii")
+    pid = ProjectStore().import_copy(FIXTURE, "Sch edit demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            p = rt.p
+            base = f"/api/projects/{pid}/schematic"
+            mcu = os.path.join(p.tw.hw, "mcu.kicad_sch")
+            sheets = (await (await c.get(base)).json())["sheets"]
+            mcu_np = next(s_["name_path"] for s_ in sheets if s_["file"] == "mcu.kicad_sch")
+            lab = next(l for s_ in sheets for l in s_["labels"] if l["text"] == "I2C_SDA")
+            assert lab["box"][2] - lab["box"][0] > font.width("I2C_SDA") or lab["box"][3] - lab["box"][1] > font.width("I2C_SDA"), lab
+            r = await c.post(base + "/edit", json={"ops": [{"op": "fields", "ref": "R8", "fields": {"Value": "3.3k", "LCSC": "C25890"}}],
+                                                   "label": "R8: value, LCSC code"})
+            js = await r.json()
+            assert r.status == 200 and js["history"]["undo"] == 1 and "R8.Value = 3.3k" in js["changes"], js
+            t = open(mcu).read()
+            assert '(property "Value" "3.3k"' in t and '"C25890"' in t
+            assert any("R8.Value = 3.3k" in u for u in rt.user_changes), rt.user_changes
+            r = await c.post(base + "/edit", json={"ops": [{"op": "flags", "ref": "R8", "dnp": True}], "label": "R8: not fitted"})
+            assert r.status == 200, await r.text()
+            nl = Netlist.load(twkicad.netlist(p.tw.sch, os.path.join(p.tw.build, "t.net")))
+            assert nl.parts["R8"]["dnp"], nl.parts["R8"]
+            joined = set(_netlist_partition(nl))
+            # a local label's net: both of the sheet's I2C_SDA labels; a hierarchical label with its sheet pin
+            r = await c.post(base + "/edit", json={"ops": [{"op": "rename", "from": "I2C_SDA", "to": "SDA", "kind": "label", "sheet": mcu_np}]})
+            js = await r.json()
+            assert r.status == 200 and "Renamed I2C_SDA to SDA (2 labels)" in js["changes"][0], js
+            r = await c.post(base + "/edit", json={"ops": [{"op": "rename", "from": "USB_D_P", "to": "USB_DP", "kind": "hierarchical_label", "sheet": mcu_np}]})
+            js = await r.json()
+            assert r.status == 200 and "1 sheet pin" in js["changes"][0] and js["board_out_of_date"], js
+            root_t = open(p.tw.sch).read()
+            assert root_t.count('(pin "USB_DP"') == 1 and root_t.count('(pin "USB_D_P"') == 1, "only the MCU sheet's pin follows"
+            nl = Netlist.load(twkicad.netlist(p.tw.sch, os.path.join(p.tw.build, "t.net")))
+            assert set(_netlist_partition(nl)) == joined, "a rename changed what is connected"
+            assert any(n.endswith("USB_DP") for n in nl.nets) and any(n.endswith("/SDA") for n in nl.nets), sorted(nl.nets)[:30]
+            for to, why in (("I2C_SCL", "already a label"), ("GND", "supply"), ("TWO WORDS", "no spaces")):
+                r = await c.post(base + "/edit", json={"ops": [{"op": "rename", "from": "SDA", "to": to, "kind": "label", "sheet": mcu_np}]})
+                assert r.status == 422 and why in (await r.json())["error"], (to, await r.text())
+            hist = await (await c.get(base + "/history")).json()
+            assert hist["undo"] == 4 and hist["undo_label"].startswith("Renamed USB_D_P"), hist
+            # undo twice: the names come back; redo once
+            assert (await c.post(base + "/undo", json={})).status == 200 and (await c.post(base + "/undo", json={})).status == 200
+            t = open(mcu).read()
+            assert t.count('(label "I2C_SDA"') == 2 and '(hierarchical_label "USB_D_P"' in t and '(label "SDA"' not in t
+            r = await c.post(base + "/redo", json={})
+            assert r.status == 200 and open(mcu).read().count('(label "SDA"') == 2
+            # refused while Claude works, and while KiCad has the schematic open
+            app.agent_busy = lambda _pid: True
+            r = await c.post(base + "/edit", json={"ops": [{"op": "fields", "ref": "R8", "fields": {"Value": "1k"}}]})
+            assert r.status == 409 and "Claude is working" in (await r.json())["error"]
+            app.agent_busy = lambda _pid: False
+            rt.live["sch_open"] = True
+            r = await c.post(base + "/edit", json={"ops": [{"op": "fields", "ref": "R8", "fields": {"Value": "1k"}}]})
+            assert r.status == 409 and "open in KiCad" in (await r.json())["error"]
+            rt.live["sch_open"] = False
+            # a field the user set by hand, changed in a later run by Claude: listed for the user's OK
+            assert boardedit.handmade(p)["fields"]["R8"]["Value"] == "3.3k"
+            a = history.snapshot(p.root, "the user's edits")
+            t = open(mcu).read()
+            with open(mcu, "w") as f:
+                f.write(t.replace('(property "Value" "3.3k"', '(property "Value" "10k"', 1))
+            b = history.snapshot(p.root, "Claude's run")
+            items = approvals.review_run(p, a, b, on=dict(approvals.DEFAULTS), handmade=boardedit.handmade(p))
+            hm = [x for x in items if x["kind"] == "handmade" and x.get("ref") == "R8"]
+            assert hm and "value 3.3k -> 10k" in hm[0]["title"] and "by hand" in hm[0]["detail"], items
             rt.stop()
     asyncio.run(go())
 

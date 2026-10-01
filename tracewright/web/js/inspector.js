@@ -4,6 +4,7 @@
 import { h, clear, api, toast, modal } from "./util.js";
 import { icon } from "./icons.js";
 import { netKindText } from "./board.js";
+import { editPart } from "./schedit.js";
 
 const enc = encodeURIComponent;
 const short = (n) => (n || "").split("/").pop();
@@ -63,6 +64,7 @@ export class Inspector {
       findingsLine(info),
       h("div.in-acts",
         h("button.btn.sm.primary", { onclick: () => this.open(info) }, icon("fullscreen", 13), "Open"),
+        info.in_schematic ? h("button.btn.sm", { onclick: () => editPart(this.ws, info), "data-tip": "Its value, footprint, part number, LCSC code; fitted or not" }, icon("pencil", 13), "Edit") : null,
         datasheetButton(this.ws, info, "sm"), this.libraryButton(info)));
   }
 

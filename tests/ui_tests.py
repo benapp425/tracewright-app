@@ -1104,6 +1104,62 @@ async def simulation_under_docs_and_in_signoff(t):
         shutil.rmtree(d, ignore_errors=True)
 
 
+@test
+async def schematic_edits_from_the_card_and_labels(t):
+    """A part's card has Edit: the value changed there is written into the schematic; a net label clicked on the
+    sheet renames the net; ⌘Z in the schematic view undoes it."""
+    root = t.s.demo["root"]
+    hw = os.path.join(root, "hardware", "demo")
+    files = {f: open(os.path.join(hw, f)).read() for f in os.listdir(hw) if f.endswith(".kicad_sch")}
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.ws)", 30)
+        await t.page.js(f"{BV}.ws.show('schematic'); 1")
+        SV = f"{BV}.ws.views.schematic"
+        await t.page.wait(f"{SV} && {SV}.sheets && {SV}.sheets.length > 0", 20)
+        mcu = await t.page.js(f"{SV}.sheets.find((s) => s.file === 'mcu.kicad_sch').name_path")
+        await t.page.js(f"{SV}.showSheet({json.dumps(mcu)}); {SV}.toggle('R8'); 1")
+        await t.page.wait("[...document.querySelectorAll('.inspector .in-acts button')].some((b) => b.textContent.includes('Edit'))", 15)
+        await t.page.js("[...document.querySelectorAll('.inspector .in-acts button')].find((b) => b.textContent.includes('Edit')).click(); 1")
+        await t.page.wait("document.querySelector('.modal.pe input')", 5)
+        await t.shot("part-edit")
+        await t.page.js("""(() => { const i = document.querySelector('.modal.pe input'); i.value = '3.3k'; i.dispatchEvent(new Event('input')); 
+          [...document.querySelectorAll('.modal.pe .modal-foot button')].find((b) => b.textContent === 'Save').click(); return 1; })()""")
+        await t.page.wait("!document.querySelector('.modal.pe')", 10)
+        for _ in range(50):
+            if '(property "Value" "3.3k"' in open(os.path.join(hw, "mcu.kicad_sch")).read():
+                break
+            await asyncio.sleep(0.2)
+        check('(property "Value" "3.3k"' in open(os.path.join(hw, "mcu.kicad_sch")).read(), "the value was not written")
+        await t.page.wait("document.querySelector('.inspector .in-title') && document.querySelector('.inspector .in-title').textContent.includes('3.3k')", 15)
+        # a label on the sheet: rename its net
+        await t.page.wait(f"{SV}.cur === {json.dumps(mcu)} && document.querySelector('.sch-label[data-text=\"I2C_SDA\"]')", 15)
+        await t.page.js("document.querySelector('.sch-label[data-text=\"I2C_SDA\"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); 1")
+        await t.page.wait("document.querySelector('.rn-pop input')", 5)
+        await t.shot("rename-net")
+        await t.page.js("""(() => { const i = document.querySelector('.rn-pop input'); i.value = 'SDA';
+          [...document.querySelectorAll('.rn-pop button')].find((b) => b.textContent === 'Rename').click(); return 1; })()""")
+        for _ in range(80):
+            if open(os.path.join(hw, "mcu.kicad_sch")).read().count('(label "SDA"') == 2:
+                break
+            await asyncio.sleep(0.25)
+        check(open(os.path.join(hw, "mcu.kicad_sch")).read().count('(label "SDA"') == 2, "the net was not renamed")
+        await t.page.wait(f"{SV}.history && {SV}.history.undo >= 2 && !document.querySelector('.rn-pop')", 10)
+        # ⌘Z in the schematic view
+        await t.page.js("document.activeElement && document.activeElement.blur && document.activeElement.blur(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true })); 1")
+        for _ in range(60):
+            if open(os.path.join(hw, "mcu.kicad_sch")).read().count('(label "I2C_SDA"') == 2:
+                break
+            await asyncio.sleep(0.25)
+        check(open(os.path.join(hw, "mcu.kicad_sch")).read().count('(label "I2C_SDA"') == 2, "⌘Z did not undo the rename")
+        await t.page.wait(f"{SV}.history && {SV}.history.redo === 1", 10)
+        await t.shot("schematic-edited")
+    finally:
+        for f, txt in files.items():
+            with open(os.path.join(hw, f), "w") as fh:
+                fh.write(txt)
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

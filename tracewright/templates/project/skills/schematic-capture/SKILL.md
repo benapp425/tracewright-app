@@ -19,9 +19,12 @@ description: Draw or change the schematic - generate it with tw.sch for new desi
   cap="C100n", kind="analog")` (rail, resistor, the tap labelled, resistor, ground; the filter capacitor beside);
   notes: `g.note("C2 22u keeps the LDO stable.", near="C2")`.
 - `p.layout()` per page, then `d.write(hw)` and `tw.sch.finish(project)`: it reports `connections` ("as asked", or
-  what KiCad's netlist does differently -- fix those before anything else) and `crowded` (patterns drawn aside
-  because there was no room at the pin: give the group more room or split it). Signals leaving a group get
-  labels; signals on several sheets get global labels, redrawn in the project's style.
+  what KiCad's netlist does differently -- fix those before anything else), `crowded` (patterns drawn aside
+  because there was no room at the pin: give the group more room or split it) and `plot` (the sheets as KiCad
+  plots them: every place text overlaps text, a wire, a symbol or a block border, read from the strokes -- fix each
+  one, it is what the user will see). The engine sizes text with KiCad's own glyph widths (tw.font), so what it
+  places clear is clear on the plot. Signals leaving a group get labels; signals on several sheets get global
+  labels, redrawn in the project's style.
 
 For what the patterns cannot draw, the low-level builder (`tools/tw/examples/demo_board.py`):
 - A `catalog()` of `Part(symbol, footprint, value, MPN, manufacturer, LCSC, datasheet)`; stock symbols with
@@ -44,8 +47,10 @@ For what the patterns cannot draw, the low-level builder (`tools/tw/examples/dem
   `bom.package`), `power.domains` (parts on different rails wired together), `power.regulators`,
   `power.thermal` (declare the rails' currents), `power.decoupling`, `lessons.*`. Look at every sheet with `render`.
 
-**Existing schematic** -- change it in place: `tw.sch.edit.set_fields` for fields (values, MPN, LCSC), or make
-the edit in KiCad live. Take a `snapshot` first. If KiCad has the schematic open, save it there before editing
+**Existing schematic** -- change it in place: `tw.sch.edit.set_fields` for fields (values, MPN, LCSC),
+`set_flags` for DNP, `rename_net` for a net's name, or make the edit in KiCad live. The user edits the same way from
+the app (a part's card, a label on the sheet): their edits arrive in your next turn's context -- fold them into
+design/schematic.py before you run it again, or the script puts the old values back. Take a `snapshot` first. If KiCad has the schematic open, save it there before editing
 the file and reload it after (the `kicad` tool does both). `./tw style` shows how the sheets are joined;
 `./tw style flat` or `./tw style hierarchical` redraws them the other way, proved against KiCad's netlist.
 
