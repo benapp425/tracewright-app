@@ -263,6 +263,95 @@ def board_edits_from_the_app_undo_and_redo():
 
 
 @test(needs=("kicad", "kpy"))
+def stackups_planned_checked_and_put_on_the_board():
+    """Stack-ups, 2 to 10 layers: every count's starting point holds (every signal layer next to a plane); a plane on
+    an outer layer, an unknown build or net, or a count past the agreed limit is refused; Claude's tool saves the plan
+    with its reason and puts it on the board: six copper layers, the planes typed as such and poured, the fab's build
+    written into the board file (read back for impedance, kept by KiCad), named for the order; the board view gets
+    each layer's role; going down to four with copper on the layers that would go is refused."""
+    from tracewright.server import App
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools
+    from tw import stackup
+    from tw.board import Board
+    from tracewright import order
+    for n in stackup.COUNTS:
+        plan, probs = stackup.validate({"layers": n}, ["GND", "+3V3", "SDA"])
+        assert not [t for s_, t in probs if s_ == "error"], (n, probs)
+        assert len(plan["roles"]) == n and plan["roles"][0] == plan["roles"][-1] == "signal"
+        if n >= 4:
+            assert "GND" in plan["planes"].values() and not [t for s_, t in probs if "no plane next" in t], (n, probs)
+    bad = {"outer plane": {"layers": 4, "roles": ["plane", "signal", "plane", "signal"]},
+           "unknown build": {"layers": 6, "preset": "JLC04161H-7628"}, "unknown net": {"layers": 4, "planes": {"In1.Cu": "VNOPE"}},
+           "three layers": {"layers": 3}}
+    for what, pl in bad.items():
+        _, probs = stackup.validate(pl, ["GND", "+3V3"])
+        assert any(s_ == "error" for s_, _ in probs), (what, probs)
+    _, probs = stackup.validate({"layers": 6}, ["GND"], limit=4)
+    assert any("agreed limit is 4" in t for _, t in probs), probs
+    assert "In1.Cu: GND plane" in stackup.describe(stackup.default_plan(4, {"GND": 9, "+3V3": 4}))
+    pid = ProjectStore().import_copy(FIXTURE, "Stack-up demo").id
+
+    async def go():
+        app = App()
+        rt = app.rt(pid)
+        try:
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = (await T["stackup"]({"action": "plan", "layers": 6, "why": "short"}))
+            assert out.get("is_error"), out
+            out = (await T["stackup"]({"action": "plan", "layers": 6, "why": "Two signal layers between ground planes for the USB pair."}))
+            txt = out["content"][0]["text"]
+            assert not out.get("is_error") and "In1.Cu: GND plane" in txt and "saved" in txt, txt
+            assert rt.p.cfg["stackup"]["why"].startswith("Two signal layers"), rt.p.cfg.get("stackup")
+            out = await T["stackup"]({"action": "apply"})
+            assert not out.get("is_error"), out
+            pcb = rt.p.tw.pcb
+            b = Board.load(pcb)
+            assert b.copper == stackup.names(6), b.copper
+            types = {n: t for _, n, t, _ in b.layers}
+            assert [types[l] for l in b.copper] == ["signal", "power", "signal", "power", "power", "signal"], types
+            assert b.dielectric_between("F.Cu", "In1.Cu") == (0.1088, 4.16), b.dielectric_between("F.Cu", "In1.Cu")
+            assert stackup.identify(b) == "JLC06161H-2116" and order.specs(b)["stackup"] == "JLC06161H-2116"
+            planes = {z.layers[0]: z.net for z in b.zones if z.name.endswith(z.layers[0]) and "plane" in z.name}
+            assert planes.get("In1.Cu") == "GND" and planes.get("In4.Cu") == "GND" and planes.get("In3.Cu"), planes
+            assert all(sum(len(f) for f in z.fills.values()) for z in b.zones if "plane" in z.name), "a plane is not poured"
+            js = rt.board_json()
+            assert js["stackup"]["roles"]["In2.Cu"]["role"] == "signal" and js["stackup"]["roles"]["In1.Cu"] == {"role": "plane", "net": "GND"}, js["stackup"]
+            # down to four layers: In3 and In4 hold planes, so no
+            plan4, _ = stackup.validate({"layers": 4}, list(b.nets))
+            res = stackup.apply(rt.p.tw, plan4)
+            assert not res["ok"] and "In3.Cu" in res["error"], res
+        finally:
+            rt.stop()
+    asyncio.run(go())
+
+
+@test(needs=("kicad", "kpy"))
+def router_routes_on_the_stackups_signal_layers():
+    """On a six-layer stack-up the router routes the whole demo board again on the signal layers only (no track on a
+    plane), every net, and KiCad's DRC is clean with nothing unconnected."""
+    from tw import stackup, kicad
+    from tw.board import Board
+    from tw.route import driver
+    p = fixture_copy("route6")
+    b = Board.load(p.pcb)
+    nets = collections.Counter(pd.net for pd in b.pads() if pd.net)
+    plan, probs = stackup.validate({"layers": 6}, dict(nets))
+    assert stackup.apply(p, plan, live=False)["ok"]
+    p.cfg["stackup"] = plan
+    p.save_cfg()
+    p = env.Project(p.root)
+    r = driver.route(p, clear=True, live=False, log=lambda m: None)
+    s_ = r["summary"]
+    assert s_["routed"] == s_["nets"] and not s_["failed"], s_
+    b = Board.load(p.pcb)
+    planes = {l for l, ro in zip(stackup.names(6), plan["roles"]) if ro == "plane"}
+    assert not [t for t in b.tracks if t.layer in planes], collections.Counter(t.layer for t in b.tracks)
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+    assert not d["violations"] and not d["unconnected_items"], ([v.get("description") for v in d["violations"]][:5], len(d["unconnected_items"]))
+
+
+@test(needs=("kicad", "kpy"))
 def router_reroutes_cleanly():
     """The whole demo board routed again from nothing (every track and via taken off first): every net routed,
     KiCad's DRC clean with nothing left unconnected, the USB pair run side by side and matched, no net far longer

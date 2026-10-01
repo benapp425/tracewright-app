@@ -51,7 +51,7 @@ export class OrderPanel {
       r.fix && r.ok !== true ? h("button.linkbtn", { onclick: () => this.ws.show(r.fix) }, r.fix === "checks" ? "Checks" : "BOM") : null)));
     const s = d.specs;
     const spec = h("div.or-card", h("div.label", "Board specs"), h("div.or-specs",
-      row("Size", `${s.w} × ${s.h} mm`), row("Layers", s.layers), row("Thickness", `${s.thickness} mm`), row("Copper", `${s.copper_oz} oz outer`),
+      row("Size", `${s.w} × ${s.h} mm`), row("Layers", s.stackup && s.layers > 2 ? `${s.layers} (${s.stackup})` : s.layers), row("Thickness", `${s.thickness} mm`), row("Copper", `${s.copper_oz} oz outer`),
       row("Finish", s.finish), row("Min track / drill", `${s.min_track ?? "-"} / ${s.min_drill ?? "-"} mm`),
       row("Parts", `${s.parts}${s.smd_sides.length > 1 ? ", SMD on both sides" : s.smd_sides.length ? ", SMD on the " + (s.smd_sides[0] === "F" ? "top" : "bottom") : ""}`)));
     const est = d.estimate;

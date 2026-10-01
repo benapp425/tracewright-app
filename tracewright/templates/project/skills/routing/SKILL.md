@@ -7,8 +7,9 @@ description: Route the board like a person - supplies first and wide, pairs coup
 1. Rules first: declare each supply's voltage and current, pairs' impedance and RF lines with the `nets` tool,
    then `nets` classes with apply (IPC-2221 widths for the currents, IPC-2141 widths and gaps for the
    impedances over this stack-up); clearances within the fab profile (`dfm.rules`).
-2. Planes and pours: on four layers, inner GND (and power) planes; on two layers, GND pours on both sides.
-   Keepouts from the data sheets as rule areas.
+2. Planes and pours: the stack-up's planes (`stackup` show; apply pours them), each signal layer next to one; on
+   two layers, GND pours on both sides. The router routes on the signal layers only, each in its direction, and
+   keeps a pair's second half on its partner's layers. Keepouts from the data sheets as rule areas.
 3. Critical nets by hand (`copper`): switch nodes, the hot loop, pairs at connectors, sense lines.
 4. Supplies with `route --nets ...` (wide classes route first), then pairs, then the rest short-first. The grid
    router streams every net live; watch for nets it reports failed and give them room or route them by hand.

@@ -81,8 +81,11 @@ def fp_dirs(project, lib_ids):
 
 def sync(project, remove_extra=False, save=True):
     """Update the board from the schematic (creates an empty board first if there is none)."""
-    if not project.has_pcb():
-        new_board(project)
+    if not project.has_pcb():                # with the stack-up plan's layer count, else the agreed limit's
+        from .. import stackup, constraints
+        plan = stackup.get(getattr(project, "cfg", None))
+        n = (plan or {}).get("layers") or (constraints.get(getattr(project, "cfg", None) or {}) or {}).get("layers") or 2
+        new_board(project, copper=int(n) if int(n) in stackup.COUNTS else 2)
     net = os.path.join(project.build, f"{project.stem}.net")
     kicad.netlist(project.sch, net)
     nl = Netlist.load(net)

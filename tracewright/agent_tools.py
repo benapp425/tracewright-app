@@ -319,6 +319,88 @@ def tool_list(rt, app):
         hub.emit("board.changed", version=-1, source="tracewright")
         return _text(_json(res), error=not res.get("ok"))
 
+    @reg("stackup", "The board's copper layers, 2 to 10: which are signal layers (and the direction each is routed in) "
+         "and which are planes (and their nets), on the fab's standard build. Decide it from the design: 2 layers for "
+         "simple, slow boards; 4 (signal, GND, supply, signal) once there is anything fast (USB, Ethernet, fast SPI, "
+         "MIPI), a fine-pitch QFN/BGA to fan out, or EMC to meet; 6 or more for several fast interfaces, a BGA with "
+         "many rows or many supplies. Every signal layer next to a plane (its return path and impedance); two signal "
+         "layers side by side routed crosswise (x and y); a ground plane under every fast layer. The router routes on "
+         "the signal layers only, each in its direction; planes are poured over the whole board. action: show (what the "
+         "board has, the plan, the agreed limit, the builds) | plan (layers, preset?, roles?: per layer F.Cu first, "
+         "signal | plane, planes?: {layer: net}, directions?: {layer: x | y | any}, why: one or two plain sentences "
+         "for the user) | apply (the saved plan onto the board: layer count, plane layers, the build, the plane pours; "
+         "again once the board has its outline). The agreed limit (the user's layer count) is not changed without "
+         "asking the user.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["show", "plan", "apply"]},
+                                           "layers": {"type": "integer"}, "preset": {"type": "string"},
+                                           "roles": {"type": "array", "items": {"type": "string"}},
+                                           "planes": {"type": "object"}, "directions": {"type": "object"},
+                                           "why": {"type": "string"}},
+          "required": ["action"]})
+    async def stackup_t(args):
+        from tw import stackup, constraints
+        from tw.board import Board
+        tw = proj()
+        a = args["action"]
+        limit = (constraints.get(p.cfg) or {}).get("layers")
+        b = await run(Board.load, tw.pcb) if tw.has_pcb() else None
+        nets = {}
+        if b is not None:
+            for pd in b.pads():
+                if pd.net and not pd.net.startswith("unconnected-"):
+                    nets[pd.net] = nets.get(pd.net, 0) + 1
+        plan = stackup.get(p.cfg)
+        if a == "show":
+            lines = []
+            if b is not None:
+                kinds = {n: t for _, n, t, _ in b.layers}
+                lines.append("board: " + ", ".join(f"{l} ({kinds.get(l, '?')})" for l in b.copper) + f", {b.thickness:g} mm")
+            else:
+                lines.append("no board yet")
+            lines.append("agreed limit: " + (f"{limit} copper layers" if limit else "none set"))
+            lines.append("plan: " + (stackup.describe(plan) if plan else "none (2 signal layers; inner layers, if any, are planes)"))
+            if plan and plan.get("why"):
+                lines.append("why: " + plan["why"])
+            if plan and b is not None and len(b.copper) != plan["layers"]:
+                lines.append(f"the board has {len(b.copper)} copper layers: apply the plan")
+            lines.append("builds: " + "; ".join(f"{k} ({v['title']})" for k, v in stackup.PRESETS.items()))
+            n = plan["layers"] if plan else (limit or (len(b.copper) if b is not None else 4))
+            if n in stackup.COUNTS:
+                lines.append(f"a starting point for {n}:\n" + stackup.describe(stackup.default_plan(n, nets)))
+            return _text("\n".join(lines))
+        if a == "plan":
+            why = (args.get("why") or "").strip()
+            if len(why) < 12:
+                return _text("why: one or two plain sentences for the user (what needs these layers)", error=True)
+            want = {k: args[k] for k in ("layers", "preset", "roles", "planes", "directions") if args.get(k) is not None}
+            want["why"] = why
+            new, probs = stackup.validate(want, nets or None, limit)
+            errs = [t for s_, t in probs if s_ == "error"]
+            if errs:
+                return _text("not saved: " + "; ".join(errs), error=True)
+            p.reload()
+            p.cfg["stackup"] = new
+            await run(p.save)
+            hub.emit("project.changed", summary=p.summary())
+            warns = [t for s_, t in probs if s_ == "warning"]
+            return _text(stackup.describe(new) + ("\nwarnings: " + "; ".join(warns) if warns else "") +
+                         "\nsaved; action apply puts it on the board")
+        if not plan:
+            return _text("no plan yet: action plan first", error=True)
+        if b is None:
+            return _text("no board yet: sync_board first (it is made with the plan's layer count)", error=True)
+        plan, probs = stackup.validate(plan, nets or None, limit)
+        errs = [t for s_, t in probs if s_ == "error"]
+        if errs:
+            return _text("the plan does not hold: " + "; ".join(errs), error=True)
+        rt.mark_self(60)
+        res = await run(stackup.apply, tw, plan)
+        rt.mark_self(4)
+        hub.emit("board.changed", version=-1, source="tracewright")
+        if not res.get("ok"):
+            return _text(res.get("error") or "the stack-up did not apply", error=True)
+        return _text("applied: " + "; ".join(res.get("did", [])))
+
     @reg("route", "Route nets with the grid router (human style: 0/45/90, few vias, supplies first; streamed live to the "
          "app and into KiCad when the board is open). nets: names (default: every unrouted net); clear: tear up those "
          "nets first; engine: grid | freerouting (the whole board only, replacing what is routed; no nets).",

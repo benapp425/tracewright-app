@@ -9,7 +9,8 @@ layer), then supplies (wide classes), then signals short-first. Multi-pin nets g
 the island with the most pads, joining the nearest island each time. When a connection fails, the
 nets in the way are found (route over them at a penalty), ripped up, and routed again after it.
 
-Two signal layers (F.Cu, B.Cu): inner layers are taken to be planes. `on_progress` is called after
+The routing layers are F.Cu and B.Cu (inner layers taken to be planes), or the signal layers of the project's
+stack-up plan (tracewright.json "stackup", see tw/stackup.py), each in its direction. `on_progress` is called after
 every net so the caller can show routing as it happens.
 """
 import math, time, collections
@@ -27,15 +28,15 @@ REFINE_MIN_S = 20.0        # v2: the second look's time budget is the routing ti
 HIST_AMOUNT = 40.0         # PathFinder history added to contested cells at each rip-up
 
 
-def dump_for_router(b):
-    """The router's input (board mm) from a parsed board."""
+def dump_for_router(b, routing=R.LAYERS):
+    """The router's input (board mm) from a parsed board; routing: the layers tracks may go on."""
     d = {"outline": [], "pads": [], "rules": [], "tracks": [], "vias": [], "footprints": []}
     if b.outline:
         d["outline"] = [{"outline": b.outline[0], "holes": []}]
         d["cutouts"] = b.outline[1:]
     for p in b.pads():
         layers = [l for l in p.layers if l.endswith(".Cu")]
-        shp = {l: [{"outline": pl} for pl in p.polys] for l in layers if l in R.LAYERS}
+        shp = {l: [{"outline": pl} for pl in p.polys] for l in layers if l in routing}
         d["pads"].append({"ref": p.ref, "num": p.num, "net": p.net, "pos": (p.x, p.y), "layers": layers, "shape": shp,
                           "drill": min(p.drill_w, p.drill_h) if p.drill else 0.0, "size": (p.w, p.h),
                           "orient": p.angle, "npth": p.kind == "np_thru_hole"})
@@ -45,7 +46,7 @@ def dump_for_router(b):
         ko = z.keepout or {}
         layers = []
         for l in z.layers:
-            layers += list(R.LAYERS) if l in ("*.Cu", "F&B.Cu") else [l]
+            layers += list(routing) if l == "*.Cu" else ["F.Cu", "B.Cu"] if l == "F&B.Cu" else [l]
         d["rules"].append({"owner": z.owner or "", "name": z.name, "rule": True, "layers": layers,
                            "no_tracks": bool(ko.get("tracks")), "no_vias": bool(ko.get("vias")),
                            "no_pour": bool(ko.get("copperpour")), "poly": [{"outline": pl} for pl in z.outline]})
@@ -77,11 +78,11 @@ def profiles_for(pro, net_class, nets, necks=False, neck_w=NECK_W, neck_cl=NECK_
     return profs, clear
 
 
-def fine_pitch_areas(b, pitch=0.8, margin=1.5):
+def fine_pitch_areas(b, pitch=0.8, margin=1.5, routing=R.LAYERS):
     """[(ref, (x0, y0, x1, y1))] around footprints whose pads of different nets sit closer than `pitch`."""
     out = []
     for fp in b.fp_list:
-        pads = [p for p in fp.pads if p.net and any(l in R.LAYERS for l in p.layers)]
+        pads = [p for p in fp.pads if p.net and any(l in routing for l in p.layers)]
         if len(pads) < 3:
             continue
         close = False
@@ -112,6 +113,14 @@ def plane_nets(b):
             for l in z.layers:
                 out[z.net].add(l)
     return dict(out)
+
+
+def stackup_dirs(plan):
+    """The router's layer directions from a stack-up plan (None: F.Cu and B.Cu as they always were)."""
+    if not plan:
+        return None
+    from .. import stackup
+    return stackup.directions(plan)
 
 
 class Job:
@@ -176,7 +185,7 @@ def islands(B, Rt, net, pads, existing):
         for p in pads_in:
             cells += R.pad_cells(B, p, Rt._prof_of.get(net, "Default"))
             pts.append(tuple(p["pos"]))
-        segs_in = [(x["layer"], x["a"], x["b"], x["w"]) for k, x in members if k == "seg" and x["layer"] in R.LAYERS]
+        segs_in = [(x["layer"], x["a"], x["b"], x["w"]) for k, x in members if k == "seg" and x["layer"] in B.layers]
         if segs_in:
             cells += Rt.cells_of(segs_in)
             pts += [s[1] for s in segs_in]
@@ -201,6 +210,11 @@ class GridRoute:
         self.via_cost = via_cost
         self.failed = {}
         self.hist_amount = HIST_AMOUNT
+        from .. import stackup
+        self.plan = stackup.get(getattr(self.p, "cfg", None))
+        if self.plan and len(self.b.copper) != self.plan["layers"]:
+            self.plan = None                          # not applied to the board yet: as without one
+        self.routing = tuple(stackup.routing_layers(self.plan, self.b.copper))
 
     def _net_ok(self, n):
         if not n or n.startswith("unconnected-"):
@@ -213,7 +227,7 @@ class GridRoute:
         b = self.b
         if not b.outline:
             raise ValueError("the board has no closed outline; draw Edge.Cuts first")
-        dump = dump_for_router(b)
+        dump = dump_for_router(b, self.routing)
         if self.clear:                   # what ops() takes off the board is no obstacle (junk copper included)
             gone = lambda n: self._net_ok(n) or (self.only is None and (not n or n.startswith("unconnected-")))
             dump["tracks"] = [t for t in dump["tracks"] if not gone(t["net"])]
@@ -230,24 +244,24 @@ class GridRoute:
             pass
         nets = sorted(b.nets)
         self.net_class = {n: self.pro.class_of(n, nl_class.get(n)) for n in nets}
-        self.necks = fine_pitch_areas(b)
+        self.necks = fine_pitch_areas(b, routing=self.routing)
         profs, clear = profiles_for(self.pro, self.net_class, nets, necks=bool(self.necks))
-        B = R.Board(dump, profs, clear, self.net_class, necks=[r for _, r in self.necks])
+        B = R.Board(dump, profs, clear, self.net_class, necks=[r for _, r in self.necks], layers=self.routing)
         B.stamp_pads()
         B.stamp_rules()
         for hole in dump.get("cutouts", []):
-            B.stamp("", "Default", list(R.LAYERS), "poly", hole, extra=0.3, block_all_vias=True)
+            B.stamp("", "Default", list(B.layers), "poly", hole, extra=0.3, block_all_vias=True)
         for p in dump["pads"]:
             if p["npth"] and p["drill"] > 0:          # nothing crosses a non-plated hole
-                B.stamp("", "Default", list(R.LAYERS), "circle", (p["pos"][0], p["pos"][1], p["drill"] / 2), extra=0.2,
+                B.stamp("", "Default", list(B.layers), "circle", (p["pos"][0], p["pos"][1], p["drill"] / 2), extra=0.2,
                         block_all_vias=True)
         for t in dump["tracks"]:
-            if t["layer"] in R.LAYERS:
+            if t["layer"] in B.layers:
                 B.stamp_track(t["net"], t["layer"], t["a"], t["b"], t["w"])
         for v in dump["vias"]:
             B.stamp_via(v["net"], v["pos"], v["d"])
         B.snapshot()
-        Rt = R.Router(B, via=self.via_cost)
+        Rt = R.Router(B, via=self.via_cost, directions=stackup_dirs(self.plan))
         if self.layer_dirs:                           # layer directions: F.Cu runs along y, B.Cu along x
             Rt.fcu_cross = V2_FCU_CROSS
         Rt._prof_of = {n: self.net_class.get(n, "Default") for n in nets}
@@ -285,7 +299,7 @@ class GridRoute:
             if net not in self.planes or not self._net_ok(net) or p["drill"] > 0:
                 continue
             pour_layers = self.planes[net]
-            layer = next((l for l in p["layers"] if l in R.LAYERS), None)
+            layer = next((l for l in p["layers"] if l in B.layers), None)
             if layer is None or layer in pour_layers and len(pour_layers) == 1:
                 continue
             if layer in pour_layers:
@@ -300,7 +314,7 @@ class GridRoute:
         prof = self.net_class.get(net, "Default")
         pr = B.profiles[prof]
         lt, lv = B.legal(net, prof)
-        li = R.LAYERS.index(layer)
+        li = B.layers.index(layer)
         j0, i0 = B.cell(*p["pos"])
         r = int(radius / R.RES)
         cand = []
@@ -333,7 +347,7 @@ class GridRoute:
             if not self._net_ok(net):
                 continue
             cu = [l for l in layers if l.endswith(".Cu")]
-            if len(cu) < 2 and not any(l not in R.LAYERS for l in cu):
+            if len(cu) < 2:                            # poured on one layer: nothing to join
                 continue
             polys = [pl for z in b.zones if z.net == net and not z.is_rule_area for pl in z.outline]
             if not polys:
@@ -358,8 +372,8 @@ class GridRoute:
                         for dj in range(-r, r + 1):
                             for di in range(-r, r + 1):
                                 j, i = j0 + dj, i0 + di
-                                if 0 <= j < B.ny and 0 <= i < B.nx and lv[j * B.nx + i] and lt[0][j * B.nx + i] \
-                                        and lt[1][j * B.nx + i]:
+                                if 0 <= j < B.ny and 0 <= i < B.nx and lv[j * B.nx + i] and \
+                                        all(lt[k][j * B.nx + i] for k in range(len(B.layers))):
                                     d = dj * dj + di * di
                                     if best is None or d < best[0]:
                                         best = (d, j, i)
@@ -375,7 +389,7 @@ class GridRoute:
         return made
 
     # ------------------------------------------------------------------ routing
-    def route_job(self, job, keep_going=False, allow_vias=True, cell_cost=None):
+    def route_job(self, job, keep_going=False, allow_vias=True, cell_cost=None, layers=None):
         B, Rt = self.B, self.Rt
         isl = islands(B, Rt, job.net, job.pads, {"tracks": [t for t in self.dump["tracks"]],
                                                   "vias": self.dump["vias"]})
@@ -388,7 +402,8 @@ class GridRoute:
         while rest:
             nxt = min(rest, key=lambda g: min(geom.dist(a, q) for a in g[1] for q in pts))
             rest.remove(nxt)
-            rec = Rt.connect(job.net, job.prof, tree, nxt[0], fcu_factor=job.fcu, allow_vias=allow_vias, cell_cost=cell_cost)
+            rec = Rt.connect(job.net, job.prof, tree, nxt[0], fcu_factor=job.fcu, allow_vias=allow_vias, cell_cost=cell_cost,
+                             layers=layers)
             if rec is None:
                 fail = (list(tree), nxt[0], f"({nxt[1][0][0]:.1f}, {nxt[1][0][1]:.1f})")
                 if not keep_going:
@@ -455,7 +470,7 @@ class GridRoute:
             mate = pairs.get(net)
             if mate and any(r["net"] == mate for r in Rt.routes):
                 cc = self.corridor(net, mate, job.prof)
-            fail = self.route_job(job, cell_cost=cc)
+            fail = self.route_job(job, cell_cost=cc, layers=self.layers_of(mate) if cc is not None else None)
             if fail is not None and cc is not None:      # no room beside its partner: route it on its own
                 Rt.rip([net])
                 Rt.rebuild()
@@ -469,7 +484,7 @@ class GridRoute:
                 job.swapped = by_net[mate].swapped = True
                 if self.route_job(job) is None:
                     cc2 = self.corridor(mate, net, by_net[mate].prof)
-                    if self.route_job(by_net[mate], cell_cost=cc2) is None:
+                    if self.route_job(by_net[mate], cell_cost=cc2, layers=self.layers_of(net) if cc2 is not None else None) is None:
                         self.coupled[mate] = net
                         fail = None
                         recs = [r for r in Rt.routes[before:] if r["net"] in (net, mate)]
@@ -632,16 +647,24 @@ class GridRoute:
                 out[a], out[b] = b, a
         return out
 
+    def layers_of(self, net):
+        """On a board with more than two routing layers, the layers a routed net's tracks are on (a pair's second
+        half keeps to them: one reference plane, one impedance), else None (any layer)."""
+        if len(self.B.layers) <= 2:
+            return None
+        ls = {sg[0] for r in self.Rt.routes if r["net"] == net for sg in r["segments"]}
+        return ls or None
+
     def corridor(self, net, mate, prof):
         """A cost field for the second half of a pair: free in a band at the pair's pitch beside the first
         half's route, PAIR_K a cell everywhere else, so the two run side by side."""
         B, Rt = self.B, self.Rt
-        recs = [[sg for sg in r["segments"] if sg[0] in R.LAYERS] for r in Rt.routes if r["net"] == mate]
+        recs = [[sg for sg in r["segments"] if sg[0] in B.layers] for r in Rt.routes if r["net"] == mate]
         recs = [r for r in recs if r]
         if not recs:
             return None
         pitch, tol = self.pair_pitch(net, mate, prof)
-        cc = np.full(len(R.LAYERS) * B.N, PAIR_K, dtype=np.float32)
+        cc = np.full(len(B.layers) * B.N, PAIR_K, dtype=np.float32)
         mine = [tuple(p["pos"]) for p in self.by_pads.get(net, [])]
         cross = lambda a, b, x, y: (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
         for segs in recs:
@@ -655,7 +678,7 @@ class GridRoute:
                     vote += np.sign(cross(a, b, *q)) / (1.0 + geom.seg_point_dist(q, a, b))
             s0 = float(np.sign(vote)) if abs(vote) > 0.05 else 0.0
             for lname, a, b, _ in segs:
-                l = R.LAYERS.index(lname)
+                l = B.layers.index(lname)
                 pad = pitch + tol + 0.3
                 j0, i0 = B.cell(min(a[0], b[0]) - pad, min(a[1], b[1]) - pad)
                 j1, i1 = B.cell(max(a[0], b[0]) + pad, max(a[1], b[1]) + pad)
@@ -746,7 +769,8 @@ class GridRoute:
                 Rt.rip([net])
                 Rt.rebuild()
                 n0 = len(Rt.routes)
-                fail = self.route_job(by_net[net], allow_vias=vias_ok, cell_cost=cc)
+                fail = self.route_job(by_net[net], allow_vias=vias_ok, cell_cost=cc,
+                                      layers=self.layers_of(mate) if cc is not None else None)
                 new = [r for r in Rt.routes[n0:] if r["net"] == net]
                 ok = fail is None and new and self._cost(new) < (best[0] if best else c0) - 0.5
                 if ok and mate:                         # still beside its partner
@@ -813,7 +837,7 @@ class GridRoute:
         for ref, (x0, y0, x1, y1) in self.necks:
             name = f"TW neck {ref}"
             if name not in have or max(abs(a - b) for a, b in zip(have[name], (x0, y0, x1, y1))) > 0.05:
-                ops.append({"op": "rule_area", "name": name, "layers": list(R.LAYERS),
+                ops.append({"op": "rule_area", "name": name, "layers": list(self.routing),
                             "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], "no_tracks": False, "no_vias": False,
                             "no_pour": False, "no_footprints": False})
         if self.clear:

@@ -25,6 +25,7 @@ Ops (coordinates in board mm, KiCad axes: y down, angles CCW in degrees):
   {"op": "value", "ref": "R1", "value": "10k"}
   {"op": "lock", "refs": [...], "locked": true}
   {"op": "layers", "copper": 4}
+  {"op": "layer_types", "types": {"In1.Cu": "power", "In2.Cu": "signal"}}   (power: a plane layer)
   {"op": "fill"}
 """
 import sys, os, json, math, traceback
@@ -506,6 +507,12 @@ def apply_ops(b, ops, changes, stop_on_error=True):
                 r = True
             elif kind == "layers":
                 b.SetCopperLayerCount(int(op["copper"]))
+                r = True
+            elif kind == "layer_types":                  # {"types": {"In1.Cu": "power" | "signal" | "mixed"}}
+                lt = {"signal": pcbnew.LT_SIGNAL, "power": pcbnew.LT_POWER, "mixed": pcbnew.LT_MIXED}
+                for name, t in (op.get("types") or {}).items():
+                    b.SetLayerType(layer_id(b, name), lt[t])
+                changes.append({"kind": "layer_types", "types": op.get("types")})
                 r = True
             elif kind == "fill":
                 do_fill(b, changes)

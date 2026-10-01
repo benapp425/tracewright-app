@@ -153,6 +153,9 @@ class ProjectRuntime:
                 traceback.print_exc()
                 js["ratsnest"] = None
             js["rules"] = self.board_rules()
+            from tw import stackup
+            plan = stackup.get(self.p.cfg)
+            js["stackup"] = {"roles": stackup.board_roles(b, plan), "preset": (plan or {}).get("preset") if plan and len(b.copper) == plan["layers"] else None}
             self._board = (key, b, js, ver)
         return js
 

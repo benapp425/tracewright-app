@@ -9,7 +9,7 @@ import { BoardEditor } from "./boardedit.js";
 
 const COL = {
   "F.Cu": [226, 64, 64], "B.Cu": [64, 110, 232], "In1.Cu": [214, 170, 48], "In2.Cu": [70, 180, 100], "In3.Cu": [180, 100, 210],
-  "In4.Cu": [60, 180, 180], pad: [201, 171, 92], padB: [150, 132, 90], via: [196, 200, 210], silkF: [236, 236, 236],
+  "In4.Cu": [60, 180, 180], "In5.Cu": [222, 128, 64], "In6.Cu": [120, 196, 226], "In7.Cu": [226, 118, 166], "In8.Cu": [150, 200, 90], pad: [201, 171, 92], padB: [150, 132, 90], via: [196, 200, 210], silkF: [236, 236, 236],
   silkB: [200, 150, 230], edge: [238, 214, 72], sel: [91, 155, 248], hl: [255, 226, 110], kicad: [67, 194, 131],
 };
 const rgba = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
@@ -838,7 +838,15 @@ export class BoardView {
   // ------------------------------------------------------------------ the layers panel
   layerOn(l) {
     if (l === "F.Cu" || l === "B.Cu") return this.vis[l];
-    return this.vis.inner;
+    return this.vis.inner && this.vis[l] !== false;
+  }
+
+  // what a copper layer is for, in words: "GND plane", "signal, along x"
+  layerRole(l) {
+    const r = ((this.data && this.data.stackup && this.data.stackup.roles) || {})[l];
+    if (!r) return "";
+    if (r.role === "plane") return r.net ? `${r.net.split("/").pop()} plane` : "plane";
+    return r.dir && r.dir !== "any" ? `signal, along ${r.dir}` : "signal";
   }
 
   renderLayers() {
@@ -857,12 +865,14 @@ export class BoardView {
     this.layerBox.style.width = collapsed ? "auto" : "";
     if (collapsed) return;
     if (this.panel === "copper") { this.copperPanel(); return; }
-    const items = [["F.Cu", "Top copper", COL["F.Cu"]], ["B.Cu", "Bottom copper", COL["B.Cu"]]];
-    if (this.copper.length > 2) items.push(["inner", "Inner copper", COL["In1.Cu"]]);
+    const items = [["F.Cu", "Top copper", COL["F.Cu"]]];
+    for (const l of this.copper.slice(1, -1)) items.push([l, `${l.replace(".Cu", "")} · ${this.layerRole(l) || "inner"}`, COL[l] || [160, 160, 160]]);
+    items.push(["B.Cu", "Bottom copper", COL["B.Cu"]]);
     items.push(["zones", "Pours and areas", [150, 150, 170]], ["vias", "Vias", COL.via], ["silk", "Silkscreen", COL.silkF], ["labels", "References", [200, 200, 200]], ["netnames", "Net names", [230, 230, 230]],
       ["unrouted", "Unrouted", [255, 190, 90]], ["findings", "Check findings", [240, 101, 96]], ["notes", "Claude's notes", [255, 140, 70]],
       ["flags", "Resolved flags", [67, 194, 131]], ["courtyard", "Courtyards", [180, 90, 200]], ["fab", "Fab layer", [140, 150, 170]]);
     for (const [k, label, c] of items) {
+      if (this.vis[k] === undefined) this.vis[k] = true;                 // an inner layer, on until it is turned off
       const el = h("div.lrow" + (this.vis[k] ? ".on" : ""), { onclick: () => {
         this.vis[k] = !this.vis[k]; el.classList.toggle("on", this.vis[k]); clear(eye).appendChild(icon(this.vis[k] ? "eye" : "eye-off", 13));
         if (k === "flags") this.flagLayer.render();
@@ -1263,7 +1273,8 @@ export class BoardView {
       const col = COL[l] || [160, 160, 160];
       const front = l === top;
       const dim = front ? 1 : 0.55;
-      if (this.vis.zones && this.zonePaths[l]) { c.fillStyle = rgba(col, 0.2 * dim + (front ? 0.08 : 0)); c.fill(this.zonePaths[l]); }
+      const plane = l !== "F.Cu" && l !== "B.Cu" && this.layerRole(l).endsWith("plane");     // an inner plane: a faint wash
+      if (this.vis.zones && this.zonePaths[l]) { c.fillStyle = rgba(col, plane ? 0.045 : 0.2 * dim + (front ? 0.08 : 0)); c.fill(this.zonePaths[l]); }
       c.lineCap = "round"; c.lineJoin = "round";
       for (const tp of this.trackPaths) {
         if (tp.l !== l) continue;

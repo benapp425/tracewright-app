@@ -22,3 +22,5 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
   user's sign-off for the release -- and says what is missing otherwise. Waive findings with the `waive`
   tool (with a plain title), never by editing tracewright.json; record what shows each requirement is met with
   the `evidence` tool as you verify.
+- The copper layers (2 to 10) are a plan you make with the `stackup` tool -- signal layers and their routing
+  directions, planes and their nets, the fab's build -- before the board is made; the router follows it.

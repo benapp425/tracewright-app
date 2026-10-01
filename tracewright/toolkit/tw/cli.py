@@ -296,6 +296,46 @@ def cmd_floorplan(a):
     return 0
 
 
+def cmd_stackup(a):
+    """The stack-up: show the plan (or a starting point for N layers), or put the saved plan on the board."""
+    from tw import stackup, constraints
+    from tw.board import Board
+    p = env.project()
+    plan = stackup.get(p.cfg)
+    b = Board.load(p.pcb) if p.has_pcb() else None
+    limit = (constraints.get(p.cfg) or {}).get("layers")
+    if a.action == "show":
+        if b is not None:
+            kinds = {n: t for _, n, t, _ in b.layers}
+            print("board: " + ", ".join(f"{l} ({kinds.get(l, '?')})" for l in b.copper) + f", {b.thickness:g} mm")
+        print("agreed limit: " + (f"{limit} copper layers" if limit else "none"))
+        if plan:
+            print(stackup.describe(plan))
+        else:
+            n = a.layers or limit or 4
+            print(f"no plan; a starting point for {n} layers:")
+            nets = {}
+            for pd in (b.pads() if b is not None else []):
+                if pd.net:
+                    nets[pd.net] = nets.get(pd.net, 0) + 1
+            print(stackup.describe(stackup.default_plan(n, nets)))
+        return 0
+    if not plan:
+        print("no plan in tracewright.json (Claude's stackup tool makes one)")
+        return 1
+    if b is None:
+        print("no board yet: sync the board from the schematic first")
+        return 1
+    plan, probs = stackup.validate(plan, list(b.nets), limit)
+    errs = [t for s_, t in probs if s_ == "error"]
+    if errs:
+        print("the plan does not hold: " + "; ".join(errs))
+        return 1
+    res = stackup.apply(p, plan)
+    print(("applied: " if res.get("ok") else "FAILED: ") + "; ".join(res.get("did", []) + ([res["error"]] if res.get("error") else [])))
+    return 0 if res.get("ok") else 1
+
+
 def cmd_nets(a):
     """The net model: list it, declare a net's facts, or size net classes from them."""
     from tw import netmodel
@@ -425,6 +465,9 @@ def main(argv=None):
     fpp = sub.add_parser("floorplan", help="the guided start's floorplan: show (board coordinates) | apply (outline, areas, connectors, holes)")
     fpp.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
     fpp.add_argument("--outline", action="store_true", help="replace the board's outline with the floorplan's")
+    su = sub.add_parser("stackup", help="the copper layers: show (the plan, or a starting point) | apply (the saved plan onto the board)")
+    su.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
+    su.add_argument("--layers", type=int, choices=[2, 4, 6, 8, 10])
     st = sub.add_parser("style")
     st.add_argument("style", nargs="?", choices=["flat", "hierarchical"])
     st.add_argument("--dry-run", action="store_true")

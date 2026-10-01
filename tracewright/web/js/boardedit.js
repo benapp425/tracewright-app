@@ -114,7 +114,10 @@ export class BoardEditor {
     };
     const cu = this.copperLayers();
     const layerSel = h("select.esel", { "data-tip": "The layer new copper goes on", disabled: dis || undefined,
-      onchange: (e) => this.pickLayer(e.target.value) }, cu.map((l) => h("option", { value: l, selected: l === this.curLayer() || undefined }, l)));
+      onchange: (e) => this.pickLayer(e.target.value) }, cu.map((l) => {
+        const role = cu.length > 2 ? this.v.layerRole(l) : "";
+        return h("option", { value: l, selected: l === this.curLayer() || undefined }, role && role !== "signal" ? `${l} (${role})` : l);
+      }));
     const sw = h("i.lsw", { style: { background: this.v.layerColor(this.curLayer()) } });
     const widthSel = h("select.esel", { "data-tip": "Track width", disabled: dis || undefined, onchange: (e) => { this.width = parseFloat(e.target.value) || 0; if (this.route) this.routeWidth(); this.renderBar(); } },
       h("option", { value: "0", selected: !this.width || undefined }, "Width: net class"), WIDTHS.map((w) => h("option", { value: String(w), selected: this.width === w || undefined }, `${w} mm`)));

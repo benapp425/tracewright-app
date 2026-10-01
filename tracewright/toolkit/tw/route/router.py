@@ -4,8 +4,9 @@
 Originally written for a CM5 carrier board and generalised by tw/route/driver.py, which builds
 the board dump from the .kicad_pcb and the profiles from the project's net classes.
 
-The board (see driver.dump_for_router) is rasterised at RES mm on the two signal layers (F.Cu, B.Cu;
-both inner layers are GND planes). For every routing profile (track width + clearance + via) each
+The board (see driver.dump_for_router) is rasterised at RES mm on its routing layers: F.Cu and B.Cu (inner
+layers taken to be planes), or the signal layers of the project's stack-up plan (tw/stackup.py), each routed in
+its own direction, vias through every layer. For every routing profile (track width + clearance + via) each
 cell holds which net may put a track centreline (or a via centre) there: -1 free, >= 0 only that
 net, -2 nobody. Obstacles are stamped with the true distance to their copper, so a legal cell is
 DRC-clean by construction (the KiCad DRC is still the final judge).
@@ -18,7 +19,7 @@ full width outside.
 Style rules, as a person would route:
   * 0 / 45 / 90 degree segments only, no acute angles; bends cost, 90-degree bends cost more;
   * vias are expensive, so short nets stay on one layer and long nets change layer once;
-  * B.Cu prefers runs along the board (x), F.Cu has no preference;
+  * B.Cu prefers runs along the board (x), F.Cu has no preference (a stack-up plan sets each layer's direction);
   * multi-pin nets grow as a tree from the connector pin, joining the nearest pad each time;
   * every path is then pulled tight: runs are replaced by the fewest straight / 45-degree doglegs
     that stay legal.
@@ -59,8 +60,9 @@ def _lib():
         L = ctypes.CDLL(so)
         P8, P32 = (np.ctypeslib.ndpointer(t, flags="C_CONTIGUOUS") for t in (np.uint8, np.int32))
         L.astar.restype = ctypes.c_long
-        L.astar.argtypes = ([ctypes.c_int] * 2 + [P8, P8, ctypes.c_void_p, P32, ctypes.c_long, P8] + [ctypes.c_int] * 8
-                            + [ctypes.c_float] * 7 + [ctypes.c_int, ctypes.c_long, P32, ctypes.c_long])
+        PF = np.ctypeslib.ndpointer(np.float32, flags="C_CONTIGUOUS")
+        L.astar.argtypes = ([ctypes.c_int] * 3 + [P8, P8, ctypes.c_void_p, P32, ctypes.c_long, P8] + [ctypes.c_int] * 8
+                            + [ctypes.c_float] * 3 + [PF, PF, PF] + [ctypes.c_float, ctypes.c_int, ctypes.c_long, P32, ctypes.c_long])
         _LIB = L
     return _LIB
 
@@ -149,8 +151,9 @@ def clip_rects(a, b, rects):
 
 
 class Board:
-    def __init__(self, dump, profiles, class_clearance, net_class, necks=()):
+    def __init__(self, dump, profiles, class_clearance, net_class, necks=(), layers=None):
         self.d = dump
+        self.layers = tuple(layers or LAYERS)         # the routing layers, top to bottom
         ol = dump["outline"][0]["outline"]
         xs = [p[0] for p in ol]; ys = [p[1] for p in ol]
         self.x0, self.y0 = min(xs) - 1.0, min(ys) - 1.0
@@ -164,8 +167,8 @@ class Board:
         for p in dump["pads"]:
             if p["net"]:
                 self.code(p["net"])
-        self.T = {pr: [np.full((self.ny, self.nx), -1, dtype=np.int32) for _ in LAYERS] for pr in profiles}
-        self.V = {pr: [np.full((self.ny, self.nx), -1, dtype=np.int32) for _ in LAYERS] for pr in profiles}
+        self.T = {pr: [np.full((self.ny, self.nx), -1, dtype=np.int32) for _ in self.layers] for pr in profiles}
+        self.V = {pr: [np.full((self.ny, self.nx), -1, dtype=np.int32) for _ in self.layers] for pr in profiles}
         gx = self.x0 + np.arange(self.nx) * RES
         gy = self.y0 + np.arange(self.ny) * RES
         self.GX, self.GY = np.meshgrid(gx, gy)
@@ -265,7 +268,7 @@ class Board:
             dist = np.maximum(np.hypot(PX - cx, PY - cy) - r, 0)
         for pname, pr in self.profiles.items():
             cl = self.clearance(cls, pname) + extra
-            for li, lname in enumerate(LAYERS):
+            for li, lname in enumerate(self.layers):
                 if lname not in layers:
                     continue
                 if not via_only:
@@ -281,7 +284,7 @@ class Board:
             ax, ay = ol[i]; bx, by = ol[(i + 1) % n]
             dist_edge = np.minimum(dist_edge, _seg_dist(self.GX, self.GY, ax, ay, bx, by))
         for pname, pr in self.profiles.items():
-            for li in range(len(LAYERS)):
+            for li in range(len(self.layers)):
                 self.T[pname][li][(~inside) | (dist_edge < edge_cl + pr.hw)] = -2
                 self.V[pname][li][(~inside) | (dist_edge < edge_cl + pr.vr)] = -2
 
@@ -297,17 +300,17 @@ class Board:
                     self.stamp("", cls, [lname], "poly", poly["outline"], via_only=True, block_all_vias=True,
                                extra=0.05 if smd else 0.0)
             if p["drill"] > 0:  # through holes: block vias on both layers around the hole too
-                self.stamp(p["net"] or f"__nc_{p['ref']}_{p['num']}", cls, list(LAYERS), "circle",
+                self.stamp(p["net"] or f"__nc_{p['ref']}_{p['num']}", cls, list(self.layers), "circle",
                            (p["pos"][0], p["pos"][1], p["drill"] / 2 + 0.1), via_only=True)
                 # hole-to-hole 0.25 mm for vias of any net, same-net ones included (no via in a plated hole)
-                self.stamp("", cls, list(LAYERS), "circle", (p["pos"][0], p["pos"][1], p["drill"] / 2 + 0.25),
+                self.stamp("", cls, list(self.layers), "circle", (p["pos"][0], p["pos"][1], p["drill"] / 2 + 0.25),
                            via_only=True, block_all_vias=True)
 
     def stamp_rules(self):
         for r in self.d["rules"]:
             if not (r["no_tracks"] or r["no_vias"]):
                 continue
-            layers = [l for l in r["layers"] if l in LAYERS]
+            layers = [l for l in r["layers"] if l in self.layers]
             for poly in r["poly"]:
                 pts = poly["outline"]
                 xs = [q[0] for q in pts]; ys = [q[1] for q in pts]
@@ -315,7 +318,7 @@ class Board:
                 sl = (slice(j0, j1), slice(i0, i1))
                 dist = _poly_dist(self.GX[sl], self.GY[sl], pts)
                 for pname, pr in self.profiles.items():
-                    for li, lname in enumerate(LAYERS):
+                    for li, lname in enumerate(self.layers):
                         if lname not in layers:
                             continue
                         if r["no_tracks"]:
@@ -329,7 +332,7 @@ class Board:
 
     def stamp_via(self, net, pos, d):
         cls = self.net_class.get(net, "Default")
-        self.stamp(net, cls, list(LAYERS), "circle", (pos[0], pos[1], d / 2))
+        self.stamp(net, cls, list(self.layers), "circle", (pos[0], pos[1], d / 2))
 
     def reserve(self, net, layers, pts):
         """Keep an area for a pour of `net` (other nets route around it)."""
@@ -343,20 +346,20 @@ class Board:
 
     def restore(self):
         for k in self.T:
-            for li in range(len(LAYERS)):
+            for li in range(len(self.layers)):
                 self.T[k][li][...] = self.T0[k][li]
                 self.V[k][li][...] = self.V0[k][li]
 
     def restore_window(self, j0, j1, i0, i1):
         sl = (slice(j0, j1), slice(i0, i1))
         for k in self.T:
-            for li in range(len(LAYERS)):
+            for li in range(len(self.layers)):
                 self.T[k][li][sl] = self.T0[k][li][sl]
                 self.V[k][li][sl] = self.V0[k][li][sl]
 
     # ---------------------------------------------------------------- legality for one net
     def legal(self, net, prof, static=False):
-        """(lt [2, N] uint8 track-legal cells per layer, lv [N] uint8 via-legal cells) for `net`;
+        """(lt [layers, N] uint8 track-legal cells per layer, lv [N] uint8 via-legal cells: every layer) for `net`;
         neck areas use the neck profile. static: ignore routed nets (fixed copper only)."""
         c = self.code(net)
         T, V = (self.T0, self.V0) if static else (self.T, self.V)
@@ -370,7 +373,10 @@ class Board:
             t = [np.where(self.neck_mask, a, b) for a, b in zip(tn, t)]
             v = [np.where(self.neck_mask, a, b) for a, b in zip(vn, v)]
         lt = np.stack([a.ravel() for a in t]).astype(np.uint8)
-        lv = (v[0] & v[1] & self.via_ok).ravel()
+        lv = self.via_ok.copy()
+        for a in v:
+            lv &= a
+        lv = lv.ravel()
         nv = getattr(self, "no_vias", {}).get(net)
         if nv is not None:
             lv = lv & ~nv
@@ -391,19 +397,32 @@ class Board:
 
 class Router:
     def __init__(self, board, bend45=40, bend90=140, via=500, bcu_cross=1.12, max_expand=6_000_000,
-                 hweight=1.0, margin_mm=14.0):
+                 hweight=1.0, margin_mm=14.0, directions=None):
         self.B = board
         self.hweight, self.margin = hweight, int(margin_mm / RES)
         self.bend45, self.bend90, self.via_cost = bend45, bend90, via
         self.bcu_cross, self.max_expand = bcu_cross, max_expand
         self.fcu_cross = 1.0                     # v2 sets F.Cu to prefer runs along y (layer directions)
+        self.directions = directions             # layer -> "x" | "y" | "any" (a stack-up plan), else F.Cu / B.Cu as above
         self.routes = []     # dicts: net, profile, segments [(layer, a, b, w)], vias [(pos, d, drill)], fixed
         self._on_grid = {}   # id -> (route, its stamp windows): the routed copper the grid holds now
         self.last_status = 0
-        self.hist = np.zeros(2 * board.N, dtype=np.float32)    # PathFinder history: cost of contested cells
+        self.hist = np.zeros(len(board.layers) * board.N, dtype=np.float32)    # PathFinder history: contested cells
         self.use_hist = False
 
     # ------------------------------------------------------------------ A*
+    def layer_costs(self, fcu_factor=1.0):
+        """Per routing layer: (cost factor, factor for moves not along x, factor for moves not along y)."""
+        out = []
+        for li, l in enumerate(self.B.layers):
+            f = fcu_factor if l == "F.Cu" else 1.0
+            if self.directions is not None:
+                d = self.directions.get(l, "any")
+                out.append((f, self.bcu_cross if d == "x" else 1.0, self.bcu_cross if d == "y" else 1.0))
+            else:
+                out.append((f, self.bcu_cross if l == "B.Cu" else 1.0, self.fcu_cross if l == "F.Cu" else 1.0))
+        return out
+
     def astar(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, _legal=None, cell_cost=None,
               margin=None):
         """C search core: [(layer, idx), ...] source -> target, or None."""
@@ -413,7 +432,8 @@ class Router:
         lt, lv = _legal if _legal else B.legal(net, prof)
         if not targets or not sources:
             return None
-        tmask = np.zeros(2 * N, dtype=np.uint8)
+        nl = len(B.layers)
+        tmask = np.zeros(nl * N, dtype=np.uint8)
         tmask[np.array([l * N + idx for l, idx in targets], dtype=np.int64)] = 1
         tj = [t[1] // nx for t in targets]; ti = [t[1] % nx for t in targets]
         sj = [idx // nx for _, idx in sources]; si = [idx % nx for _, idx in sources]
@@ -426,11 +446,12 @@ class Router:
         cc = None
         if cell_cost is not None:
             cc = np.ascontiguousarray(cell_cost, dtype=np.float32)
-        n = _lib().astar(nx, B.ny, np.ascontiguousarray(lt).ravel(), np.ascontiguousarray(lv),
+        lc = np.array(self.layer_costs(fcu_factor), dtype=np.float32)
+        n = _lib().astar(nx, B.ny, nl, np.ascontiguousarray(lt).ravel(), np.ascontiguousarray(lv),
                          cc.ctypes.data if cc is not None else None, src, len(src), tmask,
                          min(ti), max(ti), min(tj), max(tj), wi0, wi1, wj0, wj1,
-                         self.bend45, self.bend90, self.via_cost, fcu_factor, self.bcu_cross, self.fcu_cross, self.hweight,
-                         1 if allow_vias else 0, self.max_expand, out, cap)
+                         self.bend45, self.bend90, self.via_cost, np.ascontiguousarray(lc[:, 0]), np.ascontiguousarray(lc[:, 1]),
+                         np.ascontiguousarray(lc[:, 2]), self.hweight, 1 if allow_vias else 0, self.max_expand, out, cap)
         self.last_status = int(n)
         if n <= 0:
             return None
@@ -447,14 +468,18 @@ class Router:
         tj0, tj1, ti0, ti1 = min(tj), max(tj), min(ti), max(ti)
         step = [10, 19, 10, 19, 10, 19, 10, 19]      # astar.c DG
         offs = [dx + dy * nx for dx, dy in DIRS]
-        layer_fac = [fcu_factor, 1.0]
+        lcost = self.layer_costs(fcu_factor)
+        nl = len(B.layers)
         W = self.hweight
 
-        def h(idx):
+        tlayers = {l for l, _ in tset}
+        lh = [0.0 if (l in tlayers or not allow_vias) else W * self.via_cost for l in range(nl)]
+
+        def h(idx, l=None):
             j, i = divmod(idx, nx)
             dx = 0 if ti0 <= i <= ti1 else min(abs(i - ti0), abs(i - ti1))
             dy = 0 if tj0 <= j <= tj1 else min(abs(j - tj0), abs(j - tj1))
-            return W * (10 * max(dx, dy) + 9 * min(dx, dy))
+            return W * (10 * max(dx, dy) + 9 * min(dx, dy)) + (lh[l] if l is not None else 0.0)
         sj = [idx // nx for _, idx in sources]; si = [idx % nx for _, idx in sources]
         wj0 = max(1, min(min(sj), tj0) - self.margin); wj1 = min(B.ny - 2, max(max(sj), tj1) + self.margin)
         wi0 = max(1, min(min(si), ti0) - self.margin); wi1 = min(nx - 2, max(max(si), ti1) + self.margin)
@@ -463,7 +488,7 @@ class Router:
             s = (l * N + idx) * 9 + 8
             if lt[l][idx] and g.get(s, 1e18) > 0:
                 g[s] = 0; came[s] = None
-                heapq.heappush(heap, (h(idx), 0, s))
+                heapq.heappush(heap, (h(idx, l), 0, s))
         expanded = 0
         while heap:
             f, gs, s = heapq.heappop(heap)
@@ -500,23 +525,25 @@ class Router:
                     dx, dy = DIRS[nd]
                     if not (ltl[idx + dx] and ltl[idx + dy * nx]):
                         continue
-                c = step[nd] * layer_fac[l]
-                if l == 1 and nd not in (0, 4):
-                    c *= self.bcu_cross
-                if l == 0 and nd not in (2, 6):
-                    c *= self.fcu_cross
+                c = step[nd] * lcost[l][0]
+                if nd not in (0, 4):
+                    c *= lcost[l][1]
+                if nd not in (2, 6):
+                    c *= lcost[l][2]
                 ns = (l * N + ni) * 9 + nd
                 ng = gs + c + bend
                 if ng < g.get(ns, 1e18):
                     g[ns] = ng; came[ns] = s
-                    heapq.heappush(heap, (ng + h(ni), ng, ns))
+                    heapq.heappush(heap, (ng + h(ni, l), ng, ns))
             if allow_vias and lv[idx]:
-                ol = 1 - l
-                ns = (ol * N + idx) * 9 + 8
-                ng = gs + self.via_cost
-                if lt[ol][idx] and ng < g.get(ns, 1e18):
-                    g[ns] = ng; came[ns] = s
-                    heapq.heappush(heap, (ng + h(idx), ng, ns))
+                for ol in range(nl):
+                    if ol == l:
+                        continue
+                    ns = (ol * N + idx) * 9 + 8
+                    ng = gs + self.via_cost
+                    if lt[ol][idx] and ng < g.get(ns, 1e18):
+                        g[ns] = ng; came[ns] = s
+                        heapq.heappush(heap, (ng + h(idx, ol), ng, ns))
         return None
 
     # ------------------------------------------------------------------ path -> geometry
@@ -616,7 +643,9 @@ class Router:
         """Cells under committed octilinear segments (sources for T-junctions)."""
         B = self.B; out = []
         for lname, a, b, w in segs:
-            l = LAYERS.index(lname)
+            if lname not in B.layers:
+                continue
+            l = B.layers.index(lname)
             (j0, i0), (j1, i1) = B.cell(*a), B.cell(*b)
             n = max(abs(j1 - j0), abs(i1 - i0), 1)
             for k in range(n + 1):
@@ -624,9 +653,16 @@ class Router:
                 out.append((l, j * B.nx + i))
         return out
 
-    def connect(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, cell_cost=None, margin=None):
-        """Route one connection; returns the committed route record or None."""
+    def connect(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, cell_cost=None, margin=None, layers=None):
+        """Route one connection; returns the committed route record or None. layers: only these routing layers."""
         lt, lv = self.B.legal(net, prof)
+        if layers is not None:
+            keep = [li for li, l in enumerate(self.B.layers) if l in layers]
+            if keep and len(keep) < len(self.B.layers):
+                lt = lt.copy()
+                for li in range(len(self.B.layers)):
+                    if li not in keep:
+                        lt[li] = 0
         if cell_cost is None and self.use_hist:
             cell_cost = self.hist
         path = self.astar(net, prof, sources, targets, fcu_factor, allow_vias, _legal=(lt, lv), cell_cost=cell_cost,
@@ -656,9 +692,9 @@ class Router:
                 if B.necks and pr.neck:
                     for p, q, ins in _neck_margin(clip_rects(a, b, B.necks)):
                         if p != q:
-                            segs.append((LAYERS[l], p, q, wn if ins else pr.w))
+                            segs.append((B.layers[l], p, q, wn if ins else pr.w))
                 else:
-                    segs.append((LAYERS[l], a, b, pr.w))
+                    segs.append((B.layers[l], a, b, pr.w))
             if k < len(runs) - 1:
                 vias.append((xy[-1], pr.via_d, pr.via_drill))
         return segs, vias
@@ -774,7 +810,9 @@ class Router:
                 continue
             hit = False
             for lname, a, b, w in r["segments"]:
-                li = LAYERS.index(lname)
+                if lname not in B.layers:
+                    continue
+                li = B.layers.index(lname)
                 reach = w / 2 + max(pr.hw, pr.vr) + 0.25
                 for l, (x, y) in pts:
                     if l != li:
@@ -802,7 +840,7 @@ class Router:
 def pad_cells(board, pad, prof, shrink=0.04):
     """Cells a track of `prof` may start/end on inside a pad (per layer index)."""
     out = []
-    for li, lname in enumerate(LAYERS):
+    for li, lname in enumerate(board.layers):
         if lname not in pad["shape"]:
             continue
         for poly in pad["shape"][lname]:

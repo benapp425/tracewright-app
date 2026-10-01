@@ -4,7 +4,12 @@ description: Place the footprints on the board with intent - outline and mountin
 ---
 # Placement
 
-1. `sync_board` (update the board from the schematic): new parts appear parked right of the board.
+1. The stack-up first (`stackup`): decide the copper layers from the design -- 2 for simple, slow boards; 4 once
+   there is anything fast, a fine-pitch part to fan out or EMC to meet; 6 or more for several fast interfaces or a
+   BGA with many rows -- which are signal layers (and their routing direction) and which are planes (and their
+   nets), and say why in a sentence. Within the agreed layer count; changing it is the user's call.
+   `sync_board` (update the board from the schematic) makes the board with that many layers; new parts appear
+   parked right of the board. `stackup` apply once the outline is drawn puts the build and the plane pours on.
 2. Outline and mounting holes (ask the user about size and shape if it is not in the requirements). With a
    floorplan from a guided start (`./tw floorplan`), `./tw floorplan apply` does this and step 3's positions:
    the outline, each block's area on Dwgs.User, the connectors and holes where the user agreed or dragged them.

@@ -60,7 +60,9 @@ def specs(board):
     fine = fine_pitch(board)
     min_track = min((t.w for t in board.tracks), default=None)
     min_drill = min((v.drill for v in board.vias), default=None)
+    from tw import stackup
     return {"w": round(w, 1), "h": round(h, 1), "layers": len(board.copper), "thickness": board.thickness or 1.6,
+            "stackup": stackup.identify(board),
             "copper_oz": oz or 1, "smd_sides": smd_sides, "finish": "ENIG" if fine else "HASL (lead free)",
             "fine": [f"{r} ({p:g} mm)" for r, p in fine[:6]],
             "min_track": round(min_track, 3) if min_track else None, "min_drill": round(min_drill, 3) if min_drill else None,
@@ -100,8 +102,12 @@ def estimate(sp, totals, m, qty):
         pcb = 2.0 if small and n <= 10 else 5.0 + 0.004 * area * n
     elif sp["layers"] <= 4:
         pcb = 7.0 if small and n <= 10 else 15.0 + 0.012 * area * n
+    elif sp["layers"] <= 6:
+        pcb = 55.0 + 0.03 * area * n
+    elif sp["layers"] <= 8:
+        pcb = 120.0 + 0.045 * area * n
     else:
-        pcb = 50.0 + 0.03 * area * n
+        pcb = 180.0 + 0.06 * area * n
     if sp["copper_oz"] >= 2:
         pcb *= 1.6
     if sp["finish"].startswith("ENIG"):
@@ -228,7 +234,8 @@ def order_sheet(tw, sp, est, m):
     lines = [f"# Ordering {tw.stem} from JLCPCB", "",
              "1. Upload `" + f"{tw.stem}-gerbers.zip" + "` on the quote page (it reads the size and layers from it).",
              "2. Check these against what the page shows:", "",
-             f"   - Layers: {sp['layers']}", f"   - Size: {sp['w']:g} x {sp['h']:g} mm",
+             f"   - Layers: {sp['layers']}" + (f", layer stack-up {sp['stackup']} (the build the board was designed on)" if sp.get("stackup") and sp["layers"] > 2 else ""),
+             f"   - Size: {sp['w']:g} x {sp['h']:g} mm",
              f"   - Thickness: {sp['thickness']:g} mm", f"   - Outer copper: {sp['copper_oz']:g} oz",
              f"   - Surface finish: {sp['finish']}" + (f" -- flat pads for the fine-pitch parts: {', '.join(x.replace(' (0 mm)', '') for x in sp['fine'])}"
                                                     if sp["finish"].startswith("ENIG") else ""),
