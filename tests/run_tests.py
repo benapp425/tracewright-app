@@ -3207,6 +3207,69 @@ def changes_that_need_the_users_ok_after_a_run():
     asyncio.run(run())
 
 
+@test(needs=("kicad",))
+def a_second_opinion_on_each_run():
+    """The second opinion (off by default): a separate reviewer reads an account of the run -- the request, what the
+    designer said, what changed, what waits for approval, the checks -- and its concerns (at most four, parsed even
+    with prose around the JSON) go under the run's card; nothing stands out is a verdict too."""
+    from tracewright import reviewer
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from aiohttp.test_utils import TestServer, TestClient
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import fakeclaude as fc
+    d = reviewer.parse('Here you go: {"verdict": "concerns", "concerns": [{"what": "R8 raised to 10k", "why": "the I2C rise time at 400 kHz", "where": "R8"}, '
+                       '{"what": ""}, {"what": "2"}, {"what": "3"}, {"what": "4"}, {"what": "5"}]} done')
+    assert d["verdict"] == "concerns" and len(d["concerns"]) == 4 and d["concerns"][0]["where"] == "R8", d
+    assert reviewer.parse('{"verdict": "fine", "concerns": []}') == {"verdict": "fine", "concerns": []}
+    pid = ProjectStore().import_copy(FIXTURE, "Review2 demo").id
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        app.settings.update({"snapshot_each_turn": True, "second_opinion": "sonnet"})
+        rt = app.rt(pid)
+        seen = {}
+
+        async def fake_review(settings, text):
+            seen["text"] = text
+            return {"verdict": "concerns", "concerns": [{"what": "R8 raised to 10k", "why": "rise time", "where": "R8"}], "cost": 0.02, "model": "sonnet"}
+        orig = reviewer.review
+        reviewer.review = fake_review
+        sch = os.path.join(rt.p.root, "hardware/demo/mcu.kicad_sch")
+
+        def turn(prompt):
+            t = open(sch).read()
+            i = t.index('(property "Reference" "R8"')
+            j = t.index('(property "Value" "4.7k"', i)
+            open(sch, "w").write(t[:j] + '(property "Value" "10k"' + t[j + len('(property "Value" "4.7k"'):])
+            return fc.reply("Raised R8 to 10k for lower current.")
+        fake = fc.FakeClaude([turn])
+        a = app.agent(pid)
+        fake.plug(a)
+        events = fc.events_of(rt)
+        try:
+            async with TestClient(TestServer(webapp)) as c:
+                r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Make the I2C pull-ups weaker"})
+                assert r.status == 200
+                await fake.settle(a)
+                for _ in range(200):
+                    if any(t == "agent.review" and kw.get("state") == "done" for t, kw in events):
+                        break
+                    await asyncio.sleep(0.05)
+            st = [kw["state"] for t, kw in events if t == "agent.review"]
+            assert st == ["running", "done"], st
+            assert "Make the I2C pull-ups weaker" in seen["text"] and "Raised R8 to 10k" in seen["text"] and "R8 4.7k -> 10k" in seen["text"], seen["text"]
+            rec = [x for x in a.get_session(a.session.sid).transcript() if x.get("kind") == "review"]
+            assert rec and rec[0]["concerns"][0]["where"] == "R8" and rec[0]["cost"] == 0.02, rec
+        finally:
+            reviewer.review = orig
+            app.settings.update({"second_opinion": "off"})
+            await a.disconnect()
+            rt.stop()
+    asyncio.run(run())
+
+
 @test()
 def floorplan_turns_locks_and_keepouts():
     """The floorplan's quarter turns, locks and keep-outs: a turned block's area turns (and a one-part block's part

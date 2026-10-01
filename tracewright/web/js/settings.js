@@ -203,7 +203,9 @@ export class SettingsPage {
       this.row("Pause runs near the limit", "Claude finishes the step it is on and stops, leaving room for your own work",
         this.sel("pause_at_pct", [["0", "Never"], ["75", "At 75 %"], ["85", "At 85 %"], ["90", "At 90 % (default)"], ["95", "At 95 %"]])),
       this.row("Look-ups on a cheaper model", "Part numbers, stock and data sheet values go to a helper on a cheaper model. Its first use asks your permission (choose Always).",
-        this.sel("lookup_model", [["off", "Off (default)"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]]))]);
+        this.sel("lookup_model", [["off", "Off (default)"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]])),
+      this.row("A second opinion on each run", "A separate reviewer reads what each run changed and says what looks wrong. It uses your plan too.",
+        this.sel("second_opinion", [["off", "Off (default)"], ["sonnet", "Sonnet"], ["opus", "Opus"], ["haiku", "Haiku"]]))]);
     this.group("Needs your OK", "Claude never stops a run to ask. At the end of one, these go on a short list for you to keep or undo.", [
       this.row("Part swaps", "Once the parts are agreed (a stand-in for a part out of stock too)", this.sw("approve_parts")),
       this.row("Floorplan changes", "The outline, mounting holes or connectors moved once the floorplan is agreed", this.sw("approve_floorplan")),

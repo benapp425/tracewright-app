@@ -776,6 +776,27 @@ class AgentManager:
             self.app.log(f"what needs the user's OK: {type(e).__name__}: {e}")
         sess.append(rec)
         self.hub.emit("agent.changes", sid=sess.sid, **{k: v for k, v in rec.items() if k != "kind"})
+        if (self.app.settings.get("second_opinion") or "off") != "off":
+            asyncio.ensure_future(self._second_opinion(sess, tid, ch, rec.get("approvals") or []))
+
+    async def _second_opinion(self, sess, tid, ch, approval_ids):
+        """A separate reviewer reads the run (reviewer.py); its verdict goes under the run's card."""
+        from . import reviewer, approvals
+        recs = sess.transcript()
+        asked = next((r.get("text") for r in reversed(recs) if r.get("kind") == "user" and r.get("turn") == tid), None)
+        said = "\n".join(r.get("text") or "" for r in recs if r.get("kind") == "assistant" and r.get("turn") == tid)[-2500:]
+        items = [x for x in approvals.Approvals(self.rt.p).items() if x["id"] in approval_ids]
+        self.hub.emit("agent.review", sid=sess.sid, turn=tid, state="running")
+        try:
+            text = await asyncio.to_thread(reviewer.context, self.rt.p, asked, said, ch, items)
+            d = await reviewer.review(self.app.settings, text)
+        except Exception as e:
+            self.app.log(f"second opinion: {type(e).__name__}: {e}")
+            self.hub.emit("agent.review", sid=sess.sid, turn=tid, state="failed", error=str(e)[:200])
+            return
+        rec = {"kind": "review", "turn": tid, **d}
+        sess.append(rec)
+        self.hub.emit("agent.review", sid=sess.sid, turn=tid, state="done", **d)
 
     def _auto_turn(self, sess, reason="background"):
         """A turn the CLI starts by itself: when background work finishes, or to read a note the user

@@ -76,6 +76,7 @@ DEFAULTS = {
     "approve_signed": True,
     "pause_at_pct": 90,                    # pause Claude's runs at this share of the plan's usage limit (0: never)
     "lookup_model": "off",                 # the librarian subagent's model for look-ups: sonnet | haiku | off (its first use asks)
+    "second_opinion": "off",               # a reviewer reads each run that changed the design: off | sonnet | opus | haiku
 }
 
 _lock = threading.Lock()

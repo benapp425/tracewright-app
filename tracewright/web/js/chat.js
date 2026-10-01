@@ -508,6 +508,7 @@ export class Chat {
       else if (r.kind === "steer") this.steerMsg(r.id, r.text, steerState[r.id] || (busy ? "queued" : "dropped"), r.by);
       else if (r.kind === "error") { this.closeSteps(); this.errorLine(r.text, i === recs.length - 1 ? this.lastUserText : null); }
       else if (r.kind === "changes") this.changesCard(r, recs.some((x) => x.kind === "undone" && x.turn === r.turn));
+      else if (r.kind === "review") this.reviewCard({ ...r, state: "done" });
       else if (r.kind === "undone") this.undoneLine(r);
     }
     if (!busy) this.closeSteps();
@@ -561,6 +562,7 @@ export class Chat {
     ev.on("usage.plan", (e) => this.planPill(e));
     api("/api/usage").then((d) => this.planPill(d.plan)).catch(() => {});
     ev.on("agent.changes", (e) => { if (!e.sid || e.sid === this.sid) this.changesCard(e, false); });
+    ev.on("agent.review", (e) => { if (!e.sid || e.sid === this.sid) this.reviewCard(e); });
     ev.on("agent.undone", (e) => { if (!e.sid || e.sid === this.sid) this.undoneLine(e); });
     ev.on("agent.error", (e) => { this.closeSteps(); if (e.message !== "stopped") this.errorLine(e.message, this.lastUserText); else this.put(h("div.noteline", icon("circle-stop", 13), "Stopped.")); });
   }
@@ -607,6 +609,24 @@ export class Chat {
       r.approvals && r.approvals.length && this.ws.approvals ? this.ws.approvals.list(r.approvals) : null);
     this.put(card);
     this.scroll();
+  }
+
+  // a second opinion on the run (reviewer.py): a line while it reads, then its verdict under the run's card
+  reviewCard(e) {
+    const old = this.msgs.querySelector(`.review2[data-turn="${e.turn}"]`);
+    let el;
+    if (e.state === "running") el = h("div.noteline.review2", { "data-turn": e.turn }, h("span.spinner"), "A second opinion is reading the run");
+    else if (e.state === "failed") el = h("div.noteline.review2", { "data-turn": e.turn }, icon("circle-alert", 13), "The second opinion could not run" + (e.error ? `: ${e.error}` : ""));
+    else if (!e.concerns || !e.concerns.length) el = h("div.noteline.review2.fine", { "data-turn": e.turn }, icon("badge-check", 13), "Second opinion: nothing stands out");
+    else {
+      const text = "A second opinion on your last run raised:\n" + e.concerns.map((c, i) => `${i + 1}. ${c.what}${c.where ? ` (${c.where})` : ""}: ${c.why}`).join("\n") +
+        "\nLook into each: change what is right, and say why for what is not.";
+      el = h("div.review2.card2", { "data-turn": e.turn },
+        h("div.r2-h", icon("scan-search", 13), h("b", `Second opinion: ${e.concerns.length} concern${e.concerns.length === 1 ? "" : "s"}`), e.cost ? h("span.r2-cost", `$${e.cost.toFixed(2)}`) : null),
+        h("ol.r2-list", e.concerns.map((c) => h("li", h("div.r2-what", c.what, c.where ? h("span.r2-where", c.where) : null), c.why ? h("div.r2-why", c.why) : null))),
+        h("div.r2-acts", h("button.btn.sm", { onclick: () => { this.input.value = text; this.grow(); this.input.focus(); this.estimateSoon(); } }, icon("send", 12), "Ask Claude about these")));
+    }
+    if (old) old.replaceWith(el); else { this.put(el); this.scroll(); }
   }
 
   async undoTurn(r, card) {

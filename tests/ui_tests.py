@@ -1038,6 +1038,23 @@ async def board_editor_routes_a_pair_and_tunes_a_length(t):
             t.s.post(base + "/undo")
 
 
+@test
+async def second_opinion_card(t):
+    """A second opinion's concerns show under the run in the chat; Ask Claude about these puts them in the message
+    box for the user to send (or not)."""
+    await t.open_project("board")
+    await t.page.wait(f"!!({BV} && {BV}.ws && {BV}.ws.chat)", 30)
+    await t.page.js(f"""(() => {{ const ws = {BV}.ws; ws.ev.emit("agent.review", {{ turn: "T1", state: "running" }});
+        ws.ev.emit("agent.review", {{ turn: "T1", state: "done", cost: 0.03, concerns: [{{ what: "R8 raised to 10k", why: "the I2C rise time at 400 kHz", where: "R8" }}] }}); return 1; }})()""")
+    await t.page.wait("document.querySelector('.review2.card2 .r2-list li')", 5)
+    check(await t.page.js("document.querySelectorAll('.review2').length") == 1, "the reading line was not replaced by the verdict")
+    await t.page.js("document.querySelector('.review2 .r2-acts .btn').click(); 1")
+    val = await t.page.js("document.querySelector('.composer textarea').value")
+    check("R8 raised to 10k (R8): the I2C rise time" in val, val)
+    await t.shot("second-opinion")
+    await t.page.js("document.querySelector('.composer textarea').value = ''; 1")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)
