@@ -68,6 +68,14 @@ DEFAULTS = {
     "google_client_secret": "",
     "update_check": True,                  # look for a newer release on GitHub once a day
     "stock_watch": True,                   # once a day, when a project opens: ask again about its parts' stock
+    "approve_parts": True,                 # what goes on the list for the user's OK after a run (approvals.py)
+    "approve_floorplan": True,
+    "approve_handmade": True,
+    "approve_rules": True,
+    "approve_limits": True,
+    "approve_signed": True,
+    "pause_at_pct": 90,                    # pause Claude's runs at this share of the plan's usage limit (0: never)
+    "lookup_model": "off",                 # the librarian subagent's model for look-ups: sonnet | haiku | off (its first use asks)
 }
 
 _lock = threading.Lock()

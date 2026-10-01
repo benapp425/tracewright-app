@@ -27,8 +27,26 @@ export class BoardEditor {
     this.layer = null;                                  // the layer new copper goes on
     this.drag = null; this.route = null; this.shape = null; this.pending = null; this.nudge = null;
     this.saving = 0; this.status = ""; this.cursor = null; this.pop = null;
+    this.proposal = null; this.take = new Set();          // Claude's suggested placement, and the moves the user would take
     this.build();
-    if (this.ws.ev) this.ws.ev.on("agent.status", (e) => this.setBusy(!!e.busy));
+    if (this.ws.ev) {
+      this.ws.ev.on("agent.status", (e) => this.setBusy(!!e.busy));
+      this.ws.ev.on("board.proposal", (e) => this.setProposal(e.proposal));
+    }
+    this.loadProposal();
+  }
+
+  async loadProposal() {
+    try { const r = await api(`/api/projects/${enc(this.pid)}/board/proposal`); this.setProposal(r.proposal); } catch { /* no board */ }
+  }
+
+  setProposal(pr) {
+    const moves = (pr && pr.moves) || [];
+    const same = this.proposal && JSON.stringify(this.proposal.moves) === JSON.stringify(moves);
+    this.proposal = pr || null;
+    if (!same) this.take = new Set(moves.map((m) => m.ref));
+    this.renderProposal();
+    this.v.dirty();
   }
 
   // ------------------------------------------------------------------ the edit bar
@@ -37,11 +55,13 @@ export class BoardEditor {
     this.barBox = h("div.hudbox.editbar");
     this.bar = h("div.hud.bc", { style: { display: "none" } }, this.barBox);
     this.hint = h("div.vhint.ehint", { style: { display: "none" } });
+    this.propBox = h("div.eprop", { style: { display: "none" } });
     this.toolBtns = {};
   }
 
   mount() {
     this.v.viewer.appendChild(this.bar);
+    this.v.viewer.appendChild(this.propBox);
     this.v.hudTc.appendChild(this.hint);
   }
 
@@ -131,7 +151,8 @@ export class BoardEditor {
     b.append(
       tb("select", "mouse-pointer-2", "Select and move"), tb("route", "route", "Route a track", "x"), tb("pour", "paint-bucket", "Draw a pour", "p"),
       tb("keepout", "ban", "Draw a keep-out", "k"), h("div.tsep"),
-      h("label.eslab", sw, layerSel), widthSel, gridSel, h("div.tsep"), undo, redo,
+      h("label.eslab", sw, layerSel), widthSel, gridSel, h("div.tsep"), undo, redo, h("div.tsep"),
+      h("button.tbtn", { onclick: (e) => this.suggestPop(e.currentTarget), disabled: dis || undefined, "data-tip": "Let Claude suggest placement" }, icon("sparkles", 15)),
       st ? h("div.tsep") : null, st,
       h("div.tsep"), h("button.tbtn", { onclick: () => this.toggle(false), "data-tip": "Stop editing", "data-kbd": "e" }, "Done"));
   }
@@ -230,6 +251,7 @@ export class BoardEditor {
 
   // ------------------------------------------------------------------ keys
   key(e) {
+    if (this.v.flags && this.v.flags.active) return false;          // the flag tool has the keyboard: a route sketch takes Backspace
     const k = e.key, low = k.length === 1 ? k.toLowerCase() : k, mod = e.metaKey || e.ctrlKey;
     if (!this.on) {
       if (low === "e" && !mod && !e.altKey && this.v.data) { this.toggle(true); return true; }
@@ -968,6 +990,62 @@ export class BoardEditor {
       h("button.tbtn" + (locked ? ".on" : ""), { "data-tip": locked ? "Unlock" : "Lock where it is", "data-kbd": "l", onclick: () => this.lockSel(), disabled: dis }, icon(locked ? "lock" : "lock-open", 14))];
   }
 
+  // ------------------------------------------------------------------ suggested placement
+  suggestPop(anchor) {
+    const refs = [...this.v.sel].filter((r) => this.v.byRef[r]);
+    const notes = h("textarea", { rows: 3, placeholder: "Notes for Claude, e.g. decoupling right at U1's pins; the crystal away from the switcher" });
+    const only = refs.length ? h("label.ep-c", h("input", { type: "checkbox", checked: true }), `Only the ${refs.length} picked part${refs.length === 1 ? "" : "s"}`) : null;
+    const go = async () => {
+      const body = { notes: notes.value.split("\n").map((x) => x.trim()).filter(Boolean), refs: only && only.firstChild.checked ? refs : [] };
+      try { await api(`/api/projects/${enc(this.pid)}/board/suggest`, { body }); this.closePop(); this.flash("Claude is working on a placement"); }
+      catch (e) { toast(e.message, "error"); }
+    };
+    this.closePop();
+    this.pop = h("div.epop", { onmousedown: (e) => e.stopPropagation() }, h("div.ep-h", icon("sparkles", 14), "Suggest placement"),
+      notes, only, h("div.ep-b", h("button.btn.sm", { onclick: () => this.closePop() }, "Cancel"), h("button.btn.sm.primary", { onclick: go }, "Suggest")));
+    const r = anchor.getBoundingClientRect(), vr = this.v.viewer.getBoundingClientRect();
+    this.pop.style.left = Math.max(10, Math.min(r.left - vr.left - 120, this.v.w - 300)) + "px";
+    this.pop.style.top = Math.max(60, r.top - vr.top - 230) + "px";
+    this.v.viewer.appendChild(this.pop);
+    setTimeout(() => notes.focus(), 20);
+  }
+
+  // Claude's suggestion: the moves with why, its replies to the notes, and take some or all of it
+  renderProposal() {
+    const box = clear(this.propBox), pr = this.proposal;
+    const moves = (pr && pr.moves) || [];
+    if (pr && pr.asked && !pr.ready) {
+      box.style.display = "";
+      box.append(h("div.epr-h", h("span.spinner"), h("span", "Claude is working on a placement"),
+        h("button.btn.sm.ghost", { onclick: () => this.proposalAct("dismiss") }, "Never mind")));
+      return;
+    }
+    if (!moves.length) { box.style.display = "none"; return; }
+    box.style.display = "";
+    const n = this.take.size;
+    box.append(h("div.epr-h", icon("sparkles", 14), h("b", "Claude's suggestion"), pr.summary ? h("span", pr.summary) : null),
+      h("div.epr-list", moves.map((m, i) => h("label.epr-row" + (this.take.has(m.ref) ? ".on" : ""),
+        h("input", { type: "checkbox", checked: this.take.has(m.ref) || undefined, onchange: () => { if (this.take.has(m.ref)) this.take.delete(m.ref); else this.take.add(m.ref); this.renderProposal(); this.v.dirty(); } }),
+        h("span.gd-sgn", String(i + 1)), h("b", m.ref), h("span", m.why || "")))),
+      ...(pr.notes || []).map((t, i) => {
+        const r = (pr.replies || []).find((x) => x.note === i + 1);
+        return h("div.gd-sgnote" + (r ? "." + r.outcome : ""), h("div.q", `Your note: ${t}`),
+          r ? h("div.a", h("b", r.outcome === "declined" ? "Not followed: " : "Followed: "), r.text) : h("div.a.faint", "No reply"));
+      }),
+      h("div.gd-sgacts", h("button.btn.sm", { onclick: () => this.proposalAct("dismiss") }, "Set it aside"), h("div.grow"),
+        h("button.btn.sm.primary", { disabled: !n || this.busy || undefined, onclick: () => this.proposalAct("take", [...this.take]) },
+          n === moves.length ? "Take all of it" : `Take ${n} of ${moves.length}`)));
+  }
+
+  async proposalAct(action, refs) {
+    try {
+      const r = await api(`/api/projects/${enc(this.pid)}/board/proposal`, { body: { action, refs } });
+      if (r.history) this.hist = r.history;
+      this.setProposal(r.proposal);
+      this.renderBar();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
   // ------------------------------------------------------------------ saving
   async commit(ops, label, opts = {}) {
     if (this.busy) { this.flash("Claude is working on the design: edit when it is done"); return null; }
@@ -1050,6 +1128,7 @@ export class BoardEditor {
 
   // ------------------------------------------------------------------ drawing (board mm; px is one screen pixel)
   draw(c, px) {
+    this.drawGhosts(c, px);
     if (!this.on && !this.pending) return;
     const d = this.v.data, sel = this.v.colors.sel;
     // copper hidden by an edit in progress (its new place is drawn below): painted over with the board
@@ -1124,8 +1203,35 @@ export class BoardEditor {
     }
   }
 
+  // the suggested placement: each part's outline where it would go, an arrow from where it is
+  drawGhosts(c, px) {
+    const moves = (this.proposal && this.proposal.moves) || [];
+    for (const m of moves) {
+      const f = this.v.byRef[m.ref];
+      if (!f) continue;
+      const on = this.take.has(m.ref), pose = { x: m.x, y: m.y, rot: m.rot };
+      const loops = f.cy && f.cy.length ? f.cy : [[[f.bbox[0], f.bbox[1]], [f.bbox[2], f.bbox[1]], [f.bbox[2], f.bbox[3]], [f.bbox[0], f.bbox[3]]]];
+      c.strokeStyle = on ? "rgba(244,165,116,.95)" : "rgba(244,165,116,.4)"; c.fillStyle = on ? "rgba(244,165,116,.12)" : "rgba(244,165,116,.04)";
+      c.lineWidth = 1.5 * px; c.setLineDash([5 * px, 3 * px]);
+      for (const l of loops) { c.beginPath(); polyPath(c, l.map(([x, y]) => fwd(pose, f, x, y))); c.fill(); c.stroke(); }
+      const a = [(f.bbox[0] + f.bbox[2]) / 2, (f.bbox[1] + f.bbox[3]) / 2], b = fwd(pose, f, a[0], a[1]);
+      if (Math.hypot(b[0] - a[0], b[1] - a[1]) > 0.3) { c.setLineDash([3 * px, 3 * px]); c.lineWidth = px; c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.stroke(); }
+      c.setLineDash([]);
+    }
+  }
+
   // handles and markers in screen pixels
   drawScreen(c) {
+    const moves = (this.proposal && this.proposal.moves) || [];
+    moves.forEach((m, i) => {                          // the suggestion's numbers, as in its list
+      const f = this.v.byRef[m.ref];
+      if (!f) return;
+      const a = [(f.bbox[0] + f.bbox[2]) / 2, (f.bbox[1] + f.bbox[3]) / 2], [x, y] = this.v.toScreen(...fwd({ x: m.x, y: m.y, rot: m.rot }, f, a[0], a[1]));
+      c.fillStyle = this.take.has(m.ref) ? "#f4a574" : "rgba(244,165,116,.45)";
+      c.beginPath(); c.arc(x, y, 8, 0, Math.PI * 2); c.fill();
+      c.fillStyle = "#1d1007"; c.font = "700 10px ui-sans-serif, -apple-system, sans-serif"; c.textAlign = "center"; c.textBaseline = "middle";
+      c.fillText(String(i + 1), x, y + 0.5);
+    });
     if (!this.on) return;
     const z = this.selZone();
     if (z && !(this.drag && this.drag.kind === "zone")) {

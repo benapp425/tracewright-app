@@ -137,6 +137,8 @@ class AgentManager:
         self.resume_at = None          # an unattended run waiting for the usage limit to reset: when it carries on
         self._resume_h = None
         self.limit_waits = 0
+        self.paused_for = None         # the limit window a run was paused near (pause_at_pct), so once per window
+        self.pause_pending = None      # the reading a pause was asked at, until the turn ends
         self._snap_lock = asyncio.Lock()
         self.allowed = set(self._load_allowed())
         self._lock = asyncio.Lock()
@@ -409,6 +411,18 @@ class AgentManager:
             opts.effort = s.get("effort") or None
         except Exception:
             pass
+        lookup = s.get("lookup_model") or "off"
+        if lookup != "off":                              # look-ups on a cheaper model (the librarian)
+            try:
+                from claude_agent_sdk import AgentDefinition
+                opts.agents = {"librarian": AgentDefinition(
+                    description="Looks things up so the design work does not have to: part numbers and alternatives, JLC and "
+                                "LCSC stock and prices, values, limits and pinouts from data sheets, application notes. Give it "
+                                "the question; it answers briefly, with its sources.",
+                    prompt=prompts.LIBRARIAN, tools=["WebSearch", "WebFetch", "Read", "Grep", "Glob", "mcp__tw__parts"],
+                    model=None if lookup == "inherit" else lookup)}
+            except Exception as e:
+                self.app.log(f"the librarian: {type(e).__name__}: {e}")
         return opts
 
     async def connect(self):
@@ -475,6 +489,50 @@ class AgentManager:
         return sess.sid
 
     # ------------------------------------------------------------------ the usage limit, unattended
+    def _near_limit(self, d):
+        """The plan's usage passed the user's pause point (pause_at_pct, default 90 %): Claude is asked to finish the
+        step it is on, say where it got to, and stop -- leaving room for the user's own work. Once per limit window."""
+        at = int(self.app.settings.get("pause_at_pct") or 0)
+        if not at or not self.busy or d.get("used") is None or d["used"] * 100 < at or d.get("status") == "rejected":
+            return
+        key = (d.get("window"), d.get("resets_at"))
+        if self.paused_for == key:
+            return
+        self.paused_for = key
+        self.pause_pending = d
+        from . import usage
+        window = usage.WINDOWS.get(d.get("window"), "plan")
+        note = (f"The plan's usage is at {round(d['used'] * 100)} % of its {window} limit, past the {at} % the user pauses at. Finish "
+                "the step you are on, say in a line or two where you got to and what is left, then stop.")
+        asyncio.ensure_future(self._pause_note(note))
+
+    async def _pause_note(self, note):
+        try:
+            await self.steer(note, by="app")
+        except Exception as e:
+            self.app.log(f"pause note: {type(e).__name__}: {e}")
+
+    def _paused(self, sess):
+        """The turn a pause was asked in has ended: say so, and an unattended run carries on after the reset."""
+        d, self.pause_pending = self.pause_pending, None
+        if not d:
+            return
+        from . import usage
+        window = usage.WINDOWS.get(d.get("window"), "plan")
+        until = (d["resets_at"] + LIMIT_MARGIN_S) if d.get("resets_at") else None
+        at = time.strftime("%-I:%M %p", time.localtime(until)).lower() if until else None
+        unattended = self.rt.p.unattended() and until is not None and self._resume_h is None
+        text = (f"Paused at {round(d['used'] * 100)} % of the {window} limit, to leave room for you. " +
+                (f"Claude carries on at {at}." if unattended else "Carry on when you like" + (f" (it resets at {at})." if at else ".")))
+        rec = {"kind": "waiting", "until": until if unattended else None, "text": text, "paused": True}
+        sess.append(rec)
+        self.hub.emit("agent.waiting", sid=sess.sid, until=rec["until"], text=text, paused=True)
+        if unattended:
+            self.resume_at = until
+            sid = sess.sid
+            self._resume_h = asyncio.get_running_loop().call_later(max(1.0, until - time.time()),
+                                                                   lambda: asyncio.ensure_future(self._resume(sid)))
+
     def _limit_hit(self, sess, text):
         """A turn ended on the account's usage limit. Unattended (autonomous, past the intake), nobody is
         there to say "continue": wait for the reset and carry on. Watched runs just show the message."""
@@ -520,7 +578,7 @@ class AgentManager:
         except Exception as e:
             self.app.log(f"resume after the usage limit: {e}")
 
-    async def steer(self, text, images=None):
+    async def steer(self, text, images=None, by=None):
         """A message sent while Claude works, as in Claude Code: the CLI takes it in at Claude's next
         tool call, inside the same turn, or as the next turn when Claude was already writing its
         answer. The CLI echoes each message as it reads it, which marks the note read."""
@@ -530,8 +588,8 @@ class AgentManager:
         st = {"id": uuid.uuid4().hex[:8], "text": text, "sent": False, "images": list(images or [])}
         self.steers.append(st)
         turn = self.turn["tid"] if self.turn else None
-        sess.append({"kind": "steer", "id": st["id"], "text": text, "turn": turn})
-        self.hub.emit("agent.steer", sid=sess.sid, id=st["id"], text=text, status="queued", turn=turn)
+        sess.append({"kind": "steer", "id": st["id"], "text": text, "turn": turn, **({"by": by} if by else {})})
+        self.hub.emit("agent.steer", sid=sess.sid, id=st["id"], text=text, status="queued", turn=turn, **({"by": by} if by else {}))
         await self._send_steers()
         return st["id"]
 
@@ -701,6 +759,21 @@ class AgentManager:
         if not ch:
             return
         rec = {"kind": "changes", "turn": tid, **ch}
+        try:                                               # what needs the user's OK (approvals.py): a list, never mid-run
+            from . import approvals, boardedit
+            found = await asyncio.to_thread(approvals.review_run, self.rt.p, base, after, ch,
+                                            approvals.kinds_on(self.app.settings), boardedit.handmade(self.rt.p))
+            if found:
+                await asyncio.to_thread(approvals.hold, self.rt.p, found)
+                added = await asyncio.to_thread(approvals.Approvals(self.rt.p).add, [dict(x, turn=tid, base=base, head=after) for x in found])
+                rec["approvals"] = [x["id"] for x in added]
+                held = [x for x in added if x["group"] == "ask"]
+                if held:
+                    self.rt.user_changes.append("held for the user's OK (kept as agreed until they approve): " +
+                                                "; ".join(x["title"] for x in held))
+                self.hub.emit("approvals.changed", items=approvals.Approvals(self.rt.p).items())
+        except Exception as e:
+            self.app.log(f"what needs the user's OK: {type(e).__name__}: {e}")
         sess.append(rec)
         self.hub.emit("agent.changes", sid=sess.sid, **{k: v for k, v in rec.items() if k != "kind"})
 
@@ -737,7 +810,9 @@ class AgentManager:
         hub = self.hub
         if RateLimitEvent is not None and isinstance(m, RateLimitEvent):    # the plan's usage limit, as it changes
             from . import usage
-            hub.emit("usage.plan", **usage.seen(m.rate_limit_info))
+            d = usage.seen(m.rate_limit_info)
+            hub.emit("usage.plan", **d)
+            self._near_limit(d)
             return
         t = self.turn
         starts = (isinstance(m, SystemMessage) and m.subtype == "init") or \
@@ -832,6 +907,8 @@ class AgentManager:
             follow = not self.stopping and any(st["sent"] for st in self.steers)   # an unread note: the CLI runs it next
             if not follow and not self.stopping:
                 self._limit_hit(sess, (getattr(m, "result", None) or "") + "\n" + (t.get("last_text") or "") if m.is_error else "")
+            if not follow and self.pause_pending:
+                self._paused(sess)
             if t["auto"]:
                 self._end_turn(t, quiet=follow)
             else:

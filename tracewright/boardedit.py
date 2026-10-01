@@ -182,3 +182,98 @@ def describe(ops, changes):
     if any(c.get("kind") in ("track_set", "via_set") for c in changes or []):
         parts.append("moved or resized copper")
     return "; ".join(p for p in parts if p) or "edited the board"
+
+
+# ------------------------------------------------------------------ suggested placement
+# The user asks Claude to suggest where parts go (all of them, or the ones picked), with notes; Claude answers with
+# the place tool's propose mode: moves, each with why, and a reply to each note. Drawn as ghosts on the board; the
+# user takes some or all (an edit of theirs, one undo step) or sets it aside. Locked parts are never in it.
+#   .tracewright/board_proposal.json: {"asked", "notes": [..], "refs": [..], "moves": [{ref, x, y, rot, side, why}],
+#                                      "replies": [{note, text, outcome}], "summary", "ready"}
+
+def _prop_path(project):
+    return os.path.join(project.state_dir(), "board_proposal.json")
+
+
+def proposal(project):
+    try:
+        with open(_prop_path(project)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _put(project, d):
+    tmp = _prop_path(project) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=1)
+    os.replace(tmp, _prop_path(project))
+
+
+def ask(project, notes, refs=None):
+    notes = [str(n).strip()[:300] for n in (notes or []) if str(n).strip()][:8]
+    d = {"asked": time.time(), "notes": notes, "refs": [str(r) for r in (refs or [])][:200], "moves": [], "replies": []}
+    _put(project, d)
+    return d
+
+
+def propose(project, board, moves, replies=None, summary=""):
+    """Claude's suggestion (from the place tool's propose mode): ValueError for a part that is not on the board or is
+    locked."""
+    prev = proposal(project) or {"notes": [], "refs": []}
+    out, bad, locked = [], [], []
+    for m in moves or []:
+        ref = str(m.get("ref") or "")
+        f = board.footprints.get(ref)
+        if f is None:
+            bad.append(ref or "?")
+            continue
+        if f.locked:
+            locked.append(ref)
+            continue
+        out.append({"ref": ref, "x": round(float(m.get("x", f.x)), 4), "y": round(float(m.get("y", f.y)), 4),
+                    "rot": round(float(m.get("rot", f.angle)), 3) % 360, "side": m.get("side") if m.get("side") in ("F", "B") else f.side,
+                    "why": str(m.get("why") or "")[:200]})
+    if bad or locked:
+        raise ValueError("; ".join(([f"not on the board: {', '.join(bad)}"] if bad else []) + ([f"locked, leave them: {', '.join(locked)}"] if locked else [])))
+    notes = prev.get("notes") or []
+    reps = []
+    for r in replies or []:
+        try:
+            n = int(r.get("note"))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= len(notes):
+            reps.append({"note": n, "text": str(r.get("text") or "")[:300],
+                         "outcome": "declined" if str(r.get("outcome")).lower() in ("declined", "no") else "followed"})
+    d = {**prev, "moves": out, "replies": reps, "summary": str(summary or "")[:300], "ready": time.time()}
+    _put(project, d)
+    return d
+
+
+def take(project, refs=None):
+    """The moves the user takes (all, or those refs) as ops for the board edit, and what is left of the suggestion."""
+    d = proposal(project) or {}
+    moves = [m for m in d.get("moves") or [] if refs is None or m["ref"] in refs]
+    if not moves:
+        raise ValueError("nothing to take")
+    ops = [{"op": "move", "ref": m["ref"], "x": m["x"], "y": m["y"], "rot": m["rot"], "side": m["side"]} for m in moves]
+    left = [m for m in d.get("moves") or [] if m not in moves]
+    return ops, left
+
+
+def keep_rest(project, left):
+    d = proposal(project) or {}
+    if left:
+        d["moves"] = left
+        _put(project, d)
+        return d
+    drop(project)
+    return None
+
+
+def drop(project):
+    try:
+        os.remove(_prop_path(project))
+    except OSError:
+        pass

@@ -210,36 +210,42 @@ def tool_list(rt, app):
         hub.emit("annotations", items=cur)
         return _text(f"{len(cur)} annotations on the board")
 
-    @reg("review", "The user's review flags: issues they marked on the board, schematic or 3D view, or picked from the "
-         "checks. action: list (status: active (default: open or sent to you) | open | sent | fixed | wontfix | all) | "
-         "resolve (id, status: fixed | wontfix, note: one line on what you changed, or why it should not be done) | add "
-         "(text, view: board | schematic, x, y, sheet, refs: flag something for the user to look at). Resolve every flag "
-         "you were sent once you have dealt with it.",
-         {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "resolve", "add"]},
-                                           "id": {"type": "string"}, "status": {"type": "string"}, "note": {"type": "string"},
+    @reg("review", "The user's review flags: comments they left on the board, schematic or 3D view, or picked from the "
+         "checks, each a request (do it) or a question (your opinion), some with marks they drew (a route sketch, an "
+         "area, an arrow), each a thread. action: list (status: active (default: open or sent to you) | open | sent | done "
+         "| declined | answered | all) | reply (id, text: what you changed, or your answer and reasons, outcome: done (you "
+         "made the change) | declined (you disagree: nothing changed, say why) | answered (a question that needed no "
+         "change)) | add (text, view: board | schematic, x, y, sheet, refs: flag something for the user to look at). "
+         "Reply to every flag you were sent once you have dealt with it; the user sees each turn green (done), red "
+         "(declined) or blue (answered).",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "reply", "resolve", "add"]},
+                                           "id": {"type": "string"}, "outcome": {"type": "string", "enum": ["done", "declined", "answered"]},
+                                           "status": {"type": "string"}, "note": {"type": "string"},
                                            "text": {"type": "string"}, "view": {"type": "string"}, "x": {"type": "number"},
                                            "y": {"type": "number"}, "sheet": {"type": "string"},
                                            "refs": {"type": "array", "items": {"type": "string"}}},
           "required": ["action"]})
     async def review_t(args):
-        from .review import Review
+        from .review import Review, OLD
         r = Review(p)
         a = args["action"]
         if a == "list":
             fl = r.flags(args.get("status") or "active")
-            return _text("\n\n".join(Review.describe(f) + f"\n  status: {f['status']}" + (f"; {f['resolution']}" if f.get("resolution") else "")
-                                     for f in fl) or "no flags with that status")
-        if a == "resolve":
-            status = args.get("status") or "fixed"
+            return _text("\n\n".join(Review.describe(f) + f"\n  status: {f['status']}" for f in fl) or "no flags with that status")
+        if a in ("reply", "resolve"):
+            outcome = args.get("outcome") or OLD.get(args.get("status"), args.get("status")) or "done"
+            text = (args.get("text") or args.get("note") or "").strip()
+            if len(text) < 3:
+                return _text("text: what you changed, or your answer and why", error=True)
             try:
-                f = r.resolve(args.get("id", ""), status, args.get("note", ""))
+                f = r.reply(args.get("id", ""), text, who="claude", outcome=outcome)
             except KeyError:
                 return _text(f"no flag {args.get('id')}: list them first", error=True)
             except ValueError as e:
                 return _text(str(e), error=True)
             hub.emit("review.changed", flags=r.flags())
             left = len(r.flags("active"))
-            return _text(f"{f['id']} marked {status}" + (f"; {left} flag(s) still open or sent" if left else "; no flags left"))
+            return _text(f"{f['id']} {outcome}" + (f"; {left} flag(s) still open or sent" if left else "; no flags left"))
         where = {"x": args.get("x"), "y": args.get("y"), "sheet": args.get("sheet"), "refs": args.get("refs")}
         f = r.add(args.get("view") or "board", args.get("text", ""), where, source="claude")
         hub.emit("review.changed", flags=r.flags())
@@ -267,10 +273,30 @@ def tool_list(rt, app):
 
     @reg("place", "Move footprints: moves [{ref, x, y, rot?, side?: F|B, locked?}] (mm, KiCad axes, rot CCW degrees). "
          "Shown animated in the app and, with the board open in KiCad, applied live as one undo step. Place a "
-         "functional group at a time. Returns overlaps and off-board parts among the moved ones.",
-         {"type": "object", "properties": {"moves": {"type": "array", "items": {"type": "object"}}}, "required": ["moves"]})
+         "functional group at a time. Returns overlaps and off-board parts among the moved ones. Locked parts are "
+         "refused: the user's stay where they are; one you locked yourself, unlock first (copper, op lock). propose: "
+         "true when the user asked you to suggest placement: nothing moves; the moves (each with why) are drawn as "
+         "ghosts for them to take; replies: [{note: its number, text, outcome: followed | declined}], one per note; summary.",
+         {"type": "object", "properties": {"moves": {"type": "array", "items": {"type": "object"}}, "propose": {"type": "boolean"},
+                                           "replies": {"type": "array", "items": {"type": "object"}}, "summary": {"type": "string"}},
+          "required": ["moves"]})
     async def place(args):
         moves = args.get("moves") or []
+        b0 = await run(rt.board)
+        if args.get("propose"):                          # a suggestion for the user: nothing moves
+            from . import boardedit
+            try:
+                d = await run(boardedit.propose, p, b0, moves, args.get("replies"), args.get("summary") or "")
+            except ValueError as e:
+                return _text(str(e), error=True)
+            hub.emit("board.proposal", proposal=d)
+            missing = [i + 1 for i in range(len(d.get("notes") or [])) if not any(r["note"] == i + 1 for r in d.get("replies") or [])]
+            return _text(f"suggested {len(d['moves'])} moves for the user to take" +
+                         (f"; reply to note{'s' if len(missing) > 1 else ''} {', '.join(map(str, missing))} too" if missing else ""))
+        locked = sorted(m.get("ref") for m in moves if b0 is not None and m.get("ref") in b0.footprints and b0.footprints[m["ref"]].locked)
+        if locked:                                       # the user's: never touched (ask them, or leave it)
+            return _text(f"{', '.join(locked)} {'is' if len(locked) == 1 else 'are'} locked: leave {'it' if len(locked) == 1 else 'them'} where "
+                         "they are (the user's), or unlock first if you locked it yourself", error=True)
         ops = [dict(op="move", **{k: v for k, v in m.items() if k in ("ref", "x", "y", "rot", "side", "locked")}) for m in moves]
         res = await _apply(ops, f"placed {len(ops)} parts")
         if not res.get("ok"):
@@ -403,9 +429,11 @@ def tool_list(rt, app):
 
     @reg("route", "Route nets with the grid router (human style: 0/45/90, few vias, supplies first; streamed live to the "
          "app and into KiCad when the board is open). nets: names (default: every unrouted net); clear: tear up those "
-         "nets first; engine: grid | freerouting (the whole board only, replacing what is routed; no nets).",
+         "nets first; engine: grid | freerouting (the whole board only, replacing what is routed; no nets); along: a "
+         "review flag's id whose route sketch the nets should follow (the router keeps to the user's line where it can).",
          {"type": "object", "properties": {"nets": {"type": "array", "items": {"type": "string"}}, "clear": {"type": "boolean"},
-                                           "engine": {"type": "string", "enum": ["grid", "freerouting"]}}})
+                                           "engine": {"type": "string", "enum": ["grid", "freerouting"]},
+                                           "along": {"type": "string"}}})
     async def route(args):
         from tw.route import driver
         tw = proj()
@@ -415,6 +443,18 @@ def tool_list(rt, app):
             return _text("Freerouting routes the whole board and replaces what is already routed; it cannot route "
                          "chosen nets. Route these with the grid router (engine grid), or call freerouting without nets "
                          "for a whole-board run.", error=True)
+        sketch = None
+        if args.get("along"):
+            from .review import Review
+            try:
+                fl = Review(p).get(args["along"])
+            except KeyError:
+                return _text(f"no flag {args['along']}", error=True)
+            sketch = [m for m in fl.get("marks") or [] if m["t"] in ("route", "pen", "arrow")]
+            if not sketch:
+                return _text(f"{fl['id']} has no route sketch", error=True)
+            if not nets:
+                return _text("along: name the nets to route along the sketch", error=True)
         link = await run(twlive.link_for, tw.pcb) if rt.live.get("board_open") else None
         mirror = LiveMirror(link) if link and engine == "grid" else None
         if link:
@@ -431,7 +471,7 @@ def tool_list(rt, app):
                 res = await run(driver.route, tw, nets=None, engine="freerouting", on_progress=progress, live=False)
             elif mirror:
                 g = await run(lambda: driver.GridRoute(tw, nets=nets, clear=bool(args.get("clear")), on_progress=progress,
-                                                       log=lambda m: hub.emit("route.log", text=m)).setup())
+                                                       log=lambda m: hub.emit("route.log", text=m), sketch=sketch).setup())
                 if args.get("clear"):
                     await run(link.apply, [{"op": "delete", "nets": nets or [], "all": not nets, "kinds": ["track", "via"]}])
                 summary, segs, vias = await run(g.run)
@@ -461,7 +501,7 @@ def tool_list(rt, app):
                 res = {"summary": summary, "apply": {"via": "live", "ok": True}}
             else:
                 res = await run(driver.route, tw, nets=nets, clear=bool(args.get("clear")), on_progress=progress, live=False,
-                                log=lambda m: hub.emit("route.log", text=m))
+                                log=lambda m: hub.emit("route.log", text=m), sketch=sketch)
         finally:
             rt.mark_self(4)
         hub.emit("board.changed", version=-1, source="tracewright")
@@ -847,11 +887,24 @@ def tool_list(rt, app):
          "x, y, w, h}], note} -- the board to scale before the schematic exists: mm from the top-left corner, y down, "
          "sizes the real footprints' (a block: the area its parts will need). The user can drag anything on it; what "
          "they moved keeps their place (moved) -- ask before changing it. parts: {items: [{role, mpn, lcsc, package, "
-         "qty, why}]} -- the key parts (with LCSC codes; the app shows their stock and price).",
-         {"type": "object", "properties": {"section": {"type": "string", "enum": ["requirements", "diagram", "connectors", "floorplan", "parts"]},
+         "qty, why}]} -- the key parts (with LCSC codes; the app shows their stock and price). proposal: when the user "
+         "asks you to suggest a layout -- {moves: [{id, x, y (a block, hole or keep-out) | edge, at (a connector), rot?, "
+         "why: a few words}], replies: [{note: its number, text, outcome: followed | declined}], summary} -- drawn as "
+         "ghosts for them to accept all, some or none; reply to every note they gave; locked items cannot move.",
+         {"type": "object", "properties": {"section": {"type": "string", "enum": ["requirements", "diagram", "connectors", "floorplan", "parts", "proposal"]},
                                            "data": {"type": "object"}}, "required": ["section", "data"]})
     async def canvas_tool(args):
         from . import canvas as cvs
+        if args["section"] == "proposal":
+            try:
+                cv = await run(cvs.propose, p.root, args.get("data") or {})
+            except ValueError as e:
+                return _text(str(e), error=True)
+            _canvas_changed(cv)
+            pr = cv.get("proposal") or {}
+            missing = [i + 1 for i in range(len(pr.get("notes") or [])) if not any(r["note"] == i + 1 for r in pr.get("replies") or [])]
+            return _text(f"suggested {len(pr.get('moves') or [])} moves for the user to accept" +
+                         (f"; reply to note{'s' if len(missing) > 1 else ''} {', '.join(map(str, missing))} too" if missing else ""))
         cv = await run(cvs.update, p.root, args["section"], args.get("data") or {})
         _canvas_changed(cv)
         sec = cv.get(args["section"]) or {}

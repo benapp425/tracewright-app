@@ -300,6 +300,14 @@ def status(project):
             todo.append({"text": f"Fix {bare} error{'s' if bare != 1 else ''} the checks found.", "action": "findings"})
     if prop:
         todo.append({"text": f"Approve or reject {len(prop)} waiver{'s' if len(prop) != 1 else ''} Claude proposed for errors.", "action": "waivers"})
+    try:
+        from .approvals import Approvals
+        waiting = Approvals(project).pending()
+    except Exception:
+        waiting = []
+    if waiting:
+        blockers.append(f"{len(waiting)} change{'s' if len(waiting) != 1 else ''} Claude made wait{'s' if len(waiting) == 1 else ''} for your OK.")
+        todo.append({"text": f"Keep or undo {len(waiting)} change{'s' if len(waiting) != 1 else ''} that need your OK.", "action": "approvals"})
     so = current(project)
     reqs = requirements(project, res, bool(res and fresh))
     return {"checks": {"generated": (res or {}).get("generated"), "fresh": bool(res and fresh), "counts": counts,

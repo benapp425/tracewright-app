@@ -653,8 +653,10 @@ class Router:
                 out.append((l, j * B.nx + i))
         return out
 
-    def connect(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, cell_cost=None, margin=None, layers=None):
-        """Route one connection; returns the committed route record or None. layers: only these routing layers."""
+    def connect(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, cell_cost=None, margin=None, layers=None,
+                keep_to=None):
+        """Route one connection; returns the committed route record or None. layers: only these routing layers;
+        keep_to: [layers, N] cells the path may be pulled tight over (with its own): a sketch's band."""
         lt, lv = self.B.legal(net, prof)
         if layers is not None:
             keep = [li for li, l in enumerate(self.B.layers) if l in layers]
@@ -677,6 +679,10 @@ class Router:
                 self.hweight, self.max_expand = hw, mx
         if path is None:
             return None
+        if keep_to is not None:                          # pulled tight only within the band (and over its own cells)
+            lt = lt & keep_to.astype(np.uint8)
+            for l, idx in path:
+                lt[l][idx] = 1
         return self.commit(net, prof, path, lt)
 
     def geometry(self, prof, path, lt):

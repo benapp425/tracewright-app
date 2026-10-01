@@ -57,6 +57,7 @@ export class SignoffView {
       run: () => btn("play", "Run the checks", { onclick: () => this.runChecks() }, "sm"),
       findings: () => btn("arrow-right", "Findings", { onclick: () => this.ws.show("checks") }, "sm"),
       waivers: () => btn("arrow-down", "Show them", { onclick: () => this.box.querySelector(".so-wgroup.proposed")?.scrollIntoView({ behavior: "smooth", block: "start" }) }, "sm"),
+      approvals: () => btn("list-checks", "Show them", { onclick: () => this.ws.toggleReview(true) }, "sm"),
     };
     const todo = (s.todo || []).map((t) => h("div.so-todo", icon("circle-dot", 13), h("span.grow", t.text), act[t.action] ? act[t.action]() : null));
     const reqs = s.requirements || [], withEv = reqs.filter((r) => r.evidence.length).length;

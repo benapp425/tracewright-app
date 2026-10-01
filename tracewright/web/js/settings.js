@@ -50,7 +50,7 @@ export class SettingsPage {
       h("div.sc", h("span.sv" + (/^[\/~]/.test(String(value)) ? ".mono" : ""), value), extra || null));
   }
   mark(key) { this.dirtyKeys.add(key); this.saveBar.style.display = "flex"; }
-  sel(key, opts) { const el = h("select", { onchange: () => this.mark(key) }); for (const [v, t] of opts) el.appendChild(h("option", { value: v, selected: this.s[key] === v }, t)); el.dataset.key = key; return el; }
+  sel(key, opts) { const el = h("select", { onchange: () => this.mark(key) }); for (const [v, t] of opts) el.appendChild(h("option", { value: v, selected: String(this.s[key]) === String(v) }, t)); el.dataset.key = key; return el; }
   inp(key, attrs = {}) { const el = h("input", { value: SECRET.includes(key) ? "" : this.s[key] ?? "", oninput: () => this.mark(key), ...attrs }); el.dataset.key = key; return el; }
   sw(key) { const i = h("input", { type: "checkbox", checked: !!this.s[key], onchange: () => { this.mark(key); this.save(true); } }); i.dataset.key = key; return h("label.switch", i, h("span.track")); }
 
@@ -199,6 +199,18 @@ export class SettingsPage {
       this.row("Allow web lookups", "Data sheets and part searches", this.sw("allow_web")),
       this.row("Watch part stock", "Once a day, JLC and LCSC stock for the parts on a board you open", this.sw("stock_watch")),
       this.row("Checkpoint every turn", "Undo any turn from History", this.sw("snapshot_each_turn"))]);
+    this.group("Usage", "In-app runs use your Claude plan, so they share its limit with Claude Code everywhere else.", [
+      this.row("Pause runs near the limit", "Claude finishes the step it is on and stops, leaving room for your own work",
+        this.sel("pause_at_pct", [["0", "Never"], ["75", "At 75 %"], ["85", "At 85 %"], ["90", "At 90 % (default)"], ["95", "At 95 %"]])),
+      this.row("Look-ups on a cheaper model", "Part numbers, stock and data sheet values go to a helper on a cheaper model. Its first use asks your permission (choose Always).",
+        this.sel("lookup_model", [["off", "Off (default)"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]]))]);
+    this.group("Needs your OK", "Claude never stops a run to ask. At the end of one, these go on a short list for you to keep or undo.", [
+      this.row("Part swaps", "Once the parts are agreed (a stand-in for a part out of stock too)", this.sw("approve_parts")),
+      this.row("Floorplan changes", "The outline, mounting holes or connectors moved once the floorplan is agreed", this.sw("approve_floorplan")),
+      this.row("Your own work changed", "Parts you placed or locked, copper you drew", this.sw("approve_handmade")),
+      this.row("Looser design rules", "A clearance, track width or via made smaller", this.sw("approve_rules")),
+      this.row("Changes to the agreed limits", "Kept as agreed until you approve", this.sw("approve_limits")),
+      this.row("Anything after sign-off", "Every change once you have signed the design off", this.sw("approve_signed"))]);
     const auth = { api_key: "API key", subscription_token: "Claude plan token", claude_code: "Claude Code" }[info.claude_auth] || "Not connected";
     this.group("Connection", null, [
       this.status("Claude", !!info.claude_auth, auth),

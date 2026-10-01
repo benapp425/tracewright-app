@@ -47,8 +47,20 @@ export class FloorplanView {
     this.bar = h("div.fp-bar", { style: { display: "none" } });
     this.el.append(this.tip, this.bar);
     this.selId = null;
+    this.proposal = null; this.take = new Set();          // Claude's suggested layout, and the moves the user would take
     this.el.addEventListener("keydown", (e) => this.key(e));
     this.set(fp);
+  }
+
+  // Claude's suggestion, drawn as ghosts: {moves: [{id, x, y | edge, at, rot, why}]}; onTake(set) when the user
+  // picks a ghost in or out
+  setProposal(pr, onTake) {
+    const ids = ((pr && pr.moves) || []).map((m) => m.id);
+    const same = this.proposal && JSON.stringify(this.proposal.moves) === JSON.stringify(pr && pr.moves);
+    this.proposal = pr && pr.moves && pr.moves.length ? pr : null;
+    if (!same) this.take = new Set(ids);
+    this.onTake = onTake || null;
+    this.draw();
   }
 
   set(fp) {
@@ -122,6 +134,7 @@ export class FloorplanView {
     this.bad = bad;
     for (const [it, rc] of rects) svg.appendChild(this.item(it, rc, bad.has(it.id)));
     for (const ho of fp.holes || []) svg.appendChild(this.hole(ho));
+    if (this.proposal) svg.appendChild(this.ghosts(W, H));
     // the corner handle: drag to size the board
     if (this.opts.editable) {
       const hd = el("rect", { x: X(W) - 5, y: Y(H) - 5, width: 10, height: 10, rx: 2, class: "fp-corner" });
@@ -133,6 +146,37 @@ export class FloorplanView {
     if (old) old.replaceWith(svg); else this.el.insertBefore(svg, this.tip);
     this.el.classList.toggle("editable", !!this.opts.editable);
     this.renderBar();
+  }
+
+  // the suggested layout: each move's outline where it would go, an arrow from where it is, its number
+  ghosts(W, H) {
+    const S = this.S, X = (x) => this.ox + x * S, Y = (y) => this.oy + y * S;
+    const g = el("g", { class: "fp-ghosts" });
+    this.proposal.moves.forEach((m, i) => {
+      const f = this.find(m.id);
+      if (!f) return;
+      const it = f.it, on = this.take.has(m.id);
+      const cur = f.kind === "conn" ? connectorRect(it, W, H) : f.kind === "hole" ? [it.x - it.d / 2, it.y - it.d / 2, it.d, it.d] : blockRect(it);
+      const nxt = { ...it, ...m };
+      const to = f.kind === "conn" ? connectorRect(nxt, W, H) : f.kind === "hole" ? [nxt.x - it.d / 2, nxt.y - it.d / 2, it.d, it.d] : blockRect(nxt);
+      const c0 = [cur[0] + cur[2] / 2, cur[1] + cur[3] / 2], c1 = [to[0] + to[2] / 2, to[1] + to[3] / 2];
+      if (Math.hypot(c1[0] - c0[0], c1[1] - c0[1]) > 0.3) g.appendChild(el("line", { x1: X(c0[0]), y1: Y(c0[1]), x2: X(c1[0]), y2: Y(c1[1]), class: "fp-garrow" + (on ? " on" : "") }));
+      const shape = f.kind === "hole" ? el("circle", { cx: X(c1[0]), cy: Y(c1[1]), r: it.d / 2 * S, class: "fp-ghost" + (on ? " on" : "") })
+        : el("rect", { x: X(to[0]), y: Y(to[1]), width: to[2] * S, height: to[3] * S, rx: 3, class: "fp-ghost" + (on ? " on" : "") });
+      shape.appendChild(el("title", {}, `${it.ref || it.label || it.id}: ${m.why || "suggested"}${on ? "" : " (left out)"}`));
+      if (this.opts.editable) shape.addEventListener("click", (e) => { e.stopPropagation(); this.toggleTake(m.id); });
+      g.appendChild(shape);
+      const n = el("text", { x: X(c1[0]), y: Y(c1[1]) + 4, class: "fp-gnum" + (on ? " on" : "") }, String(i + 1));
+      if (this.opts.editable) n.addEventListener("click", (e) => { e.stopPropagation(); this.toggleTake(m.id); });
+      g.appendChild(n);
+    });
+    return g;
+  }
+
+  toggleTake(id) {
+    if (this.take.has(id)) this.take.delete(id); else this.take.add(id);
+    this.draw();
+    if (this.onTake) this.onTake(this.take);
   }
 
   // the name and state each item carries in its tooltip

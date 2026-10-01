@@ -352,6 +352,62 @@ def router_routes_on_the_stackups_signal_layers():
 
 
 @test(needs=("kicad", "kpy"))
+def suggested_placement_on_the_board():
+    """Suggest placement: the notes and the picked parts go to Claude; its place tool in propose mode moves nothing
+    and refuses locked or missing parts; the user takes some of the moves (their edit, one undo step), the rest
+    waits, or is set aside."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools, boardedit
+    from tw.board import Board
+    pid = ProjectStore().import_copy(FIXTURE, "Placement demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        rt = app.rt(pid)
+        sent = {}
+
+        async def fake_send(text, sid=None, attachments=None, title=None, images=None, hidden=None, by=None):
+            sent.update(text=text, hidden=hidden)
+            return "sid-1"
+        a = app.agent(pid)
+        a.send = fake_send
+        async with TestClient(TestServer(webapp)) as c:
+            base = f"/api/projects/{pid}/board"
+            r = await c.post(f"{base}/edit", json={"ops": [{"op": "lock", "refs": ["R1"], "locked": True}], "label": "Lock R1"})
+            assert r.status == 200, await r.text()
+            r = await c.post(f"{base}/suggest", json={"notes": ["C3 and C4 right at U2"], "refs": ["C3", "C4"]})
+            assert r.status == 200 and "these parts: C3, C4" in sent["hidden"] and "Locked, leave them: R1" in sent["hidden"], sent
+            assert "1. C3 and C4 right at U2" in sent["hidden"] and sent["text"].startswith("Suggest placement for C3, C4"), sent
+            b0 = Board.load(rt.p.tw.pcb)
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = await T["place"]({"propose": True, "moves": [{"ref": "R1", "x": 1, "y": 1}]})
+            assert out.get("is_error") and "locked" in out["content"][0]["text"], out
+            c3, c4 = b0.footprints["C3"], b0.footprints["C4"]
+            out = await T["place"]({"propose": True, "moves": [{"ref": "C3", "x": c3.x + 1, "y": c3.y, "why": "next to U2 pin 8"},
+                                                                 {"ref": "C4", "x": c4.x, "y": c4.y + 1, "rot": 90, "why": "shorter GND return"}],
+                                    "replies": [{"note": 1, "text": "Both within 1 mm of the pins.", "outcome": "followed"}], "summary": "Tighter decoupling."})
+            assert not out.get("is_error") and "suggested 2 moves" in out["content"][0]["text"], out
+            b1 = Board.load(rt.p.tw.pcb)
+            assert abs(b1.footprints["C3"].x - c3.x) < 1e-6, "a suggestion moved a part by itself"
+            r = await c.get(f"{base}/proposal")
+            pr = (await r.json())["proposal"]
+            assert [m["ref"] for m in pr["moves"]] == ["C3", "C4"] and pr["replies"][0]["outcome"] == "followed", pr
+            r = await c.post(f"{base}/proposal", json={"action": "take", "refs": ["C3"]})
+            d = await r.json()
+            assert r.status == 200 and [m["ref"] for m in d["proposal"]["moves"]] == ["C4"], d
+            assert d["history"]["undo_label"] == "Take the suggested placement (1 part)", d["history"]
+            assert abs(Board.load(rt.p.tw.pcb).footprints["C3"].x - (c3.x + 1)) < 1e-6
+            assert "C3" in boardedit.handmade(rt.p)["footprints"]
+            r = await c.post(f"{base}/proposal", json={"action": "dismiss"})
+            assert (await r.json())["proposal"] is None and boardedit.proposal(rt.p) is None
+        rt.stop()
+    asyncio.run(go())
+
+
+@test(needs=("kicad", "kpy"))
 def router_reroutes_cleanly():
     """The whole demo board routed again from nothing (every track and via taken off first): every net routed,
     KiCad's DRC clean with nothing left unconnected, the USB pair run side by side and matched, no net far longer
@@ -772,9 +828,9 @@ def review_flags_to_claude_and_back():
             r = await c.post(f"{base}/send", json={"ids": [], "note": "Keep the 0402 parts"})
             assert r.status == 200 and (await r.json())["sent"] == 2
             t = sent["text"]
-            assert "F1 (board): at (120.50, 110.25) mm on the board; top side; parts C3; nets +3V3" in t, t
+            assert "F1 (board, a request): at (120.50, 110.25) mm on the board; top side; parts C3; nets +3V3" in t, t
             assert "sheet /MCU/; area (100.00, 60.00) to (140.00, 80.00) mm on the page" in t and "Keep the 0402 parts" in t
-            assert "\"Move C3 closer to U1\"" in t and "resolve" in t
+            assert "\"Move C3 closer to U1\"" in t and "action \"reply\"" in t and "F1 (board, a request)" in t, t
             assert [x["kind"] for x in sent["attachments"]] == ["flag", "flag"] and len(sent["images"]) == 1
             assert sent["images"][0].endswith("F1.png") and os.path.exists(sent["images"][0])
             flags = (await (await c.get(base)).json())["flags"]
@@ -785,14 +841,16 @@ def review_flags_to_claude_and_back():
             rt.hub.emit = lambda type_, **kw: events.append((type_, kw))
             tool = next(x for x in agent_tools.tool_list(rt, app) if x.name == "review")
             out = await tool.handler({"action": "list"})
-            assert "F1 (board)" in out["content"][0]["text"] and "status: sent" in out["content"][0]["text"]
+            assert "F1 (board, a request)" in out["content"][0]["text"] and "status: sent" in out["content"][0]["text"], out
             out = await tool.handler({"action": "resolve", "id": "F1", "status": "fixed", "note": "C3 now 0.8 mm from U1 pin 4"})
-            assert "F1 marked fixed" in out["content"][0]["text"] and "1 flag(s) still open" in out["content"][0]["text"]
+            assert "F1 done" in out["content"][0]["text"] and "1 flag(s) still open" in out["content"][0]["text"], out
             out = await tool.handler({"action": "resolve", "id": "2", "status": "wontfix", "note": "RESET_N already"})
             assert "no flags left" in out["content"][0]["text"]
             assert any(e[0] == "review.changed" for e in events)
             f = Review(rt.p).get("F1")
-            assert f["status"] == "fixed" and f["resolved_by"] == "claude" and f["resolution"].startswith("C3 now")
+            assert f["status"] == "done" and f["resolved_by"] == "claude" and f["resolution"].startswith("C3 now")
+            assert f["thread"][-1] == {**f["thread"][-1], "who": "claude", "outcome": "done"}, f["thread"]
+            assert Review(rt.p).get("F2")["status"] == "declined"
             r = await c.patch(f"{base}/F1", json={"status": "open"})
             assert (await r.json())["resolution"] is None                               # reopened: the old answer goes
             assert (await (await c.delete(f"{base}/resolved")).json())["removed"] == 1
@@ -807,6 +865,105 @@ def review_flags_to_claude_and_back():
     import subprocess
     tracked = subprocess.run(["git", f"--git-dir={root}/.tracewright/history.git", f"--work-tree={root}", "ls-files"], capture_output=True, text=True).stdout
     assert "review.json" not in tracked and "review/" not in tracked
+
+
+@test(needs=("kicad",))
+def review_threads_questions_disagreement_and_drawings():
+    """Flags as threads: a question with a route sketch goes to Claude described (the sketch's points and how to
+    route along it); Claude disagrees (red, nothing changed, with why); the user says do it anyway, and the next
+    message carries the whole thread; Claude does it (green). Drawings are kept tidy (bad points dropped); old 0.x
+    flags (fixed, wontfix) read as done and declined with their answer in the thread."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright.review import Review
+    from tracewright import agent_tools
+    pid = ProjectStore().import_copy(FIXTURE, "Thread demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            base = f"/api/projects/{pid}/review"
+            sketch = {"t": "route", "p": [[120, 110], [124, 110], [124, 104.5], ["x", 1]]}
+            r = await c.post(base, json={"view": "board", "text": "Should USB_D_N run on the left of C3?", "ask": "question",
+                                         "where": {"x": 120, "y": 110, "nets": ["/MCU/USB_D_N"]}, "marks": [sketch, {"t": "laser", "p": [[1, 1], [2, 2]]}]})
+            f = await r.json()
+            assert r.status == 200 and f["ask"] == "question" and len(f["marks"]) == 1 and len(f["marks"][0]["p"]) == 3, f
+            sent = {}
+
+            async def fake_send(text, sid=None, attachments=None, title=None, images=None):
+                sent["text"] = text
+                return "sid-1"
+            a = app.agent(pid)
+            a.send = fake_send
+            assert (await c.post(f"{base}/send", json={})).status == 200
+            t = sent["text"]
+            assert "F1 (board, a question)" in t and "a sketch of where the track should run: (120.00, 110.00) -> (124.00, 110.00) -> (124.00, 104.50)" in t, t
+            assert 'along "F1"' in t and "declined" in t, t
+            rt = app.rt(pid)
+            tool = next(x for x in agent_tools.tool_list(rt, app) if x.name == "review")
+            out = await tool.handler({"action": "reply", "id": "F1", "outcome": "declined", "text": "On the left it would cross the GND stitching row; the right keeps the pair coupled."})
+            assert not out.get("is_error") and "F1 declined" in out["content"][0]["text"], out
+            f = Review(rt.p).get("F1")
+            assert f["status"] == "declined" and f["thread"][-1]["who"] == "claude" and f["thread"][-1]["outcome"] == "declined"
+            assert (await c.post(f"{base}/F1/reply", json={"text": ""})).status == 400        # say something, or do it anyway
+            r = await c.post(f"{base}/F1/reply", json={"text": "I want the shorter way.", "anyway": True})
+            f = await r.json()
+            assert r.status == 200 and f["status"] == "open" and f["thread"][-1]["anyway"] and f["resolution"] is None, f
+            assert (await c.post(f"{base}/send", json={})).status == 200
+            t = sent["text"]
+            assert "You (Claude) [declined]: \"On the left it would cross" in t and "The user [do it anyway]: \"I want the shorter way.\"" in t, t
+            out = await tool.handler({"action": "reply", "id": "F1", "outcome": "done", "text": "Moved it left as asked; re-stitched the GND row."})
+            assert Review(rt.p).get("F1")["status"] == "done"
+            out = await tool.handler({"action": "reply", "id": "F1", "outcome": "maybe", "text": "hmm"})
+            assert out.get("is_error"), out
+            # a 0.x flag file: read in the new terms
+            path = Review(rt.p).path
+            d = json.load(open(path))
+            d["flags"].append({"id": "F9", "n": 9, "view": "board", "status": "wontfix", "text": "old one", "where": {},
+                               "resolution": "Not needed: R1 already does it", "resolved_by": "claude", "updated": "2026-09-01T10:00:00"})
+            json.dump(d, open(path, "w"))
+            old = Review(rt.p).get("F9")
+            assert old["status"] == "declined" and old["ask"] == "request" and old["thread"][0]["text"].startswith("Not needed"), old
+    asyncio.run(go())
+
+
+@test(needs=("kicad", "kpy"))
+def a_route_sketch_pulls_the_router_along_it():
+    """The user's sketch of where a track should run steers the router: routed along a sketch with a detour, the
+    track keeps much closer to the sketch than routed without it, and it still connects."""
+    from tw.board import Board
+    from tw.route import driver
+    from tw.pcb import client
+    from tw import geom
+    p, p2 = fixture_copy("sketch"), fixture_copy("sketch-free")
+    for q in (p, p2):                                      # the board without its tracks: room for either way
+        assert client.apply(q, [{"op": "delete", "all": True, "kinds": ["track", "via"]}], live=False)["ok"]
+    net = "/MCU/PB3_USB_N"
+    b = Board.load(p.pcb)
+    pads = [(pd.x, pd.y) for pd in b.pads() if pd.net == net]
+    assert len(pads) == 2, pads
+    (ax, ay), (bx, by) = pads
+    mx, my = (ax + bx) / 2, (ay + by) / 2
+    import math
+    L = math.hypot(bx - ax, by - ay)
+    nx, ny = -(by - ay) / L, (bx - ax) / L
+    sketch = [{"t": "route", "p": [[ax, ay], [mx - 4 * nx, my - 4 * ny], [bx, by]]}]
+
+    def spread(pp):
+        b2 = Board.load(pp.pcb)
+        segs = [(t.a, t.b) for t in b2.tracks if t.net == net]
+        assert segs, "not routed"
+        pts = [((a[0] + c[0]) / 2, (a[1] + c[1]) / 2) for a, c in segs for _ in range(1)]
+        sk = sketch[0]["p"]
+        return sum(min(geom.seg_point_dist(q, sk[i], sk[i + 1]) for i in range(len(sk) - 1)) for q in pts) / len(pts)
+    r0 = driver.route(p2, nets=[net], clear=True, live=False, log=lambda m: None)
+    assert r0["summary"]["routed"] == 1, r0["summary"]
+    r1 = driver.route(p, nets=[net], clear=True, live=False, log=lambda m: None, sketch=sketch)
+    assert r1["summary"]["routed"] == 1, r1["summary"]
+    free, along = spread(p2), spread(p)
+    assert along < 0.6 * free, (round(along, 2), round(free, 2))
 
 
 @test(needs=("kicad",))
@@ -2547,6 +2704,75 @@ def turn_costs_from_the_cli_running_total():
 
 
 @test()
+def cost_before_you_run_and_pause_near_the_limit():
+    """Cost before you run: a request is sorted into a kind (routing, placement, a question ...) and estimated from the
+    past turns of that kind -- their median and middle half -- with the share of the plan's limit learned from how
+    the limit's readings moved against cost. Near the limit (the user's pause point), Claude is asked once to finish
+    its step and stop, the run then says it paused, and an unattended one carries on after the reset."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import estimate, usage, config
+    assert estimate.kind_of("Route the USB pair first") == "route" and estimate.kind_of("Move C3 closer to U1") == "place"
+    assert estimate.kind_of("Why is R4 10k?") == "question" and estimate.kind_of("Find a cheaper LDO") == "parts"
+    p = ProjectStore().import_copy(FIXTURE, "Estimate demo")
+    d = p.state_dir("sessions")
+    t0 = time.time() - 3000
+    recs = []
+    for i, (text, cost) in enumerate([("Route the SDA and SCL nets", 0.50), ("Route the power nets wide", 0.70), ("Route what is left", 0.60),
+                                      ("Why is C3 there?", 0.04), ("What does U2 do?", 0.06), ("Is R4 right?", 0.05)]):
+        recs += [{"kind": "user", "text": text, "turn": f"T{i}", "t": t0 + i * 400}, {"kind": "done", "turn": f"T{i}", "cost": cost,
+                 "total": cost, "duration_ms": 120000, "t": t0 + i * 400 + 200}]
+    with open(os.path.join(d, "est.jsonl"), "w") as f:
+        f.write("\n".join(json.dumps(r) for r in recs) + "\n")
+    log = os.path.join(config.data_dir(), usage.LOG)
+    reads = [(t0 - 10, 0.10), (t0 + 250, 0.15), (t0 + 650, 0.22), (t0 + 1050, 0.28)]     # about 10 % of the limit per dollar
+    with open(log, "w") as f:
+        for at, used in reads:
+            f.write(json.dumps({"at": at, "used": used, "window": "five_hour", "status": "allowed", "resets_at": t0 + 9000}) + "\n")
+    estimate._cache["turns"] = None
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            e = await (await c.get(f"/api/projects/{p.id}/estimate", params={"text": "Route the analog nets"})).json()
+            # every project's runs count (other tests' too): ours are three of them
+            assert e["kind"] == "route" and e["basis"] == "route" and e["n"] >= 3 and 0.4 <= e["cost"] <= 0.7 and e["low"] <= e["cost"] <= e["high"], e
+            assert e["window"] == "5-hour" and 3 <= e["pct"] <= 12, e
+            q = await (await c.get(f"/api/projects/{p.id}/estimate", params={"text": "Is the crystal load right?"})).json()
+            assert q["kind"] == "question" and q["cost"] < 0.1, q
+        # near the limit: asked once per window, then the pause is told; unattended, it carries on after the reset
+        rt = app.rt(p.id)
+        a = app.agent(p.id)
+        notes = []
+
+        async def fake_steer(text, images=None, by=None):
+            notes.append((text, by))
+        a.steer = fake_steer
+        a.task = asyncio.get_running_loop().create_future()         # a turn in progress
+        reading = {"used": 0.93, "window": "five_hour", "resets_at": time.time() + 3600, "status": "allowed_warning"}
+        app.settings.update({"pause_at_pct": 90})
+        a._near_limit(dict(reading, used=0.85))                     # below the pause point: nothing
+        a._near_limit(reading)
+        a._near_limit(dict(reading, used=0.95))                     # the same window: once
+        await asyncio.sleep(0.05)
+        assert len(notes) == 1 and notes[0][1] == "app" and "93 %" in notes[0][0] and "then stop" in notes[0][0], notes
+        rt.p.cfg["run_mode"] = "autonomous"
+        rt.p.cfg["start"] = {"mode": "guided", "phase": "done"}
+        sess = a.get_session()
+        a._paused(sess)
+        w = [r for r in sess.transcript() if r.get("kind") == "waiting"][-1]
+        assert w["paused"] and "Paused at 93 % of the 5-hour limit" in w["text"], w
+        assert (w["until"] and a._resume_h is not None) == bool(rt.p.unattended()), (w, rt.p.unattended())
+        a.cancel_wait()
+        a.task.cancel()
+        app.settings.update({"pause_at_pct": 0})
+        rt.stop()
+    asyncio.run(go())
+
+
+@test()
 def plan_usage_meter_from_the_cli():
     """The plan's usage limit as Claude Code reports it (the SDK's RateLimitEvent): the agent passes each reading
     to the UI (usage.plan) and keeps the last for the run monitor (/api/usage and /api/info), read as "85 % of the
@@ -2882,6 +3108,105 @@ def each_turn_says_what_it_changed_and_can_be_undone():
     asyncio.run(run())
 
 
+@test(needs=("kicad", "kpy"))
+def changes_that_need_the_users_ok_after_a_run():
+    """After a run, a short list of what needs the user's OK, never a question mid-run: a part swapped once the parts
+    were agreed, a connector moved once the floorplan was agreed, a part the user placed moved, a looser clearance
+    (gone ahead: Keep, or Undo -- Claude is asked to put it back); a change to the agreed limits (put back at once:
+    Approve applies it). Sign-off waits for them; a kind turned off in Settings is not listed."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import signoff, history
+    from tw.board import Board
+    from tw.pcb import client
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import fakeclaude as fc
+    pid = ProjectStore().import_copy(FIXTURE, "OK demo").id
+
+    async def run():
+        webapp = make_app()
+        app = webapp["app"]
+        app.settings.update({"snapshot_each_turn": True})
+        rt = app.rt(pid)
+        p, root = rt.p, rt.p.root
+        p.cfg.setdefault("stages", {})["parts"] = {"status": "done"}
+        p.cfg["start"] = {"mode": "guided", "phase": "done"}
+        p.cfg["constraints"] = {"max_size_mm": [50, 35]}
+        p.save()
+        b0 = Board.load(p.tw.pcb)
+        c4 = b0.footprints["C4"]
+        os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+        with open(os.path.join(root, ".tracewright", "handmade.json"), "w") as f:
+            json.dump({"footprints": {"C4": {"x": c4.x, "y": c4.y}}, "tracks": [], "vias": [], "zones": []}, f)
+        history.snapshot(root, "before the run")
+        sch, pro = os.path.join(root, "hardware/demo/mcu.kicad_sch"), p.tw.pro
+
+        def turn(prompt):                                  # Claude's run: five kinds of change at once
+            with open(p.tw.pcb) as f:
+                t = f.read()
+            with open(p.tw.pcb, "w") as f:
+                f.write(t.replace("(at 103.675 117.5 -90)", "(at 105 117.5 -90)", 1))           # J1, the USB connector
+            assert client.apply(p.tw, [{"op": "move", "ref": "C4", "x": c4.x + 2, "y": c4.y}], live=False)["ok"]
+            with open(sch) as f:
+                t = f.read()
+            i = t.index('(property "Reference" "R8"')
+            j = t.index('(property "Value" "4.7k"', i)
+            with open(sch, "w") as f:
+                f.write(t[:j] + '(property "Value" "10k"' + t[j + len('(property "Value" "4.7k"'):])
+            d = json.load(open(pro))
+            for c in d["net_settings"]["classes"]:
+                if c["name"] == "Default":
+                    c["clearance"] = 0.15
+            json.dump(d, open(pro, "w"), indent=2)
+            cfg = json.load(open(os.path.join(root, "tracewright.json")))
+            cfg["constraints"] = {"max_size_mm": [60, 40]}
+            json.dump(cfg, open(os.path.join(root, "tracewright.json"), "w"), indent=2)
+            return fc.reply("Done: moved J1 and C4, raised R8, eased the clearance, made room.")
+        fake = fc.FakeClaude([turn, fc.reply("Putting J1 back.")])
+        a = app.agent(pid)
+        fake.plug(a)
+        async with TestClient(TestServer(webapp)) as c:
+            r = await c.post(f"/api/projects/{pid}/chat", json={"text": "Tidy it up"})
+            assert r.status == 200, await r.text()
+            await fake.settle(a)
+            for _ in range(200):
+                items = (await (await c.get(f"/api/projects/{pid}/approvals")).json())["items"]
+                if items:
+                    break
+                await asyncio.sleep(0.05)
+            kinds = sorted(x["kind"] for x in items)
+            assert kinds == ["floorplan", "handmade", "limits", "parts", "rules"], [(x["kind"], x["title"]) for x in items]
+            by = {x["kind"]: x for x in items}
+            assert by["parts"]["title"].startswith("R8: value 4.7k -> 10k") and by["floorplan"]["ref"] == "J1" and by["handmade"]["ref"] == "C4", items
+            assert "Default class clearance 0.2 -> 0.15 mm" == by["rules"]["title"] and by["limits"]["group"] == "ask", by
+            p.reload()
+            assert p.cfg["constraints"] == {"max_size_mm": [50, 35]}, p.cfg.get("constraints")        # held as agreed
+            st = signoff.status(p)
+            assert any("wait" in b and "OK" in b for b in st["blockers"]), st["blockers"]
+            assert any("held for the user's OK" in u for u in rt.user_changes), rt.user_changes
+            # the user's calls
+            r = await c.post(f"/api/projects/{pid}/approvals/{by['parts']['id']}", json={"action": "keep"})
+            assert r.status == 200 and (await r.json())["status"] == "kept"
+            assert (await c.post(f"/api/projects/{pid}/approvals/{by['rules']['id']}", json={"action": "approve"})).status == 400
+            r = await c.post(f"/api/projects/{pid}/approvals/{by['limits']['id']}", json={"action": "approve"})
+            assert r.status == 200
+            p.reload()
+            assert p.cfg["constraints"] == {"max_size_mm": [60, 40]}, p.cfg["constraints"]
+            r = await c.post(f"/api/projects/{pid}/approvals/{by['floorplan']['id']}", json={"action": "undo"})
+            assert r.status == 200, await r.text()
+            await fake.settle(a)
+            last = fake.prompts[-1].text
+            assert "Undo: J1 (connector) moved" in last and "Put J1 back at (103.675, 117.5)" in last, last
+            assert (await c.post(f"/api/projects/{pid}/approvals/{by['parts']['id']}", json={"action": "undo"})).status == 409
+            # a kind turned off is not listed
+            from tracewright import approvals
+            assert approvals.kinds_on({"approve_rules": False})["rules"] is False and approvals.kinds_on({})["rules"] is True
+        await a.disconnect()
+        rt.stop()
+    asyncio.run(run())
+
+
 @test()
 def floorplan_turns_locks_and_keepouts():
     """The floorplan's quarter turns, locks and keep-outs: a turned block's area turns (and a one-part block's part
@@ -2920,6 +3245,66 @@ def floorplan_turns_locks_and_keepouts():
     ops = twfp.ops(cv["floorplan"], board=B())
     mv = next(o for o in ops if o.get("op") == "move" and o["ref"] == "U2")
     assert mv["rot"] == 90 and abs(mv["x"] - 130) < 1e-6 and abs(mv["y"] - 116) < 1e-6, mv
+
+
+@test()
+def a_suggested_floorplan_layout_with_notes():
+    """Let Claude suggest a layout: the user's notes go to Claude with the locked items named; its suggestion is
+    stored as ghosts (moves with why, a reply to each note), never moving what is locked or what is not there; the
+    user takes some of it (those become theirs, moved), the rest stays to take later, or is set aside."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import canvas, agent_tools
+    pid = ProjectStore().import_copy(FIXTURE, "Suggest demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        rt = app.rt(pid)
+        root = rt.p.root
+        canvas.update(root, "floorplan", {"board": {"w": 50, "h": 35}, "holes": [{"id": "H1", "ref": "H1", "x": 3.5, "y": 3.5, "d": 3.2}],
+                                          "items": [{"id": "usb", "ref": "J1", "label": "USB-C", "kind": "connector", "edge": "left", "at": 17.5, "w": 9, "h": 7},
+                                                    {"id": "mcu", "label": "MCU", "kind": "mcu", "x": 30, "y": 16, "w": 12, "h": 10},
+                                                    {"id": "pwr", "label": "Power", "kind": "power", "x": 14, "y": 26, "w": 12, "h": 8}]})
+        canvas.move(root, {"id": "pwr", "locked": True})
+        sent = {}
+
+        async def fake_send(text, sid=None, attachments=None, title=None, images=None, hidden=None, by=None):
+            sent.update(text=text, hidden=hidden)
+            return "sid-1"
+        a = app.agent(pid)
+        a.send = fake_send
+        async with TestClient(TestServer(webapp)) as c:
+            base = f"/api/projects/{pid}/canvas/floorplan"
+            r = await c.post(f"{base}/suggest", json={"notes": ["USB-C stays on the left", "MCU near the top"]})
+            assert r.status == 200, await r.text()
+            assert "Locked, leave them: Power" in sent["hidden"] and "1. USB-C stays on the left" in sent["hidden"], sent
+            assert sent["text"].startswith("Suggest a layout: USB-C stays on the left"), sent["text"]
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = await T["canvas"]({"section": "proposal", "data": {"moves": [{"id": "pwr", "x": 40, "y": 28, "why": "nearer the USB"}]}})
+            assert out.get("is_error") and "locked by the user" in out["content"][0]["text"], out
+            out = await T["canvas"]({"section": "proposal", "data": {"moves": [{"id": "nope", "x": 1, "y": 1}]}})
+            assert out.get("is_error") and "not on the floorplan" in out["content"][0]["text"], out
+            out = await T["canvas"]({"section": "proposal", "data": {
+                "moves": [{"id": "mcu", "x": 30, "y": 9, "why": "near the top, as asked"}, {"id": "usb", "edge": "left", "at": 12, "why": "lines up with the MCU"},
+                          {"id": "H1", "x": 4, "y": 4, "why": "clear of the USB shell"}],
+                "replies": [{"note": 2, "text": "Moved it up 7 mm.", "outcome": "followed"}], "summary": "Shorter USB and sensor runs."}})
+            assert not out.get("is_error") and "reply to note 1 too" in out["content"][0]["text"], out
+            cv = canvas.load(root)
+            assert [m["id"] for m in cv["proposal"]["moves"]] == ["mcu", "usb", "H1"] and cv["proposal"]["replies"][0]["outcome"] == "followed"
+            assert cv["floorplan"]["items"][1]["y"] == 16, "the suggestion moved the floorplan by itself"
+            r = await c.post(f"{base}/proposal", json={"action": "accept", "ids": ["mcu", "H1"]})
+            d = await r.json()
+            assert r.status == 200 and [m["id"] for m in d["proposal"]["moves"]] == ["usb"], d
+            mcu = next(i for i in d["floorplan"]["items"] if i["id"] == "mcu")
+            assert mcu["y"] == 9 and mcu["moved"], mcu
+            assert any("accepted your suggestion for MCU, H1" in u for u in rt.user_changes), rt.user_changes
+            r = await c.post(f"{base}/proposal", json={"action": "dismiss"})
+            assert r.status == 200 and (await r.json())["proposal"] is None
+            assert next(i for i in canvas.load(root)["floorplan"]["items"] if i["id"] == "usb")["at"] == 17.5
+        rt.stop()
+    asyncio.run(go())
 
 
 @test(needs=("kicad",))

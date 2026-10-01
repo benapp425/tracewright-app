@@ -7,7 +7,7 @@ A project's start (tracewright.json "start"): {"mode": "guided", "phase": "intak
 Classic projects have no start block."""
 import os, json, time, threading
 
-SECTIONS = ("requirements", "diagram", "connectors", "floorplan", "parts", "plan")
+SECTIONS = ("requirements", "diagram", "connectors", "floorplan", "parts", "plan", "proposal")
 KINDS = ("power", "mcu", "sensor", "connector", "io", "rf", "memory", "display", "motor", "audio", "other")
 EDGES = ("left", "right", "top", "bottom", "")
 _lock = threading.Lock()
@@ -249,6 +249,114 @@ def move(root, what):
         return d, line
 
 
+# ----------------------------------------------------------------------------- a suggested layout
+# The user asks Claude to suggest a floorplan layout, with notes ("USB-C on the left", "the antenna away from the
+# motor driver"); Claude answers with moves (each with why) and a reply to each note -- followed or declined, with
+# why -- drawn as ghosts over the floorplan for the user to accept all, some, or none. Locked items never move.
+#   proposal: {"asked": t, "notes": [text], "moves": [{id, x, y | edge, at, rot?, why}], "replies": [{note, text,
+#              outcome: followed | declined}], "summary": text, "ready": t}
+
+def ask_layout(root, notes):
+    """The user asked for a suggested layout: the request, with their notes, waits for Claude's answer."""
+    notes = [_s(n, 300) for n in (notes or []) if _s(n)][:8]
+    with _lock:
+        d = load(root)
+        if not (d.get("floorplan") or {}).get("board"):
+            raise ValueError("there is no floorplan yet")
+        d["proposal"] = {"asked": time.time(), "notes": notes, "moves": [], "replies": []}
+        d["updated"] = time.time()
+        _save(root, {k: v for k, v in d.items() if v is not None})
+        return d
+
+
+def propose(root, data):
+    """Claude's suggestion: {moves: [{id, x, y | edge, at, rot?, why}], replies: [{note: 1.., text, outcome}], summary}.
+    A locked item, or one not on the floorplan, is refused (ValueError)."""
+    with _lock:
+        d = load(root)
+        fp = d.get("floorplan") or {}
+        if not fp.get("board"):
+            raise ValueError("there is no floorplan yet")
+        W, H = fp["board"]["w"], fp["board"]["h"]
+        for i, k in enumerate(fp.get("keepouts") or []):
+            k.setdefault("id", f"K{i + 1}")
+        every = {o["id"]: o for o in (fp.get("items") or []) + (fp.get("holes") or []) + (fp.get("keepouts") or []) if o.get("id")}
+        prev = d.get("proposal") or {}
+        moves, bad, locked = [], [], []
+        for m in (data or {}).get("moves") or []:
+            iid = str(m.get("id") or "")
+            o = every.get(iid)
+            if o is None:
+                bad.append(iid or "?")
+                continue
+            if o.get("locked"):
+                locked.append(o.get("ref") or o.get("label") or iid)
+                continue
+            mv = {"id": iid, "why": _s(m.get("why"), 200)}
+            if o.get("edge") and m.get("edge") in EDGES[:4]:
+                span = H if m["edge"] in ("left", "right") else W
+                mv.update(edge=m["edge"], at=_num(m.get("at"), 0, span, span / 2))
+            else:
+                mv.update(x=_num(m.get("x"), 0, W, o.get("x", W / 2)), y=_num(m.get("y"), 0, H, o.get("y", H / 2)))
+            if m.get("rot") is not None and not o.get("edge"):
+                mv["rot"] = _rot(m["rot"])
+            moves.append(mv)
+        if bad or locked:
+            raise ValueError("; ".join(([f"not on the floorplan: {', '.join(bad)}"] if bad else []) +
+                                       ([f"locked by the user, leave them: {', '.join(locked)}"] if locked else [])))
+        notes = prev.get("notes") or []
+        replies = []
+        for r in (data or {}).get("replies") or []:
+            try:
+                n = int(r.get("note"))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= len(notes):
+                replies.append({"note": n, "text": _s(r.get("text"), 300),
+                                "outcome": "declined" if str(r.get("outcome")).lower() in ("declined", "no", "not followed") else "followed"})
+        d["proposal"] = {**prev, "moves": moves, "replies": replies, "summary": _s((data or {}).get("summary"), 300), "ready": time.time()}
+        d["updated"] = time.time()
+        _save(root, {k: v for k, v in d.items() if v is not None})
+        return d
+
+
+def accept(root, ids=None):
+    """The user takes the suggestion, or some of it (ids): each accepted move is made as theirs. Returns (canvas,
+    line for Claude)."""
+    cur = load(root).get("proposal") or {}
+    take = [m for m in cur.get("moves") or [] if ids is None or m["id"] in ids]
+    if not take:
+        raise ValueError("nothing to accept")
+    names = []
+    for m in take:
+        what = {"id": m["id"], **({"edge": m["edge"], "at": m["at"]} if m.get("edge") else {"x": m["x"], "y": m["y"]})}
+        if m.get("rot") is not None:
+            what["rot"] = m["rot"]
+        d, _ = move(root, what)
+        o = next((x for x in (d["floorplan"].get("items") or []) + (d["floorplan"].get("holes") or []) + (d["floorplan"].get("keepouts") or [])
+                  if x.get("id") == m["id"]), {})
+        names.append(o.get("ref") or o.get("label") or m["id"])
+    with _lock:
+        d = load(root)
+        left = [m for m in (d.get("proposal") or {}).get("moves") or [] if m["id"] not in {t["id"] for t in take}]
+        if left:
+            d["proposal"]["moves"] = left
+        else:
+            d.pop("proposal", None)
+        d["updated"] = time.time()
+        _save(root, {k: v for k, v in d.items() if v is not None})
+    return d, f"floorplan: the user accepted your suggestion for {', '.join(names)}" + (f" (not for {len(left)} more)" if left else "")
+
+
+def dismiss(root):
+    with _lock:
+        d = load(root)
+        d.pop("proposal", None)
+        d["updated"] = time.time()
+        _save(root, {k: v for k, v in d.items() if v is not None})
+        return d
+
+
 def update(root, section, data):
     """Replace one section; returns the whole canvas."""
     if section not in SECTIONS:
@@ -256,6 +364,8 @@ def update(root, section, data):
     with _lock:
         d = load(root)
         new = clean(section, data)
+        if section == "proposal":
+            raise ValueError("a suggested layout goes through the propose action")
         d[section] = _keep_moves(d.get("floorplan"), new) if section == "floorplan" else new
         d["updated"] = time.time()
         _save(root, {k: v for k, v in d.items() if v is not None})

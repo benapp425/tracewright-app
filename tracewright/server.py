@@ -706,6 +706,52 @@ def make_app():
         rt.hub.emit("canvas.update", canvas=canvas.enrich(rt.p.root, cv))
         return jresp({"floorplan": cv.get("floorplan")})
 
+    @routes.post("/api/projects/{pid}/canvas/floorplan/suggest")
+    async def floorplan_suggest(request):
+        """Let Claude suggest a layout: {notes: [text]}. The suggestion comes back as ghosts over the floorplan."""
+        from . import canvas
+        pid = request.match_info["pid"]
+        rt, a = app.rt(pid), app.agent(pid)
+        if a.busy:
+            return err("Claude is working: ask when it has finished", 409)
+        body = await request.json()
+        try:
+            cv = await asyncio.to_thread(canvas.ask_layout, rt.p.root, body.get("notes") or [])
+        except ValueError as e:
+            return err(str(e))
+        rt.hub.emit("canvas.update", canvas=canvas.enrich(rt.p.root, cv))
+        notes = cv["proposal"]["notes"]
+        locked = [o.get("ref") or o.get("label") or o["id"] for o in (cv["floorplan"].get("items") or []) + (cv["floorplan"].get("holes") or [])
+                  if o.get("locked")]
+        hidden = ("Suggest a floorplan layout: where you would put the blocks, connectors and holes, and why. Send it with the "
+                  "canvas tool, section proposal (moves for what you would move, each with a few words of why; a reply to each "
+                  "note: followed, or declined with why; a one-line summary). It is drawn as ghosts; the user takes all, some or "
+                  "none -- do not change the floorplan section yourself." +
+                  (f" Locked, leave them: {', '.join(locked)}." if locked else "") +
+                  ("\nThe user's notes:\n" + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) if notes else ""))
+        await a.send("Suggest a layout" + (": " + "; ".join(notes) if notes else ""), hidden=hidden)
+        return jresp({"proposal": cv["proposal"]})
+
+    @routes.post("/api/projects/{pid}/canvas/floorplan/proposal")
+    async def floorplan_proposal(request):
+        """The user's answer to a suggested layout: {action: accept (ids: some of it, or all) | dismiss}."""
+        from . import canvas
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            if body.get("action") == "accept":
+                cv, line = await asyncio.to_thread(canvas.accept, rt.p.root, body.get("ids"))
+                rt.user_changes.append(line)
+            elif body.get("action") == "dismiss":
+                cv = await asyncio.to_thread(canvas.dismiss, rt.p.root)
+                rt.user_changes.append("floorplan: the user set your suggested layout aside")
+            else:
+                return err("action: accept or dismiss")
+        except ValueError as e:
+            return err(str(e))
+        rt.hub.emit("canvas.update", canvas=canvas.enrich(rt.p.root, cv))
+        return jresp({"floorplan": cv.get("floorplan"), "proposal": cv.get("proposal")})
+
     @routes.post("/api/projects/{pid}/start")
     async def start_design(request):
         """The guided start's Start button: the intake is over, the design begins."""
@@ -1050,6 +1096,79 @@ def make_app():
         if not rt.p.tw.has_pcb():
             return jresp({"undo": 0, "redo": 0, "undo_label": "", "redo_label": ""})
         return jresp(await asyncio.to_thread(rt.edits.state))
+
+    @routes.post("/api/projects/{pid}/board/suggest")
+    async def board_suggest(request):
+        """Let Claude suggest placement: {notes: [text], refs?: the parts to place (default: all)}. It comes back as
+        ghosts on the board (board.proposal)."""
+        from . import boardedit
+        pid = request.match_info["pid"]
+        rt, a = app.rt(pid), app.agent(pid)
+        if a.busy:
+            return err("Claude is working: ask when it has finished", 409)
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        body = await request.json()
+        d = await asyncio.to_thread(boardedit.ask, rt.p, body.get("notes") or [], body.get("refs") or [])
+        rt.hub.emit("board.proposal", proposal=d)
+        b = await asyncio.to_thread(rt.board)
+        locked = sorted(f.ref for f in b.fp_list if f.locked) if b else []
+        which = f"these parts: {', '.join(d['refs'])}" if d["refs"] else "the board's parts"
+        hidden = (f"Suggest placement for {which}: the place tool with propose true (nothing moves; each move with a few words of "
+                  "why; a reply to each note: followed, or declined with why; a one-line summary). The user takes all, some or "
+                  "none." + (f" Locked, leave them: {', '.join(locked)}." if locked else "") +
+                  ("\nThe user's notes:\n" + "\n".join(f"{i + 1}. {n}" for i, n in enumerate(d["notes"])) if d["notes"] else ""))
+        await a.send("Suggest placement" + (" for " + ", ".join(d["refs"][:8]) + ("…" if len(d["refs"]) > 8 else "") if d["refs"] else "") +
+                     (": " + "; ".join(d["notes"]) if d["notes"] else ""), hidden=hidden)
+        return jresp({"proposal": d})
+
+    @routes.get("/api/projects/{pid}/board/proposal")
+    async def board_proposal_get(request):
+        from . import boardedit
+        rt = app.rt(request.match_info["pid"])
+        return jresp({"proposal": await asyncio.to_thread(boardedit.proposal, rt.p)})
+
+    @routes.post("/api/projects/{pid}/board/proposal")
+    async def board_proposal_act(request):
+        """{action: take (refs: some, or all) | dismiss}: taking is the user's own edit, one undo step."""
+        from . import boardedit
+        from tw.pcb import client
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        body = await request.json()
+        if body.get("action") == "dismiss":
+            await asyncio.to_thread(boardedit.drop, rt.p)
+            rt.user_changes.append("board: the user set your suggested placement aside")
+            rt.hub.emit("board.proposal", proposal=None)
+            return jresp({"proposal": None})
+        if body.get("action") != "take":
+            return err("action: take or dismiss")
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: take it when it is done", 409)
+        try:
+            ops, left = await asyncio.to_thread(boardedit.take, rt.p, body.get("refs"))
+        except ValueError as e:
+            return err(str(e))
+        async with rt.edit_lock:
+            def run():
+                with rt.edits.lock:
+                    snap = rt.edits.before()
+                    rt.mark_app_edit(4)
+                    res = client.apply(rt.p.tw, ops, save=True, live="auto")
+                    if not res.get("ok"):
+                        rt.edits.failed(snap)
+                        return res, None
+                    rt.edits.done(snap, f"Take the suggested placement ({len(ops)} part{'s' if len(ops) != 1 else ''})")
+                    boardedit.record(rt.p, ops, res.get("changes"))
+                    return res, rt.edits.state()
+            res, hist = await asyncio.to_thread(run)
+        if not res.get("ok"):
+            return err("the moves did not apply", 422)
+        d = await asyncio.to_thread(boardedit.keep_rest, rt.p, left)
+        rt.user_changes.append(f"board: the user took your suggested placement for {', '.join(o['ref'] for o in ops)}" +
+                               (f" (not for {len(left)} more)" if left else ""))
+        rt.hub.emit("board.proposal", proposal=d)
+        return jresp({"proposal": d, "history": hist})
 
     @routes.get("/api/projects/{pid}/schematic")
     async def schematic(request):
@@ -1408,7 +1527,7 @@ def make_app():
         body = await request.json()
         try:
             f = await asyncio.to_thread(_review(rt).add, body.get("view", "board"), body.get("text", ""), body.get("where"),
-                                        body.get("snapshot"), body.get("source", "user"))
+                                        body.get("snapshot"), body.get("source", "user"), body.get("ask", "request"), body.get("marks"))
         except ValueError as e:
             return err(str(e))
         _review_changed(rt)
@@ -1419,7 +1538,22 @@ def make_app():
         rt = app.rt(request.match_info["pid"])
         body = await request.json()
         f = await asyncio.to_thread(_review(rt).update, request.match_info["fid"],
-                                    **{k: v for k, v in body.items() if k in ("text", "status", "where", "resolution", "snapshot")})
+                                    **{k: v for k, v in body.items() if k in ("text", "status", "where", "resolution", "snapshot", "ask", "marks")})
+        _review_changed(rt)
+        return jresp(f)
+
+    @routes.post("/api/projects/{pid}/review/{fid}/reply")
+    async def review_reply(request):
+        """The user answers in a flag's thread ({text, anyway?}): it goes to Claude with the next send."""
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            f = await asyncio.to_thread(_review(rt).reply, request.match_info["fid"], body.get("text", ""), "you", None,
+                                        bool(body.get("anyway")))
+        except KeyError:
+            return err("no such flag", 404)
+        except ValueError as e:
+            return err(str(e))
         _review_changed(rt)
         return jresp(f)
 
@@ -2299,6 +2433,56 @@ def make_app():
         rt.user_changes.append(f"the user undid your last turn: the project's files are back as they were before it (commit {last['base']})")
         rt.hub.emit("agent.undone", sid=sess.sid, turn=last["turn"], head=new)
         return jresp({"undone": last["turn"], "head": new})
+
+    @routes.get("/api/projects/{pid}/estimate")
+    async def estimate_request(request):
+        """What a message would likely cost, before it is sent (estimate.py): ?text=..."""
+        from . import estimate
+        text = request.query.get("text", "")[:2000]
+        return jresp(await asyncio.to_thread(estimate.estimate, app.store, text))
+
+    @routes.get("/api/projects/{pid}/approvals")
+    async def approvals_list(request):
+        """What Claude's runs did that needs the user's OK (approvals.py): the pending ones first."""
+        from . import approvals
+        rt = app.rt(request.match_info["pid"])
+        items = await asyncio.to_thread(approvals.Approvals(rt.p).items)
+        return jresp({"items": items, "pending": [x for x in items if x["status"] == "pending"],
+                      "kinds": approvals.kinds_on(app.settings), "labels": approvals.LABELS})
+
+    @routes.post("/api/projects/{pid}/approvals/{aid}")
+    async def approvals_decide(request):
+        """The user's call on one item: keep or undo (what Claude went ahead with: undo asks Claude to put it back and
+        redo what hung on it), approve or decline (what was asked: approve applies it)."""
+        from . import approvals
+        pid = request.match_info["pid"]
+        a, rt = app.agent(pid), app.rt(pid)
+        body = await request.json()
+        action = body.get("action")
+        st = approvals.Approvals(rt.p)
+        try:
+            it = st.get(request.match_info["aid"])
+        except KeyError:
+            return err("no such item", 404)
+        if it["status"] != "pending":
+            return err("already decided", 409)
+        ok = {"confirm": ("keep", "undo"), "ask": ("approve", "decline")}[it["group"]]
+        if action not in ok:
+            return err(f"{action}: {' or '.join(ok)}")
+        if action == "undo" and a.busy:
+            return err("Claude is working: undo this when it has finished", 409)
+        status = {"keep": "kept", "undo": "undone", "approve": "approved", "decline": "declined"}[action]
+        if action == "approve" and it["kind"] == "limits":
+            rt.p.reload()
+            rt.p.cfg["constraints"] = it.get("proposed") or {}
+            await asyncio.to_thread(rt.p.save)
+        it = await asyncio.to_thread(st.set, it["id"], status)
+        rt.hub.emit("approvals.changed", items=st.items())
+        if action == "undo":                              # the follow-up run: Claude puts it back
+            await a.send(f"Undo: {it['title']}", hidden=approvals.undo_text(it))
+        else:
+            rt.user_changes.append(approvals.decided_line(it, status))
+        return jresp(it)
 
     @routes.post("/api/projects/{pid}/chat/steer")
     async def steer(request):

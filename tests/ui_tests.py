@@ -794,6 +794,182 @@ async def board_editor_moves_routes_and_undoes(t):
     await t.page.click(".tbtn.editbtn")
 
 
+@test
+async def flags_are_threads_with_drawings(t):
+    """A flag drawn as a route sketch and asked as a question: the sketch shows on the board and is saved with the
+    flag; Claude's disagreement turns it red with its reasons in the thread; Do it anyway sends it back open."""
+    base = f"api/projects/{t.pid}/review"
+    await t.open_project("board")
+    await t.page.wait(f"{BV} && {BV}.data && {BV}.data.footprints.length", 30)
+    await t.page.key("f", "KeyF", text="f")
+    await settle(t.page)
+    await t.page.key("c", "KeyC", text="c")
+    await t.page.wait("document.querySelector('.vhint .fmodes')", 5)
+    await t.page.js("[...document.querySelectorAll('.vhint .fmodes .tbtn')][3].click(); 1")             # the route sketch
+    bb = (await t.page.js(f"{BV}.data.bbox"))
+    pts = [(bb[0] + 12, bb[1] + 8), (bb[0] + 20, bb[1] + 8), (bb[0] + 20, bb[1] + 14)]
+    for x, y in pts:
+        await board_click(t.page, x, y)
+    await t.page.wait("document.querySelectorAll('.flagmarks .fmark.route circle').length === 3", 5)
+    await t.page.key("Enter", "Enter")
+    await t.page.wait("document.querySelector('.flag-editor .fe-ask')", 5)
+    chips = await t.page.js("[...document.querySelectorAll('.flag-editor .fe-ctx .ctx')].map((c) => c.textContent).join('|')")
+    check("route sketch" in chips, chips)
+    await t.page.js("[...document.querySelectorAll('.flag-editor .fe-ask button')].find((b) => b.textContent === 'Ask first').click(); 1")
+    await t.page.js("const ta = document.querySelector('.flag-editor textarea'); ta.value = 'Would this way keep the pair away from the crystal?'; 1")
+    await t.shot("flag-route-sketch")
+    await t.page.js("[...document.querySelectorAll('.flag-editor button')].find((b) => b.textContent === 'Add flag').click(); 1")
+    for _ in range(40):
+        fl = t.s.get(base)["flags"]
+        if fl:
+            break
+        await asyncio.sleep(0.2)
+    f = fl[-1]
+    check(f["ask"] == "question" and f["marks"] and f["marks"][0]["t"] == "route" and len(f["marks"][0]["p"]) == 3, f)
+    await t.page.wait("document.querySelectorAll('.flagmarks .fmark.route.open').length === 1", 5)
+    # Claude disagrees (written as its review tool would)
+    root = t.s.demo["root"]
+    path = os.path.join(root, ".tracewright", "review.json")
+    d = json.load(open(path))
+    for x in d["flags"]:
+        if x["id"] == f["id"]:
+            x["status"] = "declined"; x["resolved_by"] = "claude"; x["resolution"] = "It would pass right over the crystal's guard ring."
+            x["thread"].append({"who": "claude", "text": x["resolution"], "at": "2026-10-01T09:00:00", "outcome": "declined"})
+    json.dump(d, open(path, "w"))
+    await t.page.js(f"{BV}.ws.review.load(); 1")
+    await t.page.wait(f"document.querySelector('.fpin.declined')", 5)
+    await t.page.click(".fpin.declined")
+    await t.page.wait("document.querySelector('.flag-editor .fe-thread .fe-msg.claude.declined')", 5)
+    say = await t.page.js("document.querySelector('.flag-editor .fe-msg.claude .fe-say').textContent")
+    check("guard ring" in say, say)
+    await t.shot("flag-thread-declined")
+    await t.page.js("[...document.querySelectorAll('.flag-editor button')].find((b) => b.textContent.includes('Do it anyway')).click(); 1")
+    for _ in range(40):
+        g = next(x for x in t.s.get(base)["flags"] if x["id"] == f["id"])
+        if g["status"] == "open":
+            break
+        await asyncio.sleep(0.2)
+    check(g["status"] == "open" and g["thread"][-1].get("anyway"), g)
+    await t.page.key("Escape", "Escape")
+    req = urllib.request.Request(t.s.url + f"{base}/{f['id']}", method="DELETE", headers={"Origin": t.s.url.rstrip("/")})
+    urllib.request.urlopen(req, timeout=30).read()
+
+
+@test
+async def needs_your_ok_list_in_review(t):
+    """What a run went ahead with shows at the top of the Review panel: Keep marks it kept; an asked change has
+    Approve and Decline instead."""
+    root = t.s.demo["root"]
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    path = os.path.join(root, ".tracewright", "approvals.json")
+    with open(path, "w") as f:
+        json.dump({"next": 3, "items": [
+            {"id": "A1", "kind": "floorplan", "group": "confirm", "title": "J1 (connector) moved", "ref": "J1", "status": "pending",
+             "detail": "Its place was agreed with the floorplan.", "at": "2026-10-01T09:00:00", "from": [103.675, 117.5, -90, "F"]},
+            {"id": "A2", "kind": "limits", "group": "ask", "title": "Change the agreed limits: largest board 50 × 35 -> 60 × 40",
+             "status": "pending", "agreed": {"max_size_mm": [50, 35]}, "proposed": {"max_size_mm": [60, 40]}, "at": "2026-10-01T09:00:00"}]}, f)
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.ws)", 30)
+        await t.page.js(f"{BV}.ws.approvals.load(); {BV}.ws.toggleReview(true); 1")
+        await t.page.wait("document.querySelector('.drawer .oklist .ok-row')", 10)
+        txt = await t.page.js("document.querySelector('.drawer .oklist').innerText")
+        check("Needs your OK (2)" in txt and "J1 (connector) moved" in txt and "Approve" in txt and "Keep" in txt, txt)
+        await t.shot("needs-your-ok")
+        await t.page.js("[...document.querySelectorAll('.drawer .ok-row')][0].querySelector('.btn.primary').click(); 1")
+        for _ in range(40):
+            items = t.s.get(f"api/projects/{t.pid}/approvals")["items"]
+            if items[0]["status"] == "kept":
+                break
+            await asyncio.sleep(0.2)
+        check(items[0]["status"] == "kept", items[0])
+        await t.page.wait("document.querySelector('.drawer .oklist') && document.querySelector('.drawer .oklist').innerText.includes('Needs your OK (1)')", 5)
+    finally:
+        os.remove(path)
+        await t.page.js(f"{BV}.ws.toggleReview(false); 1")
+
+
+@test
+async def suggested_layout_as_ghosts(t):
+    """Claude's suggested layout shows as numbered ghosts on the floorplan with each move's reason; leaving one out
+    and taking the rest moves only those."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg["start"] = {"mode": "guided", "phase": "ready"}
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    cvp = os.path.join(root, ".tracewright", "canvas.json")
+    os.makedirs(os.path.dirname(cvp), exist_ok=True)
+    with open(cvp, "w") as f:
+        json.dump({"floorplan": DEMO_FLOORPLAN, "proposal": {"asked": 1, "notes": ["MCU nearer the top"], "ready": 2, "summary": "Shorter runs.",
+                   "moves": [{"id": "mcu", "x": 30, "y": 10, "why": "near the top, as asked"}, {"id": "power", "x": 14, "y": 22, "why": "beside the USB"}],
+                   "replies": [{"note": 1, "text": "Moved it up 6 mm.", "outcome": "followed"}]}}, f)
+    try:
+        await t.page.goto(t.s.url + f"#/p/{t.pid}")
+        await t.page.wait("document.querySelectorAll('.fp-svg .fp-ghost').length === 2", 20)
+        txt = await t.page.js("document.querySelector('.gd-suggest').innerText")
+        check("near the top, as asked" in txt and "Followed: Moved it up 6 mm." in txt and "Take all of it" in txt, txt)
+        await t.shot("suggested-layout")
+        await t.page.js("document.querySelectorAll('.gd-sg input')[1].click(); 1")                      # leave the power block out
+        await t.page.wait("[...document.querySelectorAll('.gd-sgacts .btn.primary')].some((b) => b.textContent === 'Take 1 of 2')", 5)
+        await t.page.js("[...document.querySelectorAll('.gd-sgacts .btn.primary')].find((b) => b.textContent === 'Take 1 of 2').click(); 1")
+        for _ in range(40):
+            fp = t.s.get(f"api/projects/{t.pid}/canvas")["floorplan"]
+            mcu = next(i for i in fp["items"] if i["id"] == "mcu")
+            if mcu["y"] == 10:
+                break
+            await asyncio.sleep(0.2)
+        pw = next(i for i in fp["items"] if i["id"] == "power")
+        check(mcu["y"] == 10 and mcu.get("moved") and pw["y"] == 26, (mcu, pw))
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(cvp)
+
+
+@test
+async def placement_suggestion_on_the_board(t):
+    """Claude's suggested placement shows on the board as numbered ghosts with a list to take from; taking one moves
+    that part only (an undoable edit)."""
+    root = t.s.demo["root"]
+    b = t.s.get(f"api/projects/{t.pid}/board")
+    fp = {f["ref"]: f for f in b["footprints"]}
+    c3, c4 = fp["C3"], fp["C4"]
+    path = os.path.join(root, ".tracewright", "board_proposal.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"asked": 1, "ready": 2, "notes": ["Decoupling right at U2"], "refs": ["C3", "C4"], "summary": "Tighter decoupling.",
+                   "moves": [{"ref": "C3", "x": c3["x"] + 1.5, "y": c3["y"], "rot": c3["a"], "side": "F", "why": "next to U2 pin 8"},
+                             {"ref": "C4", "x": c4["x"], "y": c4["y"] + 1.5, "rot": c4["a"], "side": "F", "why": "shorter GND return"}],
+                   "replies": [{"note": 1, "text": "Both within 1 mm.", "outcome": "followed"}]}, f)
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.data && {BV}.ed.proposal)", 30)
+        await t.page.wait("document.querySelector('.eprop .epr-row')", 10)
+        txt = await t.page.js("document.querySelector('.eprop').innerText")
+        check("next to U2 pin 8" in txt and "Followed: Both within 1 mm." in txt and "Take all of it" in txt, txt)
+        await t.shot("placement-suggestion")
+        await t.page.js("document.querySelectorAll('.eprop .epr-row input')[1].click(); 1")
+        await t.page.wait("[...document.querySelectorAll('.eprop .btn.primary')].some((b) => b.textContent === 'Take 1 of 2')", 5)
+        await t.page.js("[...document.querySelectorAll('.eprop .btn.primary')].find((b) => b.textContent === 'Take 1 of 2').click(); 1")
+        for _ in range(50):
+            now = {f["ref"]: f for f in t.s.get(f"api/projects/{t.pid}/board")["footprints"]}
+            if abs(now["C3"]["x"] - (c3["x"] + 1.5)) < 0.01:
+                break
+            await asyncio.sleep(0.2)
+        check(abs(now["C3"]["x"] - (c3["x"] + 1.5)) < 0.01 and abs(now["C4"]["y"] - c4["y"]) < 0.01, (now["C3"]["x"], now["C4"]["y"]))
+        h = t.s.get(f"api/projects/{t.pid}/board/history")
+        check(h["undo"] >= 1 and "suggested placement" in h["undo_label"], h)
+    finally:
+        t.s.post(f"api/projects/{t.pid}/board/proposal", {"action": "dismiss"})
+        for _ in range(5):
+            if not t.s.get(f"api/projects/{t.pid}/board/history")["undo"]:
+                break
+            t.s.post(f"api/projects/{t.pid}/board/undo")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

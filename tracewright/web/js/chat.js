@@ -151,7 +151,7 @@ export class Chat {
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.send(); }
         else if (e.key === "Escape" && this.dict && this.dict.on) { e.preventDefault(); e.stopPropagation(); this.cancelDictation(); }
       },
-      oninput: () => { this.grow(); this.mentionQuery(); },
+      oninput: () => { this.grow(); this.mentionQuery(); this.estimateSoon(); },
       onblur: () => setTimeout(() => this.closeMentions(), 150),
       onpaste: (e) => {                                   // a screenshot or copied files: attached, not pasted as text
         const files = [...((e.clipboardData && e.clipboardData.files) || [])];
@@ -166,9 +166,10 @@ export class Chat {
     this.sendBtn = h("button.sendbtn.idle", { onclick: () => this.send(), "data-tip": "Send", "data-kbd": "enter" }, icon("arrow-up", 16));
     this.modelEl = h("span.model");
     this.hintEl = h("span.tiny.faint", "⇧↩ new line");
+    this.costEl = h("span.costest", { style: { display: "none" } });
     this.mentionBox = h("div.mentions", { style: { display: "none" } });
     this.el.append(this.agendaEl, this.msgs, this.status, this.dock, h("div.composer", this.mentionBox, h("div.composer-box", this.filesEl, this.chips, this.input,
-      h("div.composer-bar", this.clipBtn, this.micBtn, this.modelEl, h("div.grow"), this.hintEl, this.stopBtn, this.sendBtn))));
+      h("div.composer-bar", this.clipBtn, this.micBtn, this.modelEl, h("div.grow"), this.costEl, this.hintEl, this.stopBtn, this.sendBtn))));
   }
 
   // ------------------------------------------------------------------ @-mentions
@@ -504,7 +505,7 @@ export class Chat {
       else if (r.kind === "question_skipped") this.skippedLine(r.questions);
       else if (r.kind === "task") this.taskLine(r);
       else if (r.kind === "agenda") agenda = r;
-      else if (r.kind === "steer") this.steerMsg(r.id, r.text, steerState[r.id] || (busy ? "queued" : "dropped"));
+      else if (r.kind === "steer") this.steerMsg(r.id, r.text, steerState[r.id] || (busy ? "queued" : "dropped"), r.by);
       else if (r.kind === "error") { this.closeSteps(); this.errorLine(r.text, i === recs.length - 1 ? this.lastUserText : null); }
       else if (r.kind === "changes") this.changesCard(r, recs.some((x) => x.kind === "undone" && x.turn === r.turn));
       else if (r.kind === "undone") this.undoneLine(r);
@@ -602,7 +603,8 @@ export class Chat {
       h("div.ch-h", icon("history", 13), h("b", undone ? "Undone" : "Changed in this turn")),
       h("div.ch-rows", rows.map(([ic, t, text]) => h("div.ch-row", icon(ic, 12), h("span.ch-k", t), h("span.ch-v", text)))),
       r.other && r.other.length ? h("div.ch-files", { "data-tip": r.other.join("\n") }, r.other.slice(0, 3).map((f) => f.split("/").pop()).join(", ") + (r.other.length > 3 ? " …" : "")) : null,
-      showBtn || undoBtn ? h("div.ch-acts", showBtn, undoBtn) : null);
+      showBtn || undoBtn ? h("div.ch-acts", showBtn, undoBtn) : null,
+      r.approvals && r.approvals.length && this.ws.approvals ? this.ws.approvals.list(r.approvals) : null);
     this.put(card);
     this.scroll();
   }
@@ -806,7 +808,8 @@ export class Chat {
   }
 
   // ------------------------------------------------------------------ notes sent while Claude works
-  steerMsg(id, text, state) {
+  steerMsg(id, text, state, by) {
+    if (by === "app") { const el = this.put(h("div.noteline.appnote", icon("gauge", 13), text)); if (id) this.steerEls[id] = el; return el; }
     const cap = h("div.steer-cap");
     const el = this.put(h("div.msg.user.steer", { "data-steer": id || "" }, h("div", text), cap));
     el._text = text;
@@ -1017,7 +1020,8 @@ export class Chat {
   waitLine(r, live) {
     if (!r.text) { this.clearWait(); return; }
     this.clearWait();
-    const el = h("div.noteline" + (live && r.until ? ".waiting" : ""), icon("clock", 13), r.text);
+    const go = r.paused && live && !r.until ? h("button.btn.sm", { onclick: (ev) => { if (this.busy) return; ev.currentTarget.remove(); this.input.value = "Carry on where you left off."; this.send(); } }, "Carry on") : null;
+    const el = h("div.noteline" + (live && r.until ? ".waiting" : ""), icon(r.paused ? "gauge" : "clock", 13), h("span", r.text), go);
     this.put(el);
     if (live && r.until) this.waitEl = el;
   }
@@ -1101,10 +1105,44 @@ export class Chat {
     return ready.map((en) => ({ kind: "file", ftype: en.rec.kind, path: en.rec.path, name: en.rec.name, label: en.rec.label, thumb: en.thumb }));
   }
 
+  // what the message would likely cost, from the app's past runs like it (estimate.py), shown as you type
+  estimateSoon() {
+    clearTimeout(this.estT);
+    const text = this.input.value.trim();
+    if (text.length < 12 || this.busy) { this.costEl.style.display = "none"; this.est = null; return; }
+    this.estT = setTimeout(async () => {
+      try {
+        const e = await api(`/api/projects/${encodeURIComponent(this.pid)}/estimate?text=${encodeURIComponent(text.slice(0, 600))}`);
+        if (this.input.value.trim() !== text) return;
+        this.est = e.n ? e : null;
+        if (!e.n) { this.costEl.style.display = "none"; return; }
+        const money = (v) => v < 0.1 ? "under $0.10" : `$${v.toFixed(v < 10 ? 2 : 0)}`;
+        this.costEl.textContent = `about ${money(e.cost)}` + (e.pct != null ? ` · ~${e.pct < 1 ? "<1" : Math.round(e.pct)} % of the ${e.window} limit` : "");
+        this.costEl.dataset.tip = `From ${e.n} past ${e.basis === "other" ? "runs" : "runs of " + e.label}: most cost ${money(e.low)} to ${money(e.high)}` +
+          (e.minutes ? `, about ${e.minutes < 1 ? "under a minute" : Math.round(e.minutes) + " min"}` : "") + ".";
+        this.costEl.style.display = "";
+      } catch { this.costEl.style.display = "none"; }
+    }, 650);
+  }
+
+  // a message that could take more of the plan's limit than is left: asked first
+  async roomFor(est) {
+    if (!est || est.pct == null || est.pct < 5) return true;
+    let u = null;
+    try { u = await api("/api/usage"); } catch { return true; }
+    const used = u && u.plan && u.plan.used != null ? u.plan.used * 100 : null;
+    if (used == null || est.pct < 100 - used) return true;
+    return confirmDialog({ title: "This could reach the plan's limit", ok: "Send it",
+      text: `Runs like this have used about ${Math.round(est.pct)} % of the ${est.window} limit, and ${Math.max(0, Math.round(100 - used))} % is left. ` +
+        "Claude pauses at the point set in Settings, or when the limit is reached." });
+  }
+
   async send() {
     await this.finishDictation();
     const text = this.input.value.trim();
     if (!text && !this.files.length) return;
+    if (!this.busy && this.est && !(await this.roomFor(this.est))) return;
+    this.costEl.style.display = "none";
     if (this.busy) {
       const ment = this.takeMentions(text);
       const note = text + (ment.length ? `\nPointing at: ${ment.map((m) => m.label).join("; ")}` : "");

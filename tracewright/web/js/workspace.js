@@ -14,6 +14,7 @@ import { RulesView } from "./rules.js";
 import { FilesPanel, HistoryPanel, OutputsPanel, DocsPanel } from "./panels.js";
 import { OverviewPanel } from "./overview.js";
 import { Review, ReviewPanel } from "./review.js";
+import { Approvals } from "./approvals.js";
 import { TimelapsePlayer } from "./timelapse.js";
 import { MissionControl } from "./mission.js";
 import { GuidedCanvas } from "./guided.js";
@@ -50,6 +51,7 @@ export class Workspace {
     this.views = {};
     this.ev = new Events(pid);
     this.review = new Review(this);
+    this.approvals = new Approvals(this);
     this.unreg = [];
     this.build();
   }

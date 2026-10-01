@@ -54,7 +54,7 @@ export class SchematicView {
       view: "schematic", sheet: () => this.cur, project: (x, y) => this.toScreen(x, y),
       onPin: (f, pin) => { this.flagLayer.mark(f.id); flagEditor(pin, this.ws, { flag: f, onDone: () => this.flagLayer.mark(null) }); } });
     this.flags = new FlagTool(this.ws, {
-      view: "schematic", surface: this.svg, layer: this.flagLayer, hud: this.hudTc,
+      view: "schematic", surface: this.svg, layer: this.flagLayer, hud: this.hudTc, marks: ["pin", "pen", "arrow"],
       toWorld: (px, py) => this.vb ? this.toPage(px, py) : null,
       context: (w) => this.context(w), snapshot: (w) => this.snapshot(w),
       onChange: (on) => { this.viewer.classList.toggle("tool-flag", on); this.flagBtn.classList.toggle("on", on); this.svg.style.cursor = on ? "crosshair" : "grab"; } });

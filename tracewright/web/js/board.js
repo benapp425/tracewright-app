@@ -61,7 +61,7 @@ export class BoardView {
     this.banner = h("div.vbanner", { style: { display: "none" } });
     this.progress = h("div.hudbox", { style: { display: "none", padding: "0 10px", height: "32px", fontSize: "12px", gap: "8px" } });
     this.measureEl = h("div.measure", { style: { display: "none" } });
-    this.sideBtn = h("button.tbtn", { onclick: () => this.setSide(), "data-tip": "Flip board", "data-kbd": "b" }, icon("layers", 14), h("span", "Top"));
+    this.sideBtn = h("button.tbtn.sidebtn", { onclick: () => this.setSide(), "data-tip": "Flip board", "data-kbd": "b" }, icon("layers", 14), h("span", "Top"));
     this.findIn = h("input", { placeholder: "Find a part or net", spellcheck: false });
     this.findRes = h("div.findres", { style: { display: "none" } });
     const find = h("div.findbox", icon("search", 13), this.findIn, this.findRes);
@@ -87,9 +87,9 @@ export class BoardView {
       view: "board", project: (x, y) => this.data ? this.toScreen(x, y) : null, showDone: () => this.vis.flags !== false,
       onPin: (f, pin) => { this.flagLayer.mark(f.id); flagEditor(pin, this.ws, { flag: f, onDone: () => this.flagLayer.mark(null) }); } });
     this.flags = new FlagTool(this.ws, {
-      view: "board", surface: this.canvas, layer: this.flagLayer, hud: this.hudTc,
+      view: "board", surface: this.canvas, layer: this.flagLayer, hud: this.hudTc, marks: true,
       toWorld: (px, py) => this.data ? this.toWorld(px, py) : null,
-      context: (w) => this.context(w), snapshot: (w) => this.snapshot(w),
+      context: (w) => this.context(w), snapshot: (w, marks) => this.snapshot(w, marks),
       onChange: (on) => { this.viewer.classList.toggle("tool-flag", on); this.toolBtns.flag.classList.toggle("on", on); if (on) { this.setTool("select", true); if (this.ed.on) this.ed.setTool("select"); } } });
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(this.viewer);
@@ -617,7 +617,7 @@ export class BoardView {
   }
 
   // a crisp picture of the flagged spot for Claude: the board drawn again around it, with the marker
-  async snapshot(w) {
+  async snapshot(w, marks) {
     if (!this.data) return null;
     const W = 720, H = 480;
     let box;
@@ -639,7 +639,20 @@ export class BoardView {
       this.draw();
       const c = this.ctx;
       c.setTransform(1, 0, 0, 1, 0, 0);
-      if (w.region) {
+      if (marks && marks.length) {                      // what the user drew, as they drew it
+        c.strokeStyle = "rgba(255,170,110,1)"; c.lineWidth = 3; c.lineCap = "round"; c.lineJoin = "round";
+        for (const m of marks) {
+          const pts = m.p.map(([x, y]) => this.toScreen(x, y));
+          c.setLineDash(m.t === "route" ? [9, 6] : []);
+          c.beginPath(); pts.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.stroke();
+          if (m.t === "arrow" && pts.length >= 2) {
+            const [a, b] = pts.slice(-2), ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+            c.setLineDash([]); c.beginPath(); c.moveTo(b[0] - 14 * Math.cos(ang - 0.45), b[1] - 14 * Math.sin(ang - 0.45)); c.lineTo(b[0], b[1]);
+            c.lineTo(b[0] - 14 * Math.cos(ang + 0.45), b[1] - 14 * Math.sin(ang + 0.45)); c.stroke();
+          }
+        }
+        c.setLineDash([]);
+      } else if (w.region) {
         const [ax, ay] = this.toScreen(w.region[0], w.region[1]), [bx, by] = this.toScreen(w.region[2], w.region[3]);
         c.setLineDash([7, 5]); c.lineWidth = 2.5; c.strokeStyle = "rgba(255,170,110,1)"; c.strokeRect(ax, ay, bx - ax, by - ay); c.setLineDash([]);
       } else {

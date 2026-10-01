@@ -7,6 +7,7 @@ import json, os, time
 from . import config
 
 FILE = "plan_usage.json"
+LOG = "plan_usage_log.jsonl"                      # the readings over time (estimate.py learns the limit's share per dollar)
 WINDOWS = {"five_hour": "5-hour", "seven_day": "weekly", "seven_day_opus": "weekly Opus", "seven_day_sonnet": "weekly Sonnet",
            "overage": "extra usage"}
 
@@ -27,9 +28,32 @@ def seen(info):
         with open(_path() + ".tmp", "w") as f:
             json.dump(d, f)
         os.replace(_path() + ".tmp", _path())
+        log = os.path.join(config.data_dir(), LOG)
+        with open(log, "a") as f:
+            f.write(json.dumps({k: d[k] for k in ("at", "used", "window", "status", "resets_at")}) + "\n")
+        if os.path.getsize(log) > 120_000:                # the last few hundred readings are plenty
+            with open(log) as f:
+                keep = f.readlines()[-400:]
+            with open(log, "w") as f:
+                f.writelines(keep)
     except OSError:
         pass
     return d
+
+
+def history():
+    """The readings over time, oldest first: [{at, used, window, status, resets_at}]."""
+    out = []
+    try:
+        with open(os.path.join(config.data_dir(), LOG)) as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
 
 
 def last(now=None):

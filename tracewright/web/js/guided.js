@@ -138,11 +138,61 @@ export class GuidedCanvas {
     else this.fpView = new FloorplanView(fp, opts);
     const n = (fp.items || []).length, moved = [...(fp.items || []), ...(fp.holes || [])].filter((o) => o.moved).length;
     const bad = this.fpView.bad ? this.fpView.bad.size : 0;
+    const pr = this.cv.proposal;
+    let list = null;
+    this.fpView.setProposal(pr && pr.moves && pr.moves.length ? pr : null, () => this.render());
+    if (editable) list = this.suggestBox(fp, pr);
     return this.card("layout-grid", "Floorplan", `${fp.board.w} × ${fp.board.h} mm`, this.fpView.el,
       h("div.gd-fpnote", bad ? h("span.bad", `${bad} overlap${bad === 1 ? "s" : ""} or run${bad === 1 ? "s" : ""} off the board`) : null,
         h("span", opts.editable ? `Drag to move, click to select: R turns, L locks, arrows nudge${moved ? ` · ${moved} placed by you` : ""}. Claude follows what you place.`
           : `${n} items. The board holds the layout now.`)),
-      fp.note ? h("div.gd-fpnote", fp.note) : null);
+      fp.note ? h("div.gd-fpnote", fp.note) : null, list);
+  }
+
+  // Let Claude suggest a layout, with notes; its suggestion as ghosts on the floorplan, each move with why, a reply to
+  // each note (followed: green, declined: red), and the user takes all, some or none
+  suggestBox(fp, pr) {
+    const enc = encodeURIComponent, base = `/api/projects/${enc(this.pid)}/canvas/floorplan`;
+    const busy = this.ws.chat && this.ws.chat.busy;
+    const name = (id) => { const o = [...(fp.items || []), ...(fp.holes || []), ...(fp.keepouts || [])].find((x) => x.id === id); return o ? o.ref || o.label || id : id; };
+    if (pr && pr.moves && pr.moves.length) {
+      const view = this.fpView;
+      const rows = pr.moves.map((m, i) => h("label.gd-sg" + (view.take.has(m.id) ? ".on" : ""),
+        h("input", { type: "checkbox", checked: view.take.has(m.id) || undefined, onchange: () => view.toggleTake(m.id) }),
+        h("span.gd-sgn", String(i + 1)), h("b", name(m.id)), h("span", m.why || "")));
+      const notes = (pr.notes || []).map((t, i) => {
+        const r = (pr.replies || []).find((x) => x.note === i + 1);
+        return h("div.gd-sgnote" + (r ? "." + r.outcome : ""), h("div.q", `Your note: ${t}`),
+          r ? h("div.a", h("b", r.outcome === "declined" ? "Not followed: " : "Followed: "), r.text) : h("div.a.faint", "No reply"));
+      });
+      const n = view.take.size;
+      return h("div.gd-suggest",
+        h("div.gd-sgh", icon("sparkles", 14), h("b", "Claude's suggestion"), pr.summary ? h("span", pr.summary) : null),
+        h("div.gd-sglist", rows), notes.length ? h("div.gd-sgnotes", notes) : null,
+        h("div.gd-sgacts", h("button.btn.sm", { onclick: async () => { try { await api(`${base}/proposal`, { body: { action: "dismiss" } }); } catch (e) { toast(e.message, "error"); } } }, "Set it aside"),
+          h("div.grow"),
+          h("button.btn.sm.primary", { disabled: !n || undefined, onclick: async () => {
+            try { await api(`${base}/proposal`, { body: { action: "accept", ids: [...view.take] } }); toast(`Took ${n} of Claude's ${pr.moves.length} moves`, "ok"); }
+            catch (e) { toast(e.message, "error"); }
+          } }, n === pr.moves.length ? "Take all of it" : `Take ${n} of ${pr.moves.length}`)));
+    }
+    if (pr && pr.asked) {
+      return h("div.gd-suggest.wait", h("span.spinner"), h("span", "Claude is working on a layout"),
+        h("button.btn.sm.ghost", { onclick: async () => { try { await api(`${base}/proposal`, { body: { action: "dismiss" } }); } catch (e) { toast(e.message, "error"); } } }, "Never mind"));
+    }
+    const notes = h("textarea", { rows: 2, placeholder: "Notes for Claude, e.g. USB-C on the left edge; the antenna away from the motor driver",
+      oninput: () => { this.sgNotes = notes.value; } });
+    notes.value = this.sgNotes || "";                     // the canvas is drawn again as Claude works: keep what was typed
+    if (this.sgFocus) setTimeout(() => { notes.focus({ preventScroll: true }); notes.setSelectionRange(notes.value.length, notes.value.length); }, 0);
+    notes.addEventListener("focus", () => { this.sgFocus = true; });
+    notes.addEventListener("blur", () => { this.sgFocus = false; });
+    return h("details.gd-suggest.ask", { open: this.sgOpen || undefined, ontoggle: (e) => { this.sgOpen = e.target.open; } },
+      h("summary", icon("sparkles", 14), h("span", "Let Claude suggest a layout")),
+      notes, h("div.gd-sgacts", h("span.tiny.faint", "One note a line. Locked items stay put."), h("div.grow"),
+        h("button.btn.sm.primary", { disabled: busy || undefined, "data-tip": busy ? "Available when Claude finishes" : "", onclick: async () => {
+          try { await api(`${base}/suggest`, { body: { notes: notes.value.split("\n").map((x) => x.trim()).filter(Boolean) } }); this.sgNotes = ""; this.sgFocus = false; }
+          catch (e) { toast(e.message, "error"); }
+        } }, "Suggest a layout")));
   }
 
   // ------------------------------------------------------------------ connectors

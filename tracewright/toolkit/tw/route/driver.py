@@ -26,6 +26,8 @@ V2_FCU_CROSS = 1.10        # F.Cu along y (B.Cu along x already); off by default
 PAIR_K = 25.0              # v2: cost a cell for a pair's second half away from its partner's side
 REFINE_MIN_S = 20.0        # v2: the second look's time budget is the routing time, at least this
 HIST_AMOUNT = 40.0         # PathFinder history added to contested cells at each rip-up
+SKETCH_K = 30.0            # cost a cell away from the user's sketch of where a track should run (route ... along)
+SKETCH_W = 0.8             # mm either side of the sketch that is free
 
 
 def dump_for_router(b, routing=R.LAYERS):
@@ -195,7 +197,7 @@ def islands(B, Rt, net, pads, existing):
 
 class GridRoute:
     def __init__(self, project=None, nets=None, clear=False, on_progress=None, via_cost=VIA_COST, log=print, v2=None,
-                 layer_dirs=None, cleanup=None):
+                 layer_dirs=None, cleanup=None, sketch=None):
         self.p = project or env.project()
         self.v2 = bool(v2)
         self.layer_dirs = False if layer_dirs is None else layer_dirs      # measured: longer routes on SMD boards
@@ -210,6 +212,7 @@ class GridRoute:
         self.via_cost = via_cost
         self.failed = {}
         self.hist_amount = HIST_AMOUNT
+        self.sketch = sketch or None                  # [{"p": [[x, y], ...], "layer"?}]: route the nets along it
         from .. import stackup
         self.plan = stackup.get(getattr(self.p, "cfg", None))
         if self.plan and len(self.b.copper) != self.plan["layers"]:
@@ -389,7 +392,7 @@ class GridRoute:
         return made
 
     # ------------------------------------------------------------------ routing
-    def route_job(self, job, keep_going=False, allow_vias=True, cell_cost=None, layers=None):
+    def route_job(self, job, keep_going=False, allow_vias=True, cell_cost=None, layers=None, keep_to=None):
         B, Rt = self.B, self.Rt
         isl = islands(B, Rt, job.net, job.pads, {"tracks": [t for t in self.dump["tracks"]],
                                                   "vias": self.dump["vias"]})
@@ -403,7 +406,7 @@ class GridRoute:
             nxt = min(rest, key=lambda g: min(geom.dist(a, q) for a in g[1] for q in pts))
             rest.remove(nxt)
             rec = Rt.connect(job.net, job.prof, tree, nxt[0], fcu_factor=job.fcu, allow_vias=allow_vias, cell_cost=cell_cost,
-                             layers=layers)
+                             layers=layers, keep_to=keep_to)
             if rec is None:
                 fail = (list(tree), nxt[0], f"({nxt[1][0][0]:.1f}, {nxt[1][0][1]:.1f})")
                 if not keep_going:
@@ -470,7 +473,10 @@ class GridRoute:
             mate = pairs.get(net)
             if mate and any(r["net"] == mate for r in Rt.routes):
                 cc = self.corridor(net, mate, job.prof)
-            fail = self.route_job(job, cell_cost=cc, layers=self.layers_of(mate) if cc is not None else None)
+            elif self.sketch:
+                cc = self.sketch_cost()
+            keep = (cc == 0).reshape(len(B.layers), B.N) if (cc is not None and self.sketch and not mate) else None
+            fail = self.route_job(job, cell_cost=cc, layers=self.layers_of(mate) if cc is not None and mate else None, keep_to=keep)
             if fail is not None and cc is not None:      # no room beside its partner: route it on its own
                 Rt.rip([net])
                 Rt.rebuild()
@@ -564,7 +570,7 @@ class GridRoute:
 
     def _finish_run(self, t0, failed, total):
         self.failed = failed
-        if self.do_cleanup:
+        if self.do_cleanup and not self.sketch:       # a sketch is the user's way: not straightened into a shorter one
             self._pair_mates = set(self.coupled.values())
             # the second look takes at most as long again as the routing did (20 s at least)
             n_better = self.refine(budget=max(REFINE_MIN_S, time.time() - t0)) if self.v2 else self.cleanup()
@@ -646,6 +652,29 @@ class GridRoute:
             if pair_kind(a):
                 out[a], out[b] = b, a
         return out
+
+    def sketch_cost(self):
+        """A cost field keeping a route to the user's sketch: free within SKETCH_W of it (on its layer, if it names
+        one), SKETCH_K a cell elsewhere -- the search still goes round what is in the way."""
+        if getattr(self, "_sketch_cc", None) is not None:
+            return self._sketch_cc
+        B = self.B
+        cc = np.full(len(B.layers) * B.N, SKETCH_K, dtype=np.float32)
+        for line in self.sketch:
+            pts = line.get("p") or []
+            ls = [B.layers.index(line["layer"])] if line.get("layer") in B.layers else list(range(len(B.layers)))
+            for a, b in zip(pts, pts[1:]):
+                j0, i0 = B.cell(min(a[0], b[0]) - SKETCH_W, min(a[1], b[1]) - SKETCH_W)
+                j1, i1 = B.cell(max(a[0], b[0]) + SKETCH_W, max(a[1], b[1]) + SKETCH_W)
+                j0, i0, j1, i1 = max(0, j0), max(0, i0), min(B.ny - 1, j1), min(B.nx - 1, i1)
+                if j1 < j0 or i1 < i0:
+                    continue
+                X, Y = B.GX[j0:j1 + 1, i0:i1 + 1], B.GY[j0:j1 + 1, i0:i1 + 1]
+                jj, ii = np.nonzero(R._seg_dist(X, Y, a[0], a[1], b[0], b[1]) <= SKETCH_W)
+                for l in ls:
+                    cc[l * B.N + (jj + j0) * B.nx + (ii + i0)] = 0.0
+        self._sketch_cc = cc
+        return cc
 
     def layers_of(self, net):
         """On a board with more than two routing layers, the layers a routed net's tracks are on (a pair's second
@@ -854,17 +883,19 @@ class GridRoute:
         return ops
 
 
-def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_progress=None, live="auto", log=print, v2=None):
+def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_progress=None, live="auto", log=print, v2=None,
+          sketch=None):
     """Route and (by default) write the copper to the board. Returns {'summary', 'apply'}. v2: pairs routed
     together (the enclosed half first, the other beside it) and a second look at nets with vias or
-    detours; the default follows tracewright.json route.v2 (on unless set false)."""
+    detours; the default follows tracewright.json route.v2 (on unless set false). sketch: [{"p": [[x, y], ...],
+    "layer"?}], the user's line of where the nets should run (a review flag's route sketch)."""
     project = project or env.project()
     if engine == "freerouting":
         from . import freerouting
         return freerouting.route(project, on_progress=on_progress, log=log)
     if v2 is None:
         v2 = ((getattr(project, "cfg", None) or {}).get("route") or {}).get("v2", True)
-    g = GridRoute(project, nets=nets, clear=clear, on_progress=on_progress, log=log, v2=v2).setup()
+    g = GridRoute(project, nets=nets, clear=clear, on_progress=on_progress, log=log, v2=v2, sketch=sketch).setup()
     summary, segs, vias = g.run()
     out = {"summary": summary}
     if apply and (segs or vias or clear):
