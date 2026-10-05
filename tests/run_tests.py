@@ -4753,6 +4753,74 @@ def unattended_run_waits_for_the_usage_limit_and_carries_on():
 
 
 @test()
+def an_expired_sign_in_is_said_plainly():
+    """When Claude Code's sign-in on this Mac has expired, the turn fails at once: the chat gets a card saying how to sign
+    in again (with the message to send once that is done), not the CLI's error as if Claude had said it; an unattended
+    run stops there instead of trying again and again."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+    from tracewright.server import App
+    from tracewright.projects import ProjectStore
+    from tracewright.agent import AgentManager, is_auth
+    said = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    assert is_auth(said) and is_auth("Invalid API key · Please run /login") and not is_auth("R8 is not logged in the BOM")
+    pid = ProjectStore().import_copy(FIXTURE, "Sign-in demo").id
+
+    class SignedOutCLI:
+        def __init__(self):
+            self.sent, self.q = [], asyncio.Queue()
+        async def receive_messages(self):
+            while (m := await self.q.get()) is not None:
+                yield m
+        async def query(self, prompt):
+            self.sent.append(prompt)
+            self.q.put_nowait(AssistantMessage(content=[TextBlock(text=said)], model="<synthetic>", error="authentication_failed"))
+            self.q.put_nowait(ResultMessage(subtype="success", duration_ms=5, duration_api_ms=0, is_error=True,
+                                            num_turns=1, session_id="s1", result=said))
+        async def interrupt(self):
+            pass
+        async def disconnect(self):
+            self.q.put_nowait(None)
+
+    async def go():
+        app = App()
+        rt = app.rt(pid)
+        events = []
+        rt.hub.emit = lambda type_, **kw: events.append((type_, kw))
+        rt.p.unattended = lambda: True
+        a = AgentManager(app, rt)
+        cli = SignedOutCLI()
+
+        async def connect():
+            a.session = a.session or a.get_session()
+            if a.client is None:
+                a.client, a.client_key = cli, "k"
+                a.reader = asyncio.ensure_future(a._read(cli, a.session))
+            return a.client
+        a.connect = connect
+        try:
+            await a.send("Are the THT connectors right on JLC's 3D render?")
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if not a.busy and any(t == "agent.done" for t, _ in events):
+                    break
+            await asyncio.sleep(0.3)
+            return a, cli, events
+        finally:
+            if a.task and not a.task.done():
+                a.task.cancel()
+            await a.disconnect()
+            rt.stop()
+
+    a, cli, events, = asyncio.run(go())
+    cards = [kw for t, kw in events if t == "agent.signin"]
+    assert len(cards) == 1 and cards[0]["retry"] == "Are the THT connectors right on JLC's 3D render?" and cards[0]["said"] == said, cards
+    assert not [kw for t, kw in events if t == "agent.text_done"], "the CLI's error was shown as Claude's words"
+    recs = a.session.transcript()
+    assert [r["kind"] for r in recs if r.get("kind") in ("assistant", "signin")] == ["signin"], recs
+    assert len(cli.sent) == 1 and not [kw for t, kw in events if t == "agent.waiting"], "it tried again on its own"
+
+
+@test()
 def toolkit_update_sets_local_edits_aside():
     """Claude's edits to a project's tools/tw survive an app update as copies (and Claude hears of
     them once); an untouched copy leaves nothing behind."""

@@ -3,6 +3,11 @@
 All notable changes to Tracewright. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-10-04
+
+### Fixed
+- **An expired Claude sign-in.** When Claude's sign-in on this Mac has expired, the chat now says so and how to sign in again (in Terminal, `claude`, then `/login`), with Open Terminal and Send again buttons. Before, Claude Code's error appeared as if Claude had said it.
+
 ## [1.0.0] - 2026-10-01
 
 Edit the board and the schematic yourself, talk to Claude on the design itself, and see what Claude changed before you keep it.

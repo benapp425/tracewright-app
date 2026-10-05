@@ -49,6 +49,18 @@ def is_limit(text):
     return bool(text and LIMIT_RE.search(text))
 
 
+# Claude's sign-in is gone (the Claude Code login on this Mac expired or was revoked, or the API key is wrong): only the
+# user can fix it, so the chat says how instead of showing the CLI's error alone.
+AUTH_RE = re.compile(r"failed to authenticate|oauth (?:session|token)\b[^\n]{0,60}\b(?:expired|revoked|invalid)|could not be refreshed|"
+                     r"invalid (?:x-)?api[ -]?key|authentication_error|please run /login|invalid bearer token", re.I)
+SIGNIN_TEXT = ("Claude's sign-in on this Mac has expired. Open Terminal, run claude, type /login and sign in to your "
+               "Claude account, then send your message again. An API key in Settings > Claude works too.")
+
+
+def is_auth(text):
+    return bool(text and AUTH_RE.search(text))
+
+
 def limit_reset(text, now=None):
     """The epoch time the account's usage limit resets, read from Claude Code's message; None when the
     text is not about a limit or names no time. A time already past by a few minutes means now."""
@@ -560,6 +572,13 @@ class AgentManager:
         self._resume_h = asyncio.get_running_loop().call_later(max(1.0, until - now),
                                                                lambda: asyncio.ensure_future(self._resume(sid)))
 
+    def _signin(self, sess, tid, text="", said=""):
+        """The turn failed because Claude is not signed in: a card in the chat says how to sign in again, with the
+        message to send once that is done (said: the CLI's own words, shown small)."""
+        rec = {"kind": "signin", "turn": tid, "text": SIGNIN_TEXT, "retry": text or "", "said": (said or "").strip()[:300]}
+        sess.append(rec)
+        self.hub.emit("agent.signin", sid=sess.sid, **{k: v for k, v in rec.items() if k != "kind"})
+
     def cancel_wait(self):
         if self._resume_h is not None:
             self._resume_h.cancel()
@@ -665,7 +684,7 @@ class AgentManager:
                 extra = (extra or []) + [hidden]
             prompt = prompts.turn_context(self.rt, extra) + text
             t = {"tid": tid, "sess": sess, "done": asyncio.get_running_loop().create_future(), "auto": False,
-                 "blocks": {}, "started": started}
+                 "blocks": {}, "started": started, "text": text}
             self.turn = t
             await client.query(self._with_images(prompt, images) if images else prompt)
             await self._send_steers()
@@ -679,12 +698,13 @@ class AgentManager:
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             self.app.log(traceback.format_exc())
-            if "auth" in msg.lower() or "api key" in msg.lower() or "login" in msg.lower():
-                msg += " -- sign in with `claude` (Claude Code) or add an Anthropic API key in Settings."
-            elif starting:
+            auth = is_auth(msg) or "api key" in msg.lower()
+            if starting and not auth:
                 msg = f"Claude could not be started ({msg}). Details: {self.app.logfile}"
             sess.append({"kind": "error", "text": msg, "turn": tid})
             hub.emit("agent.error", sid=sess.sid, turn=tid, message=msg)
+            if auth:
+                self._signin(sess, tid, text, msg)
             await self.disconnect()
         finally:
             if self.turn is t:
@@ -875,9 +895,13 @@ class AgentManager:
         elif isinstance(m, AssistantMessage):
             if m.parent_tool_use_id or t is None:
                 return
+            auth = getattr(m, "error", None) == "authentication_failed"
             for b in m.content:
                 if isinstance(b, TextBlock) and b.text.strip():
                     t["last_text"] = b.text
+                    if auth:                               # the CLI's own error, not Claude speaking: the sign-in card says it
+                        t["auth"] = b.text
+                        continue
                     sess.append({"kind": "assistant", "text": b.text, "turn": tid})
                     hub.emit("agent.text_done", sid=sess.sid, turn=tid, text=b.text)
                 elif isinstance(b, ToolUseBlock):
@@ -928,6 +952,8 @@ class AgentManager:
             follow = not self.stopping and any(st["sent"] for st in self.steers)   # an unread note: the CLI runs it next
             if not follow and not self.stopping:
                 self._limit_hit(sess, (getattr(m, "result", None) or "") + "\n" + (t.get("last_text") or "") if m.is_error else "")
+            if m.is_error and (t.get("auth") or is_auth(getattr(m, "result", None) or t.get("last_text") or "")):
+                self._signin(sess, tid, t.get("text") or "", t.get("auth") or getattr(m, "result", None) or "")
             if not follow and self.pause_pending:
                 self._paused(sess)
             if t["auto"]:

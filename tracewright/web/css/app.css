@@ -2330,3 +2330,11 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .rn-sub { font-size: 11.5px; color: var(--text-3); margin: 7px 0 0; }
 .rn-acts { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
 .pe-warn { margin: 8px 0 4px; padding: 8px 10px; border-radius: 7px; background: var(--warn-soft); color: var(--text); font-size: 12.5px; }
+/* Claude is not signed in (chat.js signinCard) */
+.signin { border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: var(--warn-soft); border-radius: 11px; padding: 12px 14px; font-size: 13px; }
+.si-h { display: flex; align-items: center; gap: 8px; } .si-h svg.ic { color: var(--warn); }
+.si-t { color: var(--text-2); margin: 5px 0 6px; }
+.si-steps { margin: 0 0 10px; padding-left: 20px; color: var(--text-2); } .si-steps li { margin: 2px 0; }
+.si-steps code { font-family: var(--mono); font-size: 12px; background: var(--surface-3); padding: 1px 5px; border-radius: 4px; color: var(--text); }
+.si-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.si-said { font: 11.5px var(--mono); color: var(--text-3); margin: -2px 0 8px; }

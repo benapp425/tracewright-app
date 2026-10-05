@@ -9,7 +9,7 @@ Describe a board or open one you have. Claude designs, places, routes and checks
 live in KiCad, then sends it to the fab.</p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.0-eb8a50">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.0.1-eb8a50">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-12%2B-lightgrey">
   <img alt="KiCad" src="https://img.shields.io/badge/KiCad-9%20%7C%2010-314cb0">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-43c283">

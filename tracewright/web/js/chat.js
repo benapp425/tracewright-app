@@ -33,6 +33,8 @@ export const ICON = { status: "info", design: "list", board: "circuit-board", sh
   evidence: "badge-check", waive: "shield-check", library: "bookmark", nets: "waypoints", canvas: "layout-grid",
   Bash: "terminal", Read: "file-text", Grep: "search", Glob: "search", Edit: "pencil", Write: "pencil", MultiEdit: "pencil", NotebookEdit: "pencil",
   WebFetch: "external-link", WebSearch: "search", TodoWrite: "list-todo", Skill: "sparkles", Task: "bot", Agent: "bot", TaskOutput: "terminal", TaskStop: "circle-stop" };
+// Claude Code's own words when Claude is not signed in (agent.py AUTH_RE)
+const AUTH_RE = /failed to authenticate|oauth (?:session|token)\b[^\n]{0,60}\b(?:expired|revoked|invalid)|could not be refreshed|invalid (?:x-)?api[ -]?key|authentication_error|please run \/login|invalid bearer token/i;
 const LIVE_STEPS = 3;                              // a burst of work in progress shows its latest steps
 const HIDDEN = new Set(["agenda", "AskUserQuestion"]);   // drawn elsewhere (the agenda card, the question card)
 
@@ -505,6 +507,11 @@ export class Chat {
       if (r.kind === "user" && r.by === "app") this.resumeLine();
       else if (r.kind === "user") { this.userMsg(r.text, r.attachments); if (agenda && agendaDone(agenda)) agenda = null; }
       else if (r.kind === "waiting") this.waitLine(r, i === recs.length - 1 || recs.slice(i + 1).every((x) => x.kind !== "user"));
+      else if (r.kind === "assistant" && AUTH_RE.test(r.text) && !recs.some((x) => x.kind === "signin" && x.turn === r.turn)) {
+        const later = recs.slice(i + 1);                 // a conversation from before 1.0.1: the CLI's error kept as Claude's words
+        this.signinCard({ said: r.text, retry: (recs.slice(0, i).reverse().find((x) => x.kind === "user" && x.turn === r.turn) || {}).text },
+          later.every((x) => x.kind !== "user"));
+      }
       else if (r.kind === "assistant") { const b = this.assistantBlock(); b.text = r.text; this.renderMd(b, true); this.cur = null; }
       else if (r.kind === "tool") this.toolCard(r);
       else if (r.kind === "tool_result") this.toolResult(r);
@@ -515,6 +522,7 @@ export class Chat {
       else if (r.kind === "agenda") agenda = r;
       else if (r.kind === "steer") this.steerMsg(r.id, r.text, steerState[r.id] || (busy ? "queued" : "dropped"), r.by);
       else if (r.kind === "error") { this.closeSteps(); this.errorLine(r.text, i === recs.length - 1 ? this.lastUserText : null); }
+      else if (r.kind === "signin") this.signinCard(r, recs.slice(i + 1).every((x) => !["user", "done"].includes(x.kind) || x.turn === r.turn));
       else if (r.kind === "changes") this.changesCard(r, recs.some((x) => x.kind === "undone" && x.turn === r.turn));
       else if (r.kind === "review") this.reviewCard({ ...r, state: "done" });
       else if (r.kind === "undone") this.undoneLine(r);
@@ -528,6 +536,7 @@ export class Chat {
   wire() {
     const ev = this.ws.ev;
     ev.on("agent.waiting", (e) => this.waitLine(e, true));
+    ev.on("agent.signin", (e) => this.signinCard(e, true));
     ev.on("agent.user", (e) => {
       if (e.by === "app") { this.clearWait(); this.resumeLine(); this.sid = e.sid; return; }
       this.clearWait();
@@ -1061,6 +1070,25 @@ export class Chat {
   taskLine(e) {
     const txt = e.status === "running" ? `Running in the background: ${e.description}` : e.status === "completed" ? `Finished in the background: ${e.description}` : `Background work ${e.status}: ${e.description}`;
     this.put(h("div.noteline", icon(e.status === "running" ? "loader" : e.status === "completed" ? "check" : "x", 13), txt));
+  }
+
+  // Claude is not signed in (its Claude Code login on this Mac expired): how to sign in again, and the message to
+  // send once that is done
+  signinCard(r, live) {
+    this.closeSteps();
+    const terminal = isNative ? h("button.btn.sm", { onclick: () => native.openPath("/System/Applications/Utilities/Terminal.app") },
+      icon("terminal", 13), "Open Terminal") : null;
+    const again = live && r.retry ? h("button.btn.sm.primary", { onclick: (ev) => {
+      if (this.busy) return;
+      ev.currentTarget.disabled = true; this.input.value = r.retry; this.send();
+    } }, icon("send", 13), "Send again") : null;
+    this.put(h("div.signin", h("div.si-h", icon("key-round", 15), h("b", "Claude needs you to sign in again")),
+      h("div.si-t", "Its sign-in to your Claude account on this Mac has expired, so nothing was sent."),
+      r.said ? h("div.si-said", r.said) : null,
+      h("ol.si-steps", h("li", "Open Terminal and run ", h("code", "claude")), h("li", "Type ", h("code", "/login"), " and sign in"),
+        h("li", "Come back here and send your message again")),
+      h("div.si-acts", terminal, again, h("button.btn.sm.ghost", { onclick: () => { location.hash = "#/settings/claude"; } }, "Use an API key instead"))));
+    this.scroll(true);
   }
 
   errorLine(text, retry) {

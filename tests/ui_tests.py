@@ -1165,6 +1165,45 @@ async def schematic_edits_from_the_card_and_labels(t):
                 fh.write(txt)
 
 
+@test
+async def expired_sign_in_card(t):
+    """A conversation where Claude's sign-in had expired: each failed turn shows how to sign in again instead of the
+    CLI's error as Claude's words, and the last one offers to send the message again."""
+    root = t.s.demo["root"]
+    d = os.path.join(root, ".tracewright", "sessions")
+    os.makedirs(d, exist_ok=True)
+    said = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    ask = "Are the orientations of the THT connectors right on JLC's 3D render?"
+    recs = [{"kind": "user", "text": "Hello", "turn": "t1", "t": 1.0}, {"kind": "assistant", "text": said, "turn": "t1", "t": 1.1},
+            {"kind": "done", "turn": "t1", "cost": 0.0, "is_error": True, "subtype": "success", "t": 1.2},
+            {"kind": "user", "text": ask, "turn": "t2", "t": 2.0}, {"kind": "assistant", "text": said, "turn": "t2", "t": 2.1},
+            {"kind": "done", "turn": "t2", "cost": 0.0, "is_error": True, "subtype": "success", "t": 2.2}]
+    idx = os.path.join(d, "index.json")
+    before = open(idx).read() if os.path.exists(idx) else None
+    with open(os.path.join(d, "signin0test1.jsonl"), "w") as f:
+        f.write("\n".join(json.dumps(r) for r in recs) + "\n")
+    with open(idx, "w") as f:
+        json.dump([{"sid": "signin0test1", "title": "JLC question", "created": now, "updated": now, "turns": 2, "cost": 0.0}], f)
+    try:
+        await t.open_project("board")
+        await t.page.wait("document.querySelectorAll('.signin').length === 2", 15)
+        got = await t.page.js("""(() => ({ cards: [...document.querySelectorAll('.signin')].map((c) => c.innerText),
+          again: [...document.querySelectorAll('.signin')].map((c) => [...c.querySelectorAll('button')].some((b) => b.textContent.includes('Send again'))),
+          claude: [...document.querySelectorAll('.msgs')].map((m) => m.innerText).join(' ') }))()""")
+        check(all("sign in again" in c and "/login" in c and "OAuth session expired" in c for c in got["cards"]), got["cards"])
+        check(got["again"] == [False, True], got["again"])
+        check(got["claude"].count(said) == 2, "the error should appear only inside the two cards")
+        await t.shot("signin-card")
+    finally:
+        os.remove(os.path.join(d, "signin0test1.jsonl"))
+        if before is None:
+            os.remove(idx)
+        else:
+            with open(idx, "w") as f:
+                f.write(before)
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)
