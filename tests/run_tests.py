@@ -4422,6 +4422,37 @@ def screenshot_comparison_spots_a_change():
 
 
 @test()
+def floorplan_solver_keeps_what_was_drawn():
+    """A sketch's floorplan comes back as drawn when nothing clashes: a module drawn over its antenna keep-out stays
+    over it (and that is said), blocks 0.5 mm apart are left alone, an L-shaped slot's corner keeps its sensor; only a
+    block that really overlaps another moves, as little as it can, and the reply says which, how far and why."""
+    from tracewright import fpsolve
+    fp = {"board": {"w": 40, "h": 30, "radius": 1}, "holes": [{"id": "H1", "x": 3.5, "y": 3.5, "d": 2.2}, {"id": "H2", "x": 3.5, "y": 26.5, "d": 2.2}],
+          "items": [{"id": "J1", "label": "USB-C", "ref": "J1", "kind": "connector", "edge": "left", "at": 15, "w": 9, "h": 7.4},
+                    {"id": "esd", "label": "ESD + CC", "ref": "U2", "x": 11.5, "y": 15, "w": 4, "h": 7},
+                    {"id": "ldo", "label": "3.3 V LDO", "ref": "U1", "x": 15, "y": 6, "w": 9, "h": 8},
+                    {"id": "mcu", "label": "ESP32-C3-MINI-1", "ref": "U3", "x": 31.2, "y": 7.6, "w": 16.6, "h": 13.2},
+                    {"id": "btn", "label": "RESET  BOOT", "ref": "SW1/SW2", "x": 15, "y": 25, "w": 13, "h": 6},
+                    {"id": "led", "label": "WS2812B", "ref": "D1", "x": 25, "y": 25, "w": 6, "h": 6},
+                    {"id": "bme", "label": "BME280", "ref": "U4", "x": 35.5, "y": 25.5, "w": 6, "h": 6}],
+          "keepouts": [{"id": "K1", "label": "Antenna keep-out (no copper)", "x": 37, "y": 7.6, "w": 6, "h": 15.2},
+                       {"id": "K2", "label": "Routed slot", "x": 32, "y": 19.5, "w": 12, "h": 1.2},
+                       {"id": "K3", "label": "Routed slot", "x": 29.6, "y": 24.4, "w": 1.2, "h": 8}]}
+    out, rep = fpsolve.solve(fp)
+    pos = {it["id"]: (it.get("x"), it.get("y"), int(it.get("rot") or 0)) for it in out["items"] if not it.get("edge")}
+    want = {it["id"]: (it.get("x"), it.get("y"), 0) for it in fp["items"] if not it.get("edge")}
+    assert pos == want, (pos, rep["lines"])
+    assert any("sits over the antenna keep-out, as drawn" in l for l in rep["lines"]) and not rep["moved"], rep["lines"]
+    fp["items"][5]["x"] = 21                             # the LED now on top of the buttons: it alone moves, a little
+    out, rep = fpsolve.solve(fp)
+    pos = {it["id"]: (it.get("x"), it.get("y")) for it in out["items"] if not it.get("edge")}
+    assert rep["moved"] == ["led"] and pos["bme"] == (35.5, 25.5) and pos["btn"] == (15, 25), (rep["moved"], pos)
+    led = next(it for it in out["items"] if it["id"] == "led")
+    assert ((led["x"] - 21) ** 2 + (led["y"] - 25) ** 2) ** 0.5 < 8, led
+    assert rep["lines"][0].startswith("The floorplan solver moved D1 WS2812B") and "RESET" in rep["lines"][0], rep["lines"]
+
+
+@test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on
     one edge never overlap, blocks sit inside the board clear of the holes, the connectors and each other (a bottom-side

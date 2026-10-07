@@ -10,6 +10,7 @@ Millimetres from the board's top-left corner, y down (canvas.py)."""
 import copy, math, re
 
 GAP = 1.0           # between blocks, and between a block and a connector: room for the tracks between them
+GAP_FIT = 0.5       # what a sketch's blocks may come within of each other before the solver moves one
 EDGE = 0.5          # how far blocks stay from the board's edge
 CONN_GAP = 0.5      # between connectors on one edge
 TURNABLE = re.compile(r"header|\bpins?\b|gpio|\b\d+\s*[x×]\s*\d+\b|\bidc\b|box|strip|\bsocket", re.I)
@@ -166,26 +167,52 @@ def solve(fp):
                 if mover["id"] not in rep["moved"]:
                     rep["moved"].append(mover["id"])
 
-    # blocks: inside the board, clear of everything on their side, as near as possible to where each was asked for.
-    # Connectors at the edge, holes and keep-outs take room on both sides.
-    obstacles = [(conn_rect(c, W, H), "both") for c in conns if c["id"] not in rep["unfit"]]
-    obstacles += [(_hole_box(h), "both") for h in holes]
-    obstacles += [(_keepout_rect(k), "both") for k in fp.get("keepouts") or []]
-    clash = lambda r, sd: any(_hit(r, o, GAP) for o, osd in obstacles if osd in ("both", sd))
+    # blocks: inside the board and clear of each other, the connectors and the holes. A block that clashes with nothing
+    # stays exactly where it was asked for; only those that clash move, the biggest first, as little as they can. A
+    # keep-out a block was drawn over (a module's antenna area) is its own: it stays over it, and that is said; a block
+    # that has to move never moves into one. A block is turned only when it fits no other way.
+    obstacles = [(conn_rect(c, W, H), "both", _name(c)) for c in conns if c["id"] not in rep["unfit"]]
+    obstacles += [(_hole_box(h), "both", f"hole {h.get('ref') or h.get('id') or ''}".strip()) for h in holes]
+    kos = [(k.get("id") or f"K{n}", _keepout_rect(k), (k.get("label") or "a keep-out").split("(")[0].strip())
+           for n, k in enumerate(fp.get("keepouts") or [], 1)]
+
+    def inside(r):
+        return r[0] >= EDGE - 1e-6 and r[1] >= EDGE - 1e-6 and r[2] <= W - EDGE + 1e-6 and r[3] <= H - EDGE + 1e-6
+
+    def hits(r, sd, own, gap, extra=()):
+        """What a block at r would run into: [names]."""
+        out = [nm for o, osd, nm in list(obstacles) + list(extra) if osd in ("both", sd) and _hit(r, o, gap)]
+        out += [f"the {nm.lower()}" for kid, kr, nm in kos if kid not in own and _hit(r, kr, gap)]
+        return out
     step = max(0.5, round(max(W, H) / 130 * 2) / 2)
     for b in [b for b in blocks if _fixed(b)]:              # what the user placed stays; anything it overlaps is said
         r = block_rect(b)
-        if clash(r, side(b)):
+        if hits(r, side(b), (), GAP_FIT):
             rep["lines"].append(f"{_name(b)} (placed by you) overlaps something; it stays where you put it")
-        obstacles.append((r, side(b)))
-    free = sorted([b for b in blocks if not _fixed(b)], key=lambda b: -float(b["w"]) * float(b["h"]))
+        obstacles.append((r, side(b), _name(b)))
+    free = [b for b in blocks if not _fixed(b)]
+    asked = {b["id"]: block_rect(b) for b in free}
+    own = {b["id"]: {kid for kid, kr, _ in kos if _hit(asked[b["id"]], kr)} for b in free}
     for b in free:
+        for kid, kr, nm in kos:
+            if kid in own[b["id"]]:
+                rep["lines"].append(f"{_name(b)} sits over the {nm.lower()}, as drawn")
+    why = {}
+    clear = []
+    for b in free:                                          # clear as drawn: it stays
+        others = [(asked[o["id"]], side(o), _name(o)) for o in free if o is not b]
+        bad = hits(asked[b["id"]], side(b), own[b["id"]], GAP_FIT, others)
+        if inside(asked[b["id"]]) and not bad:
+            clear.append(b)
+        else:
+            why[b["id"]] = bad[0] if bad else "it was past the board's edge"
+    for b in clear:
+        obstacles.append((asked[b["id"]], side(b), _name(b)))
+    for b in sorted([b for b in free if b not in clear], key=lambda b: -float(b["w"]) * float(b["h"])):
         want = (float(b.get("x", W / 2)), float(b.get("y", H / 2)))
-        rots = [int(b.get("rot") or 0)]
-        if float(b["w"]) != float(b["h"]):
-            rots.append((rots[0] + 90) % 360)
+        rot0 = int(b.get("rot") or 0)
         best = None
-        for rot in rots:
+        for rot in [rot0] + ([(rot0 + 90) % 360] if float(b["w"]) != float(b["h"]) else []):
             w, h = (float(b["h"]), float(b["w"])) if rot % 180 == 90 else (float(b["w"]), float(b["h"]))
             x0, x1, y0, y1 = EDGE + w / 2, W - EDGE - w / 2, EDGE + h / 2, H - EDGE - h / 2
             if x0 > x1 + 1e-6 or y0 > y1 + 1e-6:
@@ -196,28 +223,33 @@ def solve(fp):
             cands = sorted(((x, y) for x in xs for y in ys), key=lambda p: (p[0] - want[0]) ** 2 + (p[1] - want[1]) ** 2)
             for x, y in [(cx, cy)] + cands:
                 r = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
-                if not clash(r, side(b)):
-                    d2 = (x - want[0]) ** 2 + (y - want[1]) ** 2 + (0 if rot == rots[0] else 4.0)    # a turn costs a little
-                    if best is None or d2 < best[0]:
-                        best = (d2, x, y, rot)
+                if not hits(r, side(b), own[b["id"]], GAP_FIT):
+                    best = (x, y, rot)
                     break
+            if best:
+                break                                       # turned only when it fits no other way
         if best is None:
             rep["unfit"].append(b["id"])
             rep["lines"].append(f"{_name(b)} ({float(b['w']):g} x {float(b['h']):g} mm) does not fit in the room left")
             continue
-        _, x, y, rot = best
-        if abs(x - want[0]) > 0.25 or abs(y - want[1]) > 0.25:
+        x, y, rot = best
+        d = math.hypot(x - want[0], y - want[1])
+        if d > 0.25:
             rep["moved"].append(b["id"])
-        if rot != int(b.get("rot") or 0):
+            rep.setdefault("moves", []).append((b["id"], d, why.get(b["id"], "")))
+        if rot != rot0:
             rep["turned"].append(b["id"])
+            rep["lines"].append(f"{_name(b)} turned a quarter to fit")
         b["x"], b["y"], b["rot"] = round(x, 2), round(y, 2), rot
-        obstacles.append((block_rect(b), side(b)))
+        obstacles.append((block_rect(b), side(b), _name(b)))
     if rep["unfit"]:
         rep["lines"].append(bigger(fp))
-    moved = [i for i in rep["moved"] if i not in rep["turned"]]
-    if moved:
-        names = [_name(next(o for o in items if o["id"] == i)) for i in moved]
-        rep["lines"].insert(0, f"moved clear of each other: {', '.join(names[:8])}{' ...' if len(names) > 8 else ''}")
+    moves = [(i, d, w) for i, d, w in rep.get("moves", []) if i not in rep["turned"]]
+    if moves:
+        said = [f"{_name(next(o for o in items if o['id'] == i))} {d:.1f} mm" + (f" ({w if w.startswith('it ') else 'it ran into ' + w})" if w else "")
+                for i, d, w in moves]
+        rep["lines"].insert(0, "The floorplan solver moved " + "; ".join(said[:8]) + (" ..." if len(said) > 8 else "")
+                            + ". Everything else stays where it was drawn.")
     return fp, rep
 
 

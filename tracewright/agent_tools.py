@@ -1356,7 +1356,8 @@ def tool_list(rt, app):
                 "\n- ".join(feasible.lines(new)) if new else "")
         return _text(f"canvas {args['section']} updated ({n} item{'s' if n != 1 else ''})" + said +
                      (f"; kept where the user put them: {', '.join(kept)}" if kept else "") +
-                     ("\nSolved so nothing overlaps or sticks out:\n- " + "\n- ".join(solved) +
+                     ("\nThe floorplan solver (not the user) checked it -- blocks inside the board and apart, connectors on "
+                      "their edges:\n- " + "\n- ".join(solved) +
                       "\nTell the user about anything that does not fit, and what would." if solved else ""))
 
     @reg("ready_to_start", "Guided start: the intake is done. Call it once the requirements are settled and written to "

@@ -9,7 +9,7 @@ Describe a board or open one you have. Claude designs, places, routes and checks
 live in KiCad, then sends it to the fab.</p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.1-eb8a50">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.1.0-eb8a50">
   <img alt="macOS" src="https://img.shields.io/badge/macOS-12%2B-lightgrey">
   <img alt="KiCad" src="https://img.shields.io/badge/KiCad-9%20%7C%2010-314cb0">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-43c283">
@@ -27,15 +27,19 @@ live in KiCad, then sends it to the fab.</p>
 - **Edit it yourself.** Move, turn and lock parts, route tracks and pairs, tune lengths, draw pours and keep-outs on the board; change a part's value or footprint and rename nets on the schematic. ⌘Z undoes each step.
 - **Flags as threads.** Flag a spot on the board or schematic with a request or a question, and draw on it: where a track should go, what to keep clear. Claude answers in the thread.
 - **Needs your OK.** Nothing interrupts a run. Afterwards, a short list shows what Claude went ahead with that you may want to see (a swapped part, a moved connector, your own work changed), to keep or undo.
-- **Up to 10 layers.** Claude plans the stack-up (signal layers and their directions, planes and their nets) and routes every signal layer.
+- **Notes that read like a person wrote them.** One short line on the sheet beside the part it explains; the reasoning and its sources in the design notes, shown when you hover the part.
+- **Placement with reasons.** Pick a part to see why it is where it is. Keep parts near a pin, together, apart or at an edge; Claude places around it, in stages, and scores the result.
+- **A routing plan.** Each net is routed by the router, routed first with its rules (pairs, clocks, switch nodes, heavy currents), or left for you (RF, current sense, high voltage), with its reason. Pick the router's preset and keep a net to chosen layers.
+- **Up to 12 layers, and HDI.** Claude plans the stack-up and routes every signal layer. HDI (vias in pads, microvias, blind vias) stays off unless you turn it on; each BGA gets an escape plan and a fan-out.
+- **Where tracks fit.** See the crowded parts of the board, hover any point to see what keeps a track out, and give an area its own rules (keep-out, no vias, finer tracks, more spacing).
 - **Cost before you run.** See a request's likely cost and share of your plan's limit before you send it.
 - **My parts.** Save parts you have checked, with their footprints, 3D models and notes, for every project.
 - **Talk, attach, point.** Dictate a message, drop in pictures and data sheets, or type @ to point Claude at a part, net or sheet.
 - **Run monitor.** A full-screen view of a run: the plan, the stages, the board as it grows, and how much of your Claude plan's limit is used.
 
 **Check it**
-- **56 design checks.** Schematic integrity (pinouts, packages, voltage domains), BOM, placement, routing quality, fab limits, assembly, signal integrity and power (regulators, heat, voltage drop, switchers, pours). Each says what it examined, and each is tested against a planted fault.
-- **Simulation.** Claude simulates circuits with KiCad's ngspice to show a requirement holds: a filter's corner, a divider's output, a supply's start-up.
+- **62 design checks.** Schematic integrity (pinouts, packages, voltage domains), BOM, placement, routing quality, fab limits, assembly, signal integrity and power (regulators, heat, voltage drop, switchers, pours). Each says what it examined, and each is tested against a planted fault.
+- **Simulate the board as laid out.** The voltage drop and current density in a supply's copper, the board's heat, where a fast net's return current runs (and the loop it opens round a gap), a net's impedance and edge at the far end with the series resistor that would tame it, crosstalk, a rail's impedance against its target, and circuit blocks from the schematic in ngspice.
 - **Sign-off.** Before anything is ordered: the verdict, every requirement with its evidence (checks, calculations, simulations, regulator heat), the waivers you approved, and what only the built board can show.
 - **Compare versions.** See what moved and which copper changed since any checkpoint.
 - **Bring-up.** A checklist for the built board, with each reading checked against the plan, and a firmware starter: the pin map and a bring-up sketch from the schematic.
@@ -45,10 +49,19 @@ live in KiCad, then sends it to the fab.</p>
 - **Stock watch.** Warns when a part runs short of what an order needs, and finds in-stock stand-ins.
 - **Save money.** Exact JLC Basic equivalents for Extended parts.
 - **Parts lists.** For DigiKey, Mouser and LCSC.
+- **Make.** The BOM's health, a test-point plan, a fab drawing and assembly drawings, a V-scored panel with rails and fiducials, the enclosure fit with an OpenSCAD box to start from, and your blocks: circuits that worked once, saved to use again.
 
 <p align="center">
-  <img src="docs/images/board.png" width="440" alt="The board view">
-  <img src="docs/images/mission.png" width="440" alt="The run monitor">
+  <img src="docs/images/board.png" width="440" alt="The board with its routing plan">
+  <img src="docs/images/space.png" width="440" alt="Where tracks fit, and why not here">
+</p>
+<p align="center">
+  <img src="docs/images/simulate.png" width="440" alt="The board's heat, simulated">
+  <img src="docs/images/signal.png" width="440" alt="A net's edge and impedance, simulated">
+</p>
+<p align="center">
+  <img src="docs/images/make.png" width="440" alt="Getting the board built: BOM health, test points, panel">
+  <img src="docs/images/schematic.png" width="440" alt="A schematic with its design notes">
 </p>
 <p align="center">
   <img src="docs/images/checks.png" width="440" alt="Design checks">
@@ -103,15 +116,16 @@ my-board/
   BRIEF.md              the original description
   CLAUDE.md             instructions for Claude
   .claude/              skills for each stage, lessons, permissions
-  hardware/<name>/      the KiCad project
+  hardware/<name>/      the KiCad project, with design-notes.json (the reasoning behind the schematic)
+                        and placement-plan.json (why each part is where it is, and what to keep)
   design/               scripts Claude writes, and project-specific checks
   docs/                 requirements, architecture, decisions, parts, review, bring-up
   tools/tw/             the toolkit (./tw <command>), usable without the app
   build/                reports, plots and fab outputs (not in git)
 ```
 
-Every project works without the app: `./tw check`, `./tw route` and `./tw outputs` run from the
-project folder, and Claude Code picks up the same instructions and skills there.
+Every project works without the app: `./tw check`, `./tw route`, `./tw escape`, `./tw space` and
+`./tw outputs` run from the project folder, and Claude Code picks up the same instructions and skills there.
 
 ## Privacy
 
