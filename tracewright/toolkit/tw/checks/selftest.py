@@ -467,6 +467,12 @@ def mem_labels(ctx):
     nl.nets["Net-(J2-Pad3)"] = [("J2", "3")]
 
 
+def plant_plan(p):
+    # the user asked for C4 within 1 mm of U2 pin 8; it sits further away
+    from .. import placeplan
+    placeplan.add_constraint(p, {"kind": "near", "ref": "C4", "to": "U2.8", "max_mm": 0.2}, by="user")
+
+
 def mem_ldo_heat(ctx):
     ctx.p.cfg.setdefault("checks", {})["currents"] = {"+3V3": 1.2}               # 5 V -> 3.3 V at 1.2 A in a SOT-223
 
@@ -568,6 +574,7 @@ CASES = [
     ("sch.notes", "a paragraph about R4, far from it", ("file", plant_long_note), "long note"),
     ("sch.support", "R4 drawn 100 mm from the pin it pulls up", ("mem", mem_support), "R4 serves U2 pin 1"),
     ("sch.labels", "J2 pin 3 on a net with no name", ("mem", mem_labels), "J2: 1 pin on nets with no name"),
+    ("placement.plan", "C4 kept within 0.2 mm of U2 pin 8, and it is not", ("file", plant_plan), "broken: C4 within 0.2 mm of U2.8"),
     ("sch.conventions", "IEC values chosen, a resistor written 5.1k", ("mem", mem_conventions), "writes values"),
     ("sch.nets", "J2 pin 3 on 'I2C_SDA1' instead of I2C_SDA", ("mem", mem_sch_nets), "I2C_SDA1"),
     ("nets.model", "a net declared under a name no net has", ("mem", mem_nets_model), "VCC_OLD"),

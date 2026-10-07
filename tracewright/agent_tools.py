@@ -151,7 +151,8 @@ def tool_list(rt, app):
         hub.emit("schematic.notes")
         return _text(f"noted {n['id']} on {n['anchor']}")
 
-    @reg("board", "Query the board. what: summary | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
+    @reg("board", "Query the board. what: summary | placement (the placement score and its parts, the constraints kept or "
+         "broken, the stages, parts with no reason) | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
          "ref: pads with nets and positions) | nets (net -> pads) | net (one net: pads, tracks, vias, length) | "
          "outline | unrouted (from the last DRC) | zones. Coordinates in mm (KiCad axes, y down). When KiCad has the "
          "board open, positions include its unsaved edits.",
@@ -172,6 +173,23 @@ def tool_list(rt, app):
             return not region or (region[0] <= x <= region[2] and region[1] <= y <= region[3])
         if w == "summary":
             return _text(_json(b.summary()))
+        if w == "placement":                          # the score, the constraints, the reasons: what the user sees
+            from tw import placeplan
+            from tw.checks.context import Context
+            plan = await run(placeplan.load, tw)
+            nl, grounds = None, set()
+            if tw.has_sch():
+                ctx = Context(tw, offline=True)
+                nl, grounds = await run(lambda: ctx.netlist), await run(ctx.ground_nets)
+            sc = await run(placeplan.score, b, nl, plan, grounds)
+            ev = placeplan.evaluate(b, plan)
+            lines = [f"placement score {sc['total']}"] + [f"  {p_['name']}: {p_['score']} ({p_['detail']})" for p_ in sc["parts"]]
+            lines += [f"constraint {'KEPT' if e['ok'] else 'BROKEN' if e['ok'] is False else '?'} [{e['constraint'].get('by')}]: {e['text']}" for e in ev]
+            lines += [f"stage {k}: {'done' if plan['stages'].get(k) else 'not yet'}" for k in placeplan.STAGES]
+            missing = sorted(f.ref for f in b.fp_list if f.ref not in plan["parts"] and not f.ref.startswith(("#", "H", "MH", "FID")))
+            if missing:
+                lines.append(f"no reason recorded for {len(missing)} parts: {', '.join(missing[:30])}")
+            return _text("\n".join(lines))
         if w == "footprints":
             rows = []
             for f in b.fp_list:
@@ -319,18 +337,33 @@ def tool_list(rt, app):
         hub.emit("board.edit", what=what, via=res.get("via"), ok=res.get("ok"))
         return res
 
-    @reg("place", "Move footprints: moves [{ref, x, y, rot?, side?: F|B, locked?}] (mm, KiCad axes, rot CCW degrees). "
-         "Shown animated in the app and, with the board open in KiCad, applied live as one undo step. Place a "
-         "functional group at a time. Returns overlaps and off-board parts among the moved ones. Locked parts are "
-         "refused: the user's stay where they are; one you locked yourself, unlock first (copper, op lock). propose: "
-         "true when the user asked you to suggest placement: nothing moves; the moves (each with why) are drawn as "
-         "ghosts for them to take; replies: [{note: its number, text, outcome: followed | declined}], one per note; summary.",
+    @reg("place", "Move footprints: moves [{ref, x, y, rot?, side?: F|B, locked?, why}] (mm, KiCad axes, rot CCW degrees). "
+         "why: one plain line the user reads when they pick the part (\"2 mm from U3 pin 7, GND via beside it\"). Place in "
+         "stages: fixed (connectors, holes, what the floorplan fixed), main (the main chips), support (their decoupling, "
+         "crystals, pull-ups), rest -- stage: the one these moves belong to; done: true when that stage is finished. "
+         "constraints: [{kind: near (ref, to: U3 or U3.7, max_mm) | together (refs, max_mm) | away (ref, from: [refs], "
+         "min_mm) | edge (ref, edge: left|right|top|bottom|any) | side (ref, side: F|B), why}] to keep from now on; the "
+         "user sets theirs in the app, and a move that breaks one is reported. Shown animated in the app and, with the "
+         "board open in KiCad, applied live as one undo step. Returns overlaps and off-board parts among the moved ones. "
+         "Locked parts are refused: the user's stay where they are; one you locked yourself, unlock first (copper, op "
+         "lock). propose: true when the user asked you to suggest placement: nothing moves; the moves (each with why) are "
+         "drawn as ghosts for them to take; replies: [{note: its number, text, outcome: followed | declined}], one per "
+         "note; summary.",
          {"type": "object", "properties": {"moves": {"type": "array", "items": {"type": "object"}}, "propose": {"type": "boolean"},
+                                           "stage": {"type": "string", "enum": ["fixed", "main", "support", "rest"]}, "done": {"type": "boolean"},
+                                           "constraints": {"type": "array", "items": {"type": "object"}},
                                            "replies": {"type": "array", "items": {"type": "object"}}, "summary": {"type": "string"}},
           "required": ["moves"]})
     async def place(args):
+        from tw import placeplan
         moves = args.get("moves") or []
         b0 = await run(rt.board)
+        tw_ = proj()
+        for c in args.get("constraints") or []:
+            try:
+                await run(placeplan.add_constraint, tw_, c, "claude")
+            except ValueError as e:
+                return _text(f"constraint: {e}", error=True)
         if args.get("propose"):                          # a suggestion for the user: nothing moves
             from . import boardedit
             try:
@@ -366,8 +399,27 @@ def tool_list(rt, app):
                     continue
                 if _polys_overlap(l, m):
                     notes.append(f"{f.ref} courtyard overlaps {g.ref}")
+        whys = {m["ref"]: m.get("why") for m in moves if m.get("ref") and m.get("why")}
+        if whys:
+            await run(placeplan.set_why, tw_, whys, args.get("stage"), "claude")
+        plan = await run(placeplan.load, tw_)
+        broken = [e["text"] for e in placeplan.evaluate(b, plan) if e["ok"] is False and
+                  (moved & set([e["constraint"].get("ref")] + list(e["constraint"].get("refs") or []) + list(e["constraint"].get("from") or [])))]
+        unexplained = sorted(r for r in moved if r not in plan["parts"])
+        tail = ""
+        if broken:
+            tail += "\nBreaks a constraint (fix it, or tell the user why it cannot be kept): " + "; ".join(broken)
+        if unexplained:
+            tail += f"\nNo reason given for {', '.join(unexplained[:10])}: add why to each move (the user reads it)."
+        if args.get("done") and args.get("stage"):
+            await run(placeplan.mark_stage, tw_, args["stage"])
+            hub.emit("placement.changed")
+            if app.settings.get("placement_stop_stages"):
+                tail += (f"\nThe {args['stage']} stage is done. The user asked to check each placement stage: stop here, say in "
+                         "two or three lines what you placed and why, and wait for their OK before the next stage.")
+        hub.emit("placement.changed")
         return _text(f"placed {len(ops)} parts ({res.get('via')})" + ("; " + "; ".join(sorted(set(notes))) if notes else
-                                                                      "; no courtyard overlaps among them"))
+                                                                      "; no courtyard overlaps among them") + tail)
 
     @reg("copper", "Board operations (see .claude/tracewright.md): ops [{op: track|tracks|via|vias|delete|zone|rule_area|"
          "outline|text|fill|lock|value|ref_text, ...}]. Tracks, vias, deletes go live into KiCad when it has the board "

@@ -1,7 +1,7 @@
 // The live board: a canvas view of the .kicad_pcb that follows every change -- Claude's placement
 // (animated), the router (net by net), the user's moves in KiCad, highlights, notes and findings --
 // with a layers panel, find, a measuring tool and the review flags.
-import { h, clear, api, toast, btn } from "./util.js";
+import { h, clear, api, toast, btn, promptDialog } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
 import { FloorplanView } from "./floorplan.js";
@@ -726,6 +726,7 @@ export class BoardView {
     if (this.selNet) items.push({ net: this.selNet, kind: "net" });
     this.ws.select(items, "board");
     this.renderSelBar();
+    if (this.panel === "placement") this.renderLayers();         // why the picked part is here
   }
 
   renderSelBar() {
@@ -865,19 +866,20 @@ export class BoardView {
   renderLayers() {
     clear(this.layerBox);
     const collapsed = localStorage.getItem("tw.layers.collapsed") !== "0" || (this.autoFold && !this.forceOpen);
-    const tabs = h("div.ltabs", [["layers", "Layers", "layers"], ["copper", "Copper", "cable"]].map(([v, t, ic]) =>
+    const tabs = h("div.ltabs", [["layers", "Layers", "layers"], ["copper", "Copper", "cable"], ["placement", "Placement", "move"]].map(([v, t, ic]) =>
       h("button" + (this.panel === v ? ".on" : ""), { onclick: () => { if (collapsed) localStorage.setItem("tw.layers.collapsed", "0"); this.setPanel(v); },
-        "data-tip": v === "copper" ? "Copper by net" : "Layers" }, icon(ic, 12), t)));
+        "data-tip": v === "copper" ? "Copper by net" : v === "placement" ? "Why each part is where it is, and the placement's score" : "Layers" }, icon(ic, 12), t)));
     this.layerBox.appendChild(h("div.lhead", tabs, h("button.tbtn", { style: { height: "22px", minWidth: "22px", padding: 0 },
       "data-tip": collapsed ? "Show the panel" : "Hide the panel", onclick: () => {
         if (this.autoFold) this.forceOpen = collapsed; else localStorage.setItem("tw.layers.collapsed", collapsed ? "0" : "1");
         this.renderLayers();
       } },
       icon(collapsed ? "chevron-down" : "chevron-up", 13))));
-    this.layerBox.classList.toggle("wide", this.panel === "copper" && !collapsed);
+    this.layerBox.classList.toggle("wide", (this.panel === "copper" || this.panel === "placement") && !collapsed);
     this.layerBox.style.width = collapsed ? "auto" : "";
     if (collapsed) return;
     if (this.panel === "copper") { this.copperPanel(); return; }
+    if (this.panel === "placement") { this.placementPanel(); return; }
     const items = [["F.Cu", "Top copper", COL["F.Cu"]]];
     for (const l of this.copper.slice(1, -1)) items.push([l, `${l.replace(".Cu", "")} · ${this.layerRole(l) || "inner"}`, COL[l] || [160, 160, 160]]);
     items.push(["B.Cu", "Bottom copper", COL["B.Cu"]]);
@@ -895,6 +897,77 @@ export class BoardView {
       el.appendChild(eye);
       this.layerBox.appendChild(el);
     }
+  }
+
+  // ------------------------------------------------------------------ placement: the score, the stages, why each part is here
+  async loadPlacement(force) {
+    if (this.placementLoading || (!force && this.placement)) return this.placement;
+    this.placementLoading = true;
+    try { this.placement = await api(`/api/projects/${encodeURIComponent(this.pid)}/placement`); } catch { this.placement = null; }
+    this.placementLoading = false;
+    if (this.panel === "placement") this.renderLayers();
+    return this.placement;
+  }
+
+  placementPanel() {
+    const box = this.layerBox, P = this.placement;
+    if (!P) { box.appendChild(h("div.pl-empty", "Reading the placement…")); this.loadPlacement(); return; }
+    if (!P.plan) { box.appendChild(h("div.pl-empty", "No board yet.")); return; }
+    const sc = P.score || {};
+    box.appendChild(h("div.pl-score", h("b", sc.total == null ? "–" : String(sc.total)), h("span", "placement score"),
+      h("button.tbtn", { "data-tip": "Measure again", onclick: () => { this.placement = null; this.loadPlacement(true); } }, icon("refresh-cw", 12))));
+    for (const p of sc.parts || []) box.appendChild(h("div.pl-part", { "data-tip": p.detail },
+      h("span.pl-n", p.name), h("span.pl-bar", h("i" + (p.score >= 80 ? ".ok" : p.score >= 50 ? ".warn" : ".bad"), { style: { width: p.score + "%" } })), h("span.pl-v", String(p.score))));
+    // why the picked part is here, and constraints to add for it
+    const refs = [...this.sel];
+    if (refs.length) {
+      const one = refs.length === 1 ? refs[0] : null, why = one && P.plan.parts[one];
+      const sec = h("div.pl-why", h("div.pl-h", icon("info", 12), one ? `Why ${one} is here` : `${refs.length} parts picked`),
+        one ? h("div.pl-t", why ? why.why : "No reason recorded yet.") : null,
+        h("div.pl-add", one ? h("button.btn.sm", { onclick: () => this.addConstraint("near", one) }, "Keep near…") : null,
+          one ? h("button.btn.sm", { onclick: () => this.addConstraint("edge", one) }, "At the edge") : null,
+          one ? h("button.btn.sm", { onclick: () => this.addConstraint("away", one) }, "Keep away…") : null,
+          refs.length > 1 ? h("button.btn.sm", { onclick: () => this.addConstraint("together", null, refs) }, "Keep together") : null));
+      box.appendChild(sec);
+    }
+    box.appendChild(h("div.pl-h", icon("list-checks", 12), "Stages"));
+    for (const st of P.stages || []) box.appendChild(h("div.pl-stage" + (st.done ? ".done" : ""), icon(st.done ? "circle-check" : "circle", 12), h("span", st.text[0].toUpperCase() + st.text.slice(1))));
+    box.appendChild(h("div.pl-h", icon("ruler", 12), `Constraints (${(P.constraints || []).length})`));
+    if (!(P.constraints || []).length) box.appendChild(h("div.pl-empty", "Pick a part to keep it near a pin, at the edge or away from others."));
+    for (const e of P.constraints || []) {
+      const c = e.constraint;
+      box.appendChild(h("div.pl-c" + (e.ok === false ? ".bad" : e.ok ? ".ok" : ""), icon(e.ok === false ? "circle-x" : e.ok ? "circle-check" : "circle", 12),
+        h("span.grow", e.text), h("span.pl-by", c.by === "user" ? "you" : "Claude"),
+        c.by === "user" ? h("button.tbtn", { "data-tip": "Drop it", onclick: () => this.dropConstraint(c.id) }, icon("x", 11)) : null));
+    }
+  }
+
+  async addConstraint(kind, ref, refs) {
+    let c = { kind, ref };
+    if (kind === "near") {
+      const to = await promptDialog({ title: `Keep ${ref} near…`, label: "A part, or a pin (U3.7)", placeholder: "U3.7", ok: "Next" });
+      if (!to) return;
+      const mm = await promptDialog({ title: `${ref} within how far of ${to}?`, label: "Millimetres", value: "3", ok: "Keep it" });
+      if (mm === null) return;
+      c = { kind, ref, to: to.trim(), max_mm: parseFloat(mm) || 3 };
+    } else if (kind === "away") {
+      const from = await promptDialog({ title: `Keep ${ref} away from…`, label: "Parts, comma separated", placeholder: "U5, L1", ok: "Next" });
+      if (!from) return;
+      const mm = await promptDialog({ title: `How far from ${from}?`, label: "Millimetres at least", value: "5", ok: "Keep it" });
+      if (mm === null) return;
+      c = { kind, ref, from: from.split(/[\s,]+/).filter(Boolean), min_mm: parseFloat(mm) || 5 };
+    } else if (kind === "edge") c = { kind, ref, edge: "any", max_mm: 1 };
+    else if (kind === "together") c = { kind, refs, max_mm: 10 };
+    try {
+      await api(`/api/projects/${encodeURIComponent(this.pid)}/placement`, { body: { action: "add", constraint: c } });
+      toast("Kept: Claude places around it", "ok", 3000);
+      this.placement = null; this.loadPlacement(true);
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async dropConstraint(id) {
+    try { await api(`/api/projects/${encodeURIComponent(this.pid)}/placement`, { body: { action: "remove", id } }); this.placement = null; this.loadPlacement(true); }
+    catch (e) { toast(e.message, "error"); }
   }
 
   copperPanel() {

@@ -4,6 +4,15 @@ description: Place the footprints on the board with intent - outline and mountin
 ---
 # Placement
 
+Place in four stages and say why for every part. Each `place` call carries the stage (fixed: connectors, holes and
+what the floorplan fixed; main: the main chips; support: their decoupling, crystals, pull-ups and filters; rest) and
+a `why` on every move: one plain line the user reads when they pick the part ("2 mm from U3 pin 7, GND via beside
+it", "at the left edge: the cable comes in there"). Mark a stage done (`done: true`); if the user asked to check
+each stage, the tool tells you to stop and wait. Keep the user's constraints (Placement panel: a part near a pin,
+parts together, a part away from others, at an edge, on a side) and add your own where they matter (`constraints`).
+`board` what=placement shows the score and its parts (short connections, few crossings, decoupling at the pins,
+connectors at the edge, constraints kept, hot parts apart): read it after each stage and fix what scores low.
+
 1. The stack-up first (`stackup`): decide the copper layers from the design -- 2 for simple, slow boards; 4 once
    there is anything fast, a fine-pitch part to fan out or EMC to meet; 6 or more for several fast interfaces or a
    BGA with many rows -- which are signal layers (and their routing direction) and which are planes (and their

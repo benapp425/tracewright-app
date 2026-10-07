@@ -1207,6 +1207,54 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.get("/api/projects/{pid}/placement")
+    async def placement_get(request):
+        """The placement plan (tw/placeplan.py): each part's reason, the stages, the constraints (kept or not) and the
+        placement's score as it stands."""
+        from tw import placeplan
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_pcb():
+            return jresp({"plan": None})
+
+        def work():
+            from tw.checks.context import Context
+            plan = placeplan.load(rt.p.tw)
+            b = rt.board()
+            nl, grounds, hot = None, set(), []
+            try:
+                ctx = Context(rt.p.tw, offline=True)
+                if rt.p.tw.has_sch():
+                    nl = ctx.netlist
+                    grounds = ctx.ground_nets()
+                res = json.load(open(os.path.join(rt.p.tw.build, "checks.json")))
+                th = next((c for c in res.get("checks", []) if c.get("id") == "power.thermal"), {})
+                hot = [m["ref"] for m in th.get("measured") or [] if (m.get("watts") or 0) >= 0.2]
+            except Exception:
+                pass
+            return {"plan": plan, "constraints": placeplan.evaluate(b, plan), "score": placeplan.score(b, nl, plan, grounds, hot),
+                    "stages": [{"id": k, "text": placeplan.STAGE_TEXT[k], "done": plan["stages"].get(k)} for k in placeplan.STAGES]}
+        return jresp(await asyncio.to_thread(work))
+
+    @routes.post("/api/projects/{pid}/placement")
+    async def placement_post(request):
+        """The user's constraints: {action: add, constraint: {kind, ...}} | {action: remove, id}."""
+        from tw import placeplan
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            if body.get("action") == "remove":
+                await asyncio.to_thread(placeplan.remove_constraint, rt.p.tw, str(body.get("id") or ""))
+                rt.user_changes.append(f"placement: the user dropped constraint {body.get('id')}")
+                out = {"ok": True}
+            else:
+                c = await asyncio.to_thread(placeplan.add_constraint, rt.p.tw, body.get("constraint") or {}, "user")
+                rt.user_changes.append(f"placement: the user set a constraint, keep it: {placeplan.describe(c)}")
+                out = c
+        except (ValueError, KeyError) as e:
+            return err(str(e).strip("'"))
+        rt.hub.emit("placement.changed")
+        return jresp(out)
+
     @routes.get("/api/projects/{pid}/schematic/notes")
     async def sch_notes_get(request):
         """The design notes (tw/sch/notes.py) with where each sits on the sheets: {notes: [{id, anchor, short, why, by,

@@ -3662,6 +3662,59 @@ def setup_says_when_a_pick_cannot_work():
     asyncio.run(go())
 
 
+@test(needs=("kicad", "kpy"))
+def placement_with_reasons_constraints_and_score():
+    """Placement with intent: each move carries its reason (shown when the part is picked), the stage it belongs to,
+    and constraints to keep; a move that breaks one is reported; the score's parts are measured on the board; the user
+    sets and drops constraints in the app; with the stop setting on, a finished stage stops Claude for the user's OK."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools, partinfo
+    from tw import placeplan
+    pid = ProjectStore().import_copy(FIXTURE, "Placement demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            b = rt.board()
+            u2 = b.footprints["U2"]
+            pin8 = next(p_ for p_ in u2.pads if str(p_.num) == "8")
+            out = (await T["place"]({"moves": [{"ref": "C4", "x": pin8.x + 2.2, "y": pin8.y, "why": "beside U2 pin 8 (VCC), GND via next to it"}],
+                                     "stage": "support", "constraints": [{"kind": "near", "ref": "C4", "to": "U2.8", "max_mm": 3}]}))["content"][0]["text"]
+            assert "placed 1 parts" in out and "Breaks" not in out, out
+            plan = placeplan.load(rt.p.tw)
+            assert plan["parts"]["C4"]["why"].startswith("beside U2 pin 8") and plan["parts"]["C4"]["stage"] == "support", plan
+            out = (await T["place"]({"moves": [{"ref": "C4", "x": pin8.x + 15, "y": pin8.y + 10}]}))["content"][0]["text"]
+            assert "Breaks a constraint" in out and "C4 within 3 mm of U2.8" in out, out
+            out = (await T["place"]({"moves": [{"ref": "C4", "x": pin8.x + 2.2, "y": pin8.y, "why": "back beside U2 pin 8"}], "stage": "support", "done": True}))["content"][0]["text"]
+            assert "stop here" not in out, out
+            app.settings.update({"placement_stop_stages": True})
+            out = (await T["place"]({"moves": [{"ref": "R4", "x": b.footprints["R4"].x, "y": b.footprints["R4"].y, "why": "pull-up beside U2"}],
+                                     "stage": "rest", "done": True}))["content"][0]["text"]
+            assert "stop here" in out and "wait for their OK" in out, out
+            app.settings.update({"placement_stop_stages": False})
+            js = await (await c.get(f"/api/projects/{pid}/placement")).json()
+            ids = {p_["id"] for p_ in js["score"]["parts"]}
+            assert {"length", "crossings", "decoupling", "edge", "constraints"} <= ids and 0 <= js["score"]["total"] <= 100, js["score"]
+            assert [s_["id"] for s_ in js["stages"] if s_["done"]] == ["support", "rest"], js["stages"]
+            assert js["constraints"][0]["ok"] is True, js["constraints"]
+            r = await c.post(f"/api/projects/{pid}/placement", json={"action": "add", "constraint": {"kind": "edge", "ref": "J1"}})
+            k = await r.json()
+            assert r.status == 200 and k["by"] == "user" and any("keep it: J1 at the board edge" in u for u in rt.user_changes), (k, rt.user_changes)
+            assert (await c.post(f"/api/projects/{pid}/placement", json={"action": "add", "constraint": {"kind": "nope"}})).status == 400
+            assert (await c.post(f"/api/projects/{pid}/placement", json={"action": "remove", "id": k["id"]})).status == 200
+            info = partinfo.part_info(rt.p, rt.board(), "C4")
+            assert info["placed_why"] == "back beside U2 pin 8", info["placed_why"]
+            board_q = (await T["board"]({"what": "placement"}))["content"][0]["text"]
+            assert board_q.startswith("placement score") and "constraint KEPT" in board_q and "stage support: done" in board_q, board_q
+            rt.stop()
+    asyncio.run(go())
+
+
 @test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on

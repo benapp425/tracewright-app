@@ -34,6 +34,15 @@ def _findings(p, ref):
     return sorted(out, key=lambda x: order.get(x["severity"], 3))[:30]
 
 
+def _placed_why(p, ref):
+    """Why the part sits where it does, from the placement plan (tw/placeplan.py), or ""."""
+    try:
+        from tw import placeplan
+        return ((placeplan.load(p.tw).get("parts") or {}).get(ref) or {}).get("why", "")
+    except Exception:
+        return ""
+
+
 def part_info(p, board, ref, fetch=False):
     """Everything about `ref` in project p (projects.Project) with its board (tw.board.Board or None).
     fetch: look the part up at LCSC when the cache has nothing (the user opened it; one request)."""
@@ -57,6 +66,7 @@ def part_info(p, board, ref, fetch=False):
             "description": part.get("description") or fields.get("Description") or "",
             "sheet": part.get("sheet") or (fp.sheetname if fp is not None else ""),
             "dnp": bool(part.get("dnp") or (fp is not None and fp.dnp)), "in_schematic": bool(part),
+            "placed_why": _placed_why(p, ref),
             "fields": {k: v for k, v in fields.items() if v and k not in ("Reference", "Value", "Footprint", "Datasheet", "Description")
                        and not re.match(r"^(ki_|KiLib|Sim\.|Sheet)", k)}}
     try:

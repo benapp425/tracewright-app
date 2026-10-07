@@ -213,6 +213,8 @@ export class SettingsPage {
       this.row("Looser design rules", "A clearance, track width or via made smaller", this.sw("approve_rules")),
       this.row("Changes to the agreed limits", "Kept as agreed until you approve", this.sw("approve_limits")),
       this.row("Anything after sign-off", "Every change once you have signed the design off", this.sw("approve_signed"))]);
+    this.group("Placement", "Claude places a board in stages: connectors and what the floorplan fixed, the main chips, their support parts, the rest.", [
+      this.row("Stop after each stage", "Claude says what it placed and why, and waits for your OK before the next stage", this.sw("placement_stop_stages"))]);
     const auth = { api_key: "API key", subscription_token: "Claude plan token", claude_code: "Claude Code" }[info.claude_auth] || "Not connected";
     this.group("Connection", null, [
       this.status("Claude", !!info.claude_auth, auth),

@@ -62,6 +62,7 @@ export class Inspector {
       params(info, 4),
       pinsTable(info, 8, (p) => this.goNet(p)),
       findingsLine(info),
+      info.placed_why ? h("div.in-why", icon("move", 12), h("span", h("b", "Placed here: "), info.placed_why)) : null,
       this.notesBox(info.ref),
       h("div.in-acts",
         h("button.btn.sm.primary", { onclick: () => this.open(info) }, icon("fullscreen", 13), "Open"),

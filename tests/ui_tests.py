@@ -1341,6 +1341,34 @@ async def design_notes_beside_parts(t):
         os.remove(path)
 
 
+@test
+async def placement_panel_why_and_constraints(t):
+    """The board's Placement tab: the score and its parts, the stages, why the picked part is where it is, and a
+    constraint set from it (listed as yours, dropped with its x)."""
+    root = t.s.demo["root"]
+    path = os.path.join(root, "hardware", "demo", "placement-plan.json")
+    with open(path, "w") as f:
+        json.dump({"stages": {"fixed": "2026-10-07T10:00:00"}, "constraints": [],
+                   "parts": {"C4": {"why": "Beside U2 pin 8 (VCC), its GND via next to it", "stage": "support", "by": "claude"}}}, f)
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.ws)", 30)
+        await t.page.js(f"localStorage.setItem('tw.layers.collapsed', '0'); {BV}.setPanel('placement'); 1")
+        await t.page.wait("document.querySelector('.pl-score b') && /\\d/.test(document.querySelector('.pl-score b').textContent)", 20)
+        parts = await t.page.js("[...document.querySelectorAll('.pl-part .pl-n')].map((e) => e.textContent)")
+        check("Short connections" in parts and "Decoupling at the pins" in parts, parts)
+        await t.page.js(f"{BV}.probe(['C4'], 'test'); {BV}.updateSel(); 1")
+        await t.page.wait("document.querySelector('.pl-why .pl-t') && document.querySelector('.pl-why .pl-t').textContent.includes('Beside U2 pin 8')", 10)
+        await t.shot("placement-panel")
+        await t.page.js("[...document.querySelectorAll('.pl-add button')].find((b) => b.textContent === 'At the edge').click(); 1")
+        await t.page.wait("[...document.querySelectorAll('.pl-c')].some((c) => c.textContent.includes('C4 at the board edge') && c.textContent.includes('you'))", 10)
+        await t.page.js("[...document.querySelectorAll('.pl-c')].find((c) => c.textContent.includes('C4 at the board edge')).querySelector('button').click(); 1")
+        await t.page.wait("![...document.querySelectorAll('.pl-c')].some((c) => c.textContent.includes('C4 at the board edge'))", 10)
+    finally:
+        os.remove(path)
+        await t.page.js(f"{BV}.setPanel('layers'); 1")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

@@ -205,6 +205,10 @@
    "findings": [],
    "status": "skipped"
   },
+  "placement.plan": {
+   "findings": [],
+   "status": "skipped"
+  },
   "power.cap_voltage": {
    "findings": [],
    "status": "pass"
