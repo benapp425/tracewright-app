@@ -1207,6 +1207,59 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.get("/api/projects/{pid}/routing")
+    async def routing_get(request):
+        """The routing plan (tw/routeplan.py): every net's mode (auto, guided, hand), why, its rules and how its last
+        routing went; the router presets."""
+        from tw import routeplan
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_sch():
+            return jresp({"nets": [], "preset": routeplan.preset(rt.p.tw), "presets": []})
+
+        def work():
+            from tw.ratsnest import ratsnest
+            plan = routeplan.classify(rt.p.reload().tw)
+            try:
+                rep = json.load(open(os.path.join(rt.p.tw.build, "route-report.json")))
+            except (OSError, ValueError):
+                rep = {}
+            open_nets = set()
+            if rt.p.tw.has_pcb():
+                open_nets = {l[-1] for l in ratsnest(rt.board())}
+            rows = []
+            for net, m in plan.items():
+                r = (rep.get("nets") or {}).get(net) or {}
+                status = "unrouted" if net in open_nets else ("routed" if rt.p.tw.has_pcb() else "no board")
+                rows.append({"net": net.rsplit("/", 1)[-1], "full": net, **m, "status": status,
+                             **{k: r[k] for k in ("length_mm", "vias", "layers", "note", "detail") if k in r}})
+            order = {"hand": 0, "guided": 1, "auto": 2}
+            rows.sort(key=lambda x: (order[x["mode"]], x["net"]))
+            return {"nets": rows, "preset": routeplan.preset(rt.p.tw), "report_at": rep.get("at"),
+                    "presets": [{"id": k, "label": v["label"], "why": v["why"]} for k, v in routeplan.PRESETS.items()]}
+        return jresp(await asyncio.to_thread(work))
+
+    @routes.post("/api/projects/{pid}/routing")
+    async def routing_post(request):
+        """{preset} | {net, mode: auto | guided | hand | null (back to the rule)}."""
+        from tw import routeplan
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        p = rt.p.reload()
+        try:
+            if body.get("preset"):
+                await asyncio.to_thread(routeplan.set_preset, p, body["preset"])
+                rt.user_changes.append(f"routing: the user chose the {routeplan.PRESETS[body['preset']]['label']} preset")
+            elif body.get("net"):
+                await asyncio.to_thread(routeplan.set_mode, p, str(body["net"]), body.get("mode"))
+                rt.user_changes.append(f"routing: the user set {body['net']} to " +
+                                       ({"hand": "hand routing (leave it to them)", "guided": "routed with its rules", "auto": "the router"}.get(body.get("mode"), "its rule")))
+            else:
+                return err("preset, or net and mode")
+        except ValueError as e:
+            return err(str(e))
+        rt.hub.emit("routing.changed")
+        return jresp({"ok": True})
+
     @routes.get("/api/projects/{pid}/placement")
     async def placement_get(request):
         """The placement plan (tw/placeplan.py): each part's reason, the stages, the constraints (kept or not) and the

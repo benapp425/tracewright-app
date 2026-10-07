@@ -1369,6 +1369,37 @@ async def placement_panel_why_and_constraints(t):
         await t.page.js(f"{BV}.setPanel('layers'); 1")
 
 
+@test
+async def routing_panel_modes_and_reasons(t):
+    """The board's Routing tab: the router preset, the nets grouped by who routes them, each with its reason and rules;
+    a net set to hand routing moves to that group with "set by you", and goes back with "As the rule says"."""
+    pick = lambda net, v: (f"(() => {{ const s = [...document.querySelectorAll('.rt-net')].find((r) => r.dataset.net === '{net}').querySelector('select'); "
+                           f"s.value = '{v}'; s.dispatchEvent(new Event('change')); return 1; }})()")
+    row = lambda net: f"[...document.querySelectorAll('.rt-net')].find((r) => r.dataset.net === '{net}')"
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.ws)", 30)
+        await t.page.js(f"localStorage.setItem('tw.layers.collapsed', '0'); {BV}.setPanel('routing'); 1")
+        await t.page.wait("document.querySelector('.rt-preset') && document.querySelectorAll('.rt-net').length > 3", 20)
+        groups = await t.page.js("[...document.querySelectorAll('.rt-gh')].map((g) => g.dataset.mode)")
+        check(groups == ["guided", "auto"], groups)
+        usb = await t.page.js(f"{row('USB_D_P')}.innerText")
+        check("Differential pair with USB_D_N" in usb and "routed together" in usb, usb)
+        check(await t.page.js("document.querySelector('.rt-preset').value") == "balanced", "preset")
+        await t.page.js(pick("I2C_SDA", "hand"))
+        await t.page.wait(f"document.querySelector('.rt-gh[data-mode=hand]') && {row('I2C_SDA')} && "
+                          f"{row('I2C_SDA')}.innerText.includes('Set by you')", 10)
+        await t.shot("routing-panel")
+        await t.page.js(f"{row('I2C_SDA')}.querySelector('.rt-name').click(); 1")
+        await t.page.wait(f"{BV}.panel === 'copper' && {BV}.spot && {BV}.spot.endsWith('I2C_SDA')", 10)
+        await t.page.js(f"{BV}.setPanel('routing'); 1")
+        await t.page.wait(f"{row('I2C_SDA')} && {row('I2C_SDA')}.querySelector('option[value=rule]')", 10)
+        await t.page.js(pick("I2C_SDA", "rule"))
+        await t.page.wait("!document.querySelector('.rt-gh[data-mode=hand]')", 10)
+    finally:
+        await t.page.js(f"{BV} && {BV}.setPanel('layers'); 1")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

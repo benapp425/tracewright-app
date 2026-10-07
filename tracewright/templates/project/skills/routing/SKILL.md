@@ -10,9 +10,15 @@ description: Route the board like a person - supplies first and wide, pairs coup
 2. Planes and pours: the stack-up's planes (`stackup` show; apply pours them), each signal layer next to one; on
    two layers, GND pours on both sides. The router routes on the signal layers only, each in its direction, and
    keeps a pair's second half on its partner's layers. Keepouts from the data sheets as rule areas.
-3. Critical nets by hand (`copper`): switch nodes, the hot loop, pairs at connectors, sense lines.
+3. The routing plan (`board` what="routing", the app's Board > Routing tab): every net is auto, guided (routed
+   first, keeping its rules: pairs, crystals, clocks, switch nodes, heavy currents) or hand (RF feeds, current-sense
+   pairs, high voltage; the router leaves these). The user can move a net between modes and pick the router's preset
+   (Balanced, Dense, Few vias, Shortest); honour both. Route hand nets yourself (`copper`), keeping their rules, or
+   name them in `route` nets if the user agrees. Critical copper by hand too: the hot loop, pairs at connectors.
 4. Supplies with `route --nets ...` (wide classes route first), then pairs, then the rest short-first. The grid
-   router streams every net live; watch for nets it reports failed and give them room or route them by hand.
+   router streams every net live; watch for nets it reports failed and give them room or route them by hand. Its
+   reply names the nets left for hand routing; build/route-report.json has each net's length, vias and notes (a via
+   on a line meant to have none).
 5. Freerouting (`route` with engine freerouting) for a dense remainder -- then review its result: it ignores
    style (angles, via count).
 6. `fill`, then `run_checks`: `drc`, `route.style`, `route.quality` (detours, needless vias, dangling copper),

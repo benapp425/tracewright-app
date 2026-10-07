@@ -218,6 +218,21 @@ class GridRoute:
         if self.plan and len(self.b.copper) != self.plan["layers"]:
             self.plan = None                          # not applied to the board yet: as without one
         self.routing = tuple(stackup.routing_layers(self.plan, self.b.copper))
+        from .. import routeplan                       # the routing plan: presets, and which nets are left for a person
+        self.preset = routeplan.preset(self.p)
+        pre = routeplan.PRESETS[self.preset]
+        if via_cost == VIA_COST:
+            self.via_cost = pre["via"]
+        self.bends = (pre["bend45"], pre["bend90"])
+        try:
+            self.modes = routeplan.classify(self.p)
+        except Exception:
+            self.modes = {}
+        self.left_for_hand = []
+
+    def _mode(self, net):
+        m = self.modes.get(net) or self.modes.get(net.rsplit("/", 1)[-1]) or {}
+        return m.get("mode", "auto"), m.get("order", 3)
 
     def _net_ok(self, n):
         if not n or n.startswith("unconnected-"):
@@ -264,7 +279,7 @@ class GridRoute:
         for v in dump["vias"]:
             B.stamp_via(v["net"], v["pos"], v["d"])
         B.snapshot()
-        Rt = R.Router(B, via=self.via_cost, directions=stackup_dirs(self.plan))
+        Rt = R.Router(B, bend45=self.bends[0], bend90=self.bends[1], via=self.via_cost, directions=stackup_dirs(self.plan))
         if self.layer_dirs:                           # layer directions: F.Cu runs along y, B.Cu along x
             Rt.fcu_cross = V2_FCU_CROSS
         Rt._prof_of = {n: self.net_class.get(n, "Default") for n in nets}
@@ -274,6 +289,7 @@ class GridRoute:
 
     # ------------------------------------------------------------------ jobs
     def jobs(self):
+        self.left_for_hand = []                            # as of this pass
         pads_by = collections.defaultdict(list)
         for p in self.dump["pads"]:
             if p["net"] and self._net_ok(p["net"]):
@@ -282,13 +298,19 @@ class GridRoute:
         for net, pads in pads_by.items():
             if len(pads) < 2 or net in self.planes:
                 continue
+            mode, order = self._mode(net)
+            named = self.only is not None and (net in self.only or net.rsplit("/", 1)[-1] in self.only)
+            if mode == "hand" and not named:               # left for a person (or Claude in the editor): named, it routes
+                if len(islands(self.B, self.Rt, net, pads, {"tracks": self.dump["tracks"], "vias": self.dump["vias"]})) > 1:
+                    self.left_for_hand.append(net)         # still open (one already routed by hand is not news)
+                continue
             prof = self.net_class.get(net, "Default")
             xs = [q["pos"][0] for q in pads]
             ys = [q["pos"][1] for q in pads]
             span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
             w = self.B.profiles[prof].w
             power = w >= 0.39 or any(k in prof.upper() for k in ("PWR", "POWER", "SUPPLY"))
-            out.append(Job(net, prof, pads, (0 if power else 1, span)))
+            out.append(Job(net, prof, pads, (0 if mode == "guided" else 1, order, 0 if power else 1, span)))    # guided first
         out.sort(key=lambda j: j.key)
         return out
 
@@ -588,7 +610,17 @@ class GridRoute:
         segs = [(r["net"], s) for r in Rt.routes if not r.get("fixed") for s in r["segments"]]
         vias = [(r["net"], v) for r in Rt.routes if not r.get("fixed") for v in r["vias"]]
         length = sum(geom.dist(a, b) for _, (l, a, b, w) in segs)
+        per = {}
+        for r in Rt.routes:
+            if r.get("fixed"):
+                continue
+            e = per.setdefault(r["net"], {"length_mm": 0.0, "vias": 0, "layers": set()})
+            e["length_mm"] += sum(geom.dist(a, b) for l, a, b, w in r["segments"])
+            e["vias"] += len(r["vias"])
+            e["layers"] |= {l for l, a, b, w in r["segments"]}
+        self.per_net = {n: {"length_mm": round(v["length_mm"], 1), "vias": v["vias"], "layers": sorted(v["layers"])} for n, v in per.items()}
         summary = {"nets": total, "routed": total - len(failed), "failed": failed, "tracks": len(segs), "vias": len(vias),
+                   "preset": self.preset, "left_for_hand": sorted(self.left_for_hand),
                    "length_mm": round(length, 1), "seconds": round(time.time() - t0, 1), "escapes": n_esc,
                    "stitching_vias": n_stitch, "neck_areas": [ref for ref, _ in self.necks],
                    "coupled_pairs": self._coupled_pairs(),
@@ -898,6 +930,7 @@ def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_pr
     g = GridRoute(project, nets=nets, clear=clear, on_progress=on_progress, log=log, v2=v2, sketch=sketch).setup()
     summary, segs, vias = g.run()
     out = {"summary": summary}
+    _report(project, g, summary)
     if apply and (segs or vias or clear):
         from ..pcb import client, rules
         if g.necks:
@@ -915,6 +948,37 @@ def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_pr
             if left:
                 out["summary"]["islands"] = left
     return out
+
+
+def _report(project, g, summary):
+    """build/route-report.json: per net, how it went -- routed (length, vias, layers), failed (where it got stuck),
+    left for hand routing -- with its mode and the rules it was to keep."""
+    import json, os
+    nets = {}
+    short = lambda n: str(n).rsplit("/", 1)[-1]
+    hand = {short(n) for n in g.left_for_hand}
+    failed = {short(n): v for n, v in (summary.get("failed") or {}).items()}
+    per = {short(n): v for n, v in g.per_net.items()}
+    for net, m in g.modes.items():                 # the netlist's names; the board's may differ by the sheet path
+        e = {"mode": m["mode"], "why": m["why"], "rules": m["rules"]}
+        k = short(net)
+        if k in hand:
+            e["status"] = "hand"
+        elif k in failed:
+            f = failed[k]
+            e["status"] = "failed"
+            e["detail"] = f if isinstance(f, str) else f"no path to the pad near {f[2]}" if isinstance(f, (list, tuple)) and len(f) > 2 else str(f)
+        elif k in per:
+            e.update(status="routed", **per[k])
+            if "no vias" in m["rules"] and per[k]["vias"]:
+                e["note"] = f"{per[k]['vias']} via{'s' if per[k]['vias'] > 1 else ''} on a line meant to have none"
+        else:
+            e["status"] = "untouched"
+        nets[net] = e
+    os.makedirs(project.build, exist_ok=True)
+    with open(os.path.join(project.build, "route-report.json"), "w") as f:
+        json.dump({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "preset": g.preset, "summary": {k: v for k, v in summary.items()
+                   if k in ("nets", "routed", "vias", "length_mm", "seconds")}, "nets": nets}, f, indent=1, default=str)
 
 
 def islands_left(project, nets):

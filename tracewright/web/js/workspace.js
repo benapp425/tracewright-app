@@ -255,8 +255,9 @@ export class Workspace {
     });
     ev.on("board.moves", (e) => this.viewIf("board", (v) => v.animateMoves(e.moves)));
     ev.on("board.live", (e) => this.viewIf("board", (v) => v.liveMoves(e.moves)));
-    ev.on("board.changed", (e) => { this.viewIf("board", (v) => { v.reload(e); v.placement = null; if (v.panel === "placement") v.loadPlacement(true); });
+    ev.on("board.changed", (e) => { this.viewIf("board", (v) => { v.reload(e); v.placement = null; v.routing = null; if (v.panel === "placement") v.loadPlacement(true); if (v.panel === "routing") v.loadRouting(true); });
       this.viewIf("3d", (v) => v.stale()); this.inspector.invalidate(); });
+    ev.on("routing.changed", () => this.viewIf("board", (v) => { v.routing = null; if (v.panel === "routing") v.loadRouting(true); }));
     ev.on("placement.changed", () => { this.viewIf("board", (v) => { v.placement = null; if (v.panel === "placement") v.loadPlacement(true); }); this.inspector.invalidate(); });
     ev.on("route.progress", (e) => this.viewIf("board", (v) => v.routeEvent(e)));
     ev.on("annotations", (e) => this.viewIf("board", (v) => v.setAnnotations(e.items)));

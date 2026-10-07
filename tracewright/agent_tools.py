@@ -152,7 +152,8 @@ def tool_list(rt, app):
         return _text(f"noted {n['id']} on {n['anchor']}")
 
     @reg("board", "Query the board. what: summary | placement (the placement score and its parts, the constraints kept or "
-         "broken, the stages, parts with no reason) | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
+         "broken, the stages, parts with no reason) | routing (the routing plan: each net auto, guided or hand, why, its "
+         "rules, the router preset and how each net went last time) | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
          "ref: pads with nets and positions) | nets (net -> pads) | net (one net: pads, tracks, vias, length) | "
          "outline | unrouted (from the last DRC) | zones. Coordinates in mm (KiCad axes, y down). When KiCad has the "
          "board open, positions include its unsaved edits.",
@@ -189,6 +190,30 @@ def tool_list(rt, app):
             missing = sorted(f.ref for f in b.fp_list if f.ref not in plan["parts"] and not f.ref.startswith(("#", "H", "MH", "FID")))
             if missing:
                 lines.append(f"no reason recorded for {len(missing)} parts: {', '.join(missing[:30])}")
+            return _text("\n".join(lines))
+        if w == "routing":                            # who routes each net, as the user sees it in Board > Routing
+            from tw import routeplan
+            if not tw.has_sch():
+                return _text("no schematic: no nets to plan", error=True)
+            plan = await run(routeplan.classify, tw)
+            try:
+                rep = json.load(open(os.path.join(tw.build, "route-report.json"))).get("nets") or {}
+            except (OSError, ValueError):
+                rep = {}
+            pre = routeplan.preset(tw)
+            lines = [f"router preset: {routeplan.PRESETS[pre]['label']} ({routeplan.PRESETS[pre]['why']})"]
+            for mode, title in (("hand", "HAND (the router leaves these; route them with copper, keeping the rules)"),
+                                ("guided", "GUIDED (routed first, keeping their rules)")):
+                rows = [(n, m) for n, m in sorted(plan.items()) if m["mode"] == mode]
+                if rows:
+                    lines.append(title)
+                    for n, m in rows:
+                        r = rep.get(n) or {}
+                        last = f"; last route: {r['status']}" + (f", {r['note']}" if r.get("note") else "") if r.get("status") else ""
+                        lines.append(f"  {n.rsplit('/', 1)[-1]}: {m['why']}" + (f" [{', '.join(m['rules'])}]" if m["rules"] else "") + last)
+            auto = sorted(n.rsplit("/", 1)[-1] for n, m in plan.items() if m["mode"] == "auto")
+            if auto:
+                lines.append(f"AUTO ({len(auto)}): {', '.join(auto[:60])}{' ...' if len(auto) > 60 else ''}")
             return _text("\n".join(lines))
         if w == "footprints":
             rows = []
@@ -598,6 +623,7 @@ def tool_list(rt, app):
                 left = await run(driver.islands_left, tw, [n for n in g.planes if g._net_ok(n)])
                 if left:
                     summary["islands"] = left
+                await run(driver._report, tw, g, summary)
                 res = {"summary": summary, "apply": {"via": "live", "ok": True}}
             else:
                 res = await run(driver.route, tw, nets=nets, clear=bool(args.get("clear")), on_progress=progress, live=False,
@@ -612,7 +638,11 @@ def tool_list(rt, app):
                + (f"; stitching vias {s.get('stitching_vias')}" if s.get("stitching_vias") else "")
                + (f"\nFAILED: " + "; ".join(f"{n.rsplit('/', 1)[-1]} at {w}" for n, w in failed.items()) if failed else "")
                + (f"\nPOUR ISLANDS NOT JOINED (pads cut off from the rest of their net): "
-                  + "; ".join(f"{n.rsplit('/', 1)[-1]} {', '.join(w)}" for n, w in s["islands"].items()) if s.get("islands") else ""))
+                  + "; ".join(f"{n.rsplit('/', 1)[-1]} {', '.join(w)}" for n, w in s["islands"].items()) if s.get("islands") else "")
+               + (f"\nLeft for hand routing (the routing plan, Design > Routing): {', '.join(n.rsplit('/', 1)[-1] for n in s['left_for_hand'])} "
+                  "-- route each in the editor's way (copper tool), keeping its rules, or name it in nets to route it here"
+                  if s.get("left_for_hand") else "")
+               + (f" (preset {s['preset']})" if s.get("preset") and s["preset"] != "balanced" else ""))
         if engine == "freerouting":
             txt = f"freerouting: {_json(s)}"
         return _text(txt + "\nNext: run_checks (drc, route.style, power.width, hs.pairs) and render the board.")

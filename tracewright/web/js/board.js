@@ -866,20 +866,23 @@ export class BoardView {
   renderLayers() {
     clear(this.layerBox);
     const collapsed = localStorage.getItem("tw.layers.collapsed") !== "0" || (this.autoFold && !this.forceOpen);
-    const tabs = h("div.ltabs", [["layers", "Layers", "layers"], ["copper", "Copper", "cable"], ["placement", "Placement", "move"]].map(([v, t, ic]) =>
-      h("button" + (this.panel === v ? ".on" : ""), { onclick: () => { if (collapsed) localStorage.setItem("tw.layers.collapsed", "0"); this.setPanel(v); },
-        "data-tip": v === "copper" ? "Copper by net" : v === "placement" ? "Why each part is where it is, and the placement's score" : "Layers" }, icon(ic, 12), t)));
+    const TIP = { layers: "Layers", copper: "Copper by net", placement: "Placement: why each part is where it is, and its score",
+      routing: "Routing: which nets the router takes, which keep rules, which are left for you" };
+    const tabs = h("div.ltabs", [["layers", "Layers", "layers"], ["copper", "Copper", "cable"], ["placement", "Placement", "move"], ["routing", "Routing", "route"]].map(([v, t, ic]) =>
+      h("button" + (this.panel === v ? ".on" : ".ico"), { "data-panel": v, onclick: () => { if (collapsed) localStorage.setItem("tw.layers.collapsed", "0"); this.setPanel(v); },
+        "data-tip": TIP[v] }, icon(ic, 12), this.panel === v ? t : null)));
     this.layerBox.appendChild(h("div.lhead", tabs, h("button.tbtn", { style: { height: "22px", minWidth: "22px", padding: 0 },
       "data-tip": collapsed ? "Show the panel" : "Hide the panel", onclick: () => {
         if (this.autoFold) this.forceOpen = collapsed; else localStorage.setItem("tw.layers.collapsed", collapsed ? "0" : "1");
         this.renderLayers();
       } },
       icon(collapsed ? "chevron-down" : "chevron-up", 13))));
-    this.layerBox.classList.toggle("wide", (this.panel === "copper" || this.panel === "placement") && !collapsed);
+    this.layerBox.classList.toggle("wide", this.panel !== "layers" && !collapsed);
     this.layerBox.style.width = collapsed ? "auto" : "";
     if (collapsed) return;
     if (this.panel === "copper") { this.copperPanel(); return; }
     if (this.panel === "placement") { this.placementPanel(); return; }
+    if (this.panel === "routing") { this.routingPanel(); return; }
     const items = [["F.Cu", "Top copper", COL["F.Cu"]]];
     for (const l of this.copper.slice(1, -1)) items.push([l, `${l.replace(".Cu", "")} · ${this.layerRole(l) || "inner"}`, COL[l] || [160, 160, 160]]);
     items.push(["B.Cu", "Bottom copper", COL["B.Cu"]]);
@@ -968,6 +971,71 @@ export class BoardView {
   async dropConstraint(id) {
     try { await api(`/api/projects/${encodeURIComponent(this.pid)}/placement`, { body: { action: "remove", id } }); this.placement = null; this.loadPlacement(true); }
     catch (e) { toast(e.message, "error"); }
+  }
+
+  // ------------------------------------------------------------------ routing: which nets the router takes, which keep rules, which are left for you
+  async loadRouting(force) {
+    if (this.routingLoading || (!force && this.routing)) return this.routing;
+    this.routingLoading = true;
+    try { this.routing = await api(`/api/projects/${encodeURIComponent(this.pid)}/routing`); } catch (e) { this.routing = { error: e.message }; }
+    this.routingLoading = false;
+    if (this.panel === "routing") this.renderLayers();
+    return this.routing;
+  }
+
+  routingPanel() {
+    const box = this.layerBox, R = this.routing;
+    if (!R) { box.appendChild(h("div.pl-empty", "Reading the routing plan…")); this.loadRouting(); return; }
+    if (R.error) { box.appendChild(h("div.pl-empty", R.error)); return; }
+    if (!R.nets.length) { box.appendChild(h("div.pl-empty", "No schematic yet.")); return; }
+    const cur = (R.presets || []).find((p) => p.id === R.preset);
+    box.appendChild(h("div.rt-head", h("span", "Router"),
+      h("select.rt-preset", { onchange: (e) => this.setRouting({ preset: e.target.value }), "data-tip": "How the router weighs vias against length and corners" },
+        (R.presets || []).map((p) => h("option", { value: p.id, selected: p.id === R.preset }, p.label))),
+      h("button.tbtn", { "data-tip": "Read again", onclick: () => { this.routing = null; this.loadRouting(true); } }, icon("refresh-cw", 12))));
+    if (cur) box.appendChild(h("div.rt-why", cur.why));
+    const GROUPS = [["hand", "By hand", "pencil", "The router leaves these for you; each keeps the rules under it"],
+      ["guided", "With rules", "route", "Routed first, keeping their rules"], ["auto", "Auto", "zap", "The router takes these as it finds them"]];
+    this.rtOpen = this.rtOpen || {};
+    for (const [mode, title, ic, tip] of GROUPS) {
+      const rows = R.nets.filter((n) => n.mode === mode);
+      if (!rows.length) continue;
+      const open = this.rtOpen[mode] ?? (mode !== "auto" || rows.length <= 12);
+      const done = rows.filter((n) => n.status === "routed").length;
+      box.appendChild(h("div.pl-h.rt-gh", { "data-tip": tip, "data-mode": mode, onclick: () => { this.rtOpen[mode] = !open; this.renderLayers(); } },
+        icon(open ? "chevron-down" : "chevron-right", 12), icon(ic, 12), h("span.grow", `${title} (${rows.length})`),
+        R.nets.some((n) => n.status !== "no board") ? h("span.rt-count", `${done} routed`) : null));
+      if (!open) continue;
+      for (const n of rows.slice(0, 120)) box.appendChild(this.routingRow(n));
+      if (rows.length > 120) box.appendChild(h("div.pl-empty", `and ${rows.length - 120} more`));
+    }
+  }
+
+  routingRow(n) {
+    const ST = { routed: ["circle-check", "ok", "Routed"], unrouted: ["circle", "", "Not routed yet"], failed: ["circle-x", "bad", "The router could not finish it"],
+      hand: ["pencil", "", "Left for you"], "no board": ["circle", "", "No board yet"] };
+    const st = n.note ? ["triangle-alert", "warn", n.note] : ST[n.status] || ST.unrouted;
+    const facts = [n.length_mm != null ? `${n.length_mm} mm` : null, n.vias ? `${n.vias} via${n.vias > 1 ? "s" : ""}` : null].filter(Boolean).join(", ");
+    const pick = h("select.rt-mode", { "data-tip": "Who routes it", onclick: (e) => e.stopPropagation(),
+      onchange: (e) => this.setRouting({ net: n.net, mode: e.target.value === "rule" ? null : e.target.value }) },
+      [["auto", "Auto"], ["guided", "With rules"], ["hand", "By hand"]].map(([v, t]) => h("option", { value: v, selected: v === n.mode }, t)),
+      /^set by you/.test(n.why) ? h("option", { value: "rule" }, "As the rule says") : null);
+    const known = (this.data && this.data.nets || []).includes(n.full);
+    return h("div.rt-net" + (n.mode !== "auto" ? ".full" : ""), { "data-net": n.net },
+      h("div.rt-line", h("span.rt-st." + st[1], { "data-tip": st[2] }, icon(st[0], 12)),
+        h("span.rt-name.grow.ellipsis" + (known ? ".link" : ""), { "data-tip": known ? "Show it on the board" : n.why, onclick: known ? () => this.setSpot(n.full, true) : null }, n.net),
+        facts ? h("span.rt-facts", facts) : null, pick),
+      n.mode !== "auto" ? h("div.rt-reason", n.why[0].toUpperCase() + n.why.slice(1)) : null,
+      n.mode !== "auto" && (n.rules || []).length ? h("div.rt-rules", n.rules.map((r) => h("span.rt-rule", r))) : null,
+      n.note || n.detail ? h("div.rt-note", n.note || n.detail) : null);
+  }
+
+  async setRouting(body) {
+    try {
+      await api(`/api/projects/${encodeURIComponent(this.pid)}/routing`, { body });
+      toast(body.preset ? "Router preset saved: the next route uses it" : `${body.net}: ${body.mode === "hand" ? "left for you" : body.mode === "guided" ? "routed with its rules" : body.mode === "auto" ? "left to the router" : "back to its rule"}`, "ok", 2600);
+    } catch (e) { toast(e.message, "error"); }
+    this.routing = null; this.loadRouting(true);
   }
 
   copperPanel() {

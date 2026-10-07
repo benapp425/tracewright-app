@@ -3715,6 +3715,97 @@ def placement_with_reasons_constraints_and_score():
     asyncio.run(go())
 
 
+@test(needs=("kicad", "kpy"))
+def routing_plan_says_who_routes_each_net():
+    """Every net gets a mode and its reason: an RF feed, a current-sense line and mains are left for a person; pairs,
+    crystals, clocks, switching nodes and heavy currents are routed first with their rules; the rest go to the router.
+    The user moves a net to another mode (in the app); the router leaves open hand nets alone (named, it routes them),
+    weighs vias by the chosen preset and writes how each net went; the route tool's reply names what it left."""
+    import types
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools
+    from tw import routeplan
+    from tw.route import driver
+    from tw.board import Board
+    fake = types.SimpleNamespace(cfg={"route": {"modes": {"DATA": "hand"}}})
+    nl = types.SimpleNamespace(parts={}, nets={
+        "/ANT": [("U1", "3"), ("AE1", "1")], "/ISENSE_P": [("R1", "1"), ("U2", "4")], "/MAINS_L": [("F1", "1"), ("T1", "1")],
+        "/USB_DP": [("J1", "3"), ("U1", "9")], "/XTAL_IN": [("Y1", "1"), ("U1", "5")], "/SW": [("U3", "2"), ("L1", "1")],
+        "/MOTOR_A": [("Q1", "3"), ("J2", "1")], "/CLK": [("U1", "7"), ("U4", "2")], "/DATA": [("U1", "8"), ("U4", "3")],
+        "/LED": [("U1", "10"), ("D1", "1")], "GND": [("U1", "1"), ("U2", "1")], "/+3V3": [("U1", "2"), ("U2", "2")]})
+    recs = {"/ANT": {"kind": "rf", "impedance": 50}, "/ISENSE_P": {"kind": "analog"}, "/MAINS_L": {"kind": "signal", "voltage": 230},
+            "/USB_DP": {"kind": "pair", "pair": "/USB_DN", "impedance": 90}, "/MOTOR_A": {"kind": "signal", "current": 2.5},
+            "/CLK": {"kind": "clock"}, "GND": {"kind": "ground"}, "/+3V3": {"kind": "power"}}
+    plan = routeplan.classify(fake, nl, types.SimpleNamespace(records=recs))
+    mode = {n.rsplit("/", 1)[-1]: m["mode"] for n, m in plan.items()}
+    assert mode == {"ANT": "hand", "ISENSE_P": "hand", "MAINS_L": "hand", "USB_DP": "guided", "XTAL_IN": "guided", "SW": "guided",
+                    "MOTOR_A": "guided", "CLK": "guided", "DATA": "hand", "LED": "auto"}, mode
+    assert "50 Ω" in plan["/ANT"]["rules"] and "90 Ω" in plan["/USB_DP"]["rules"] and "no vias" in plan["/XTAL_IN"]["rules"], plan
+    assert plan["/DATA"]["why"].startswith("set by you") and "2.5 A" in plan["/MOTOR_A"]["why"], plan
+    assert plan["/USB_DP"]["order"] < plan["/MOTOR_A"]["order"] < plan["/LED"]["order"], plan
+    try:
+        routeplan.set_mode(fake, "LED", "sideways")
+        raise AssertionError("an unknown mode was taken")
+    except ValueError:
+        pass
+
+    # the router: an open hand net is left (and said), named it routes; the preset sets the via cost; the report
+    p = fixture_copy("routeplan")
+    routeplan.set_mode(p, "I2C_SDA", "hand")
+    routeplan.set_preset(p, "dense")
+    assert json.load(open(os.path.join(p.root, "tracewright.json")))["route"] == {"modes": {"I2C_SDA": "hand"}, "preset": "dense"}
+    g = driver.GridRoute(p, clear=True, log=lambda m: None)
+    assert g.via_cost == routeplan.PRESETS["dense"]["via"] and g.bends == (30, 110), (g.via_cost, g.bends)
+    r = driver.route(p, clear=True, live=False, log=lambda m: None)
+    s_ = r["summary"]
+    assert [n.rsplit("/", 1)[-1] for n in s_["left_for_hand"]] == ["I2C_SDA"] and s_["preset"] == "dense" and not s_["failed"], s_
+    b = Board.load(p.pcb)
+    assert not [t for t in b.tracks if t.net.endswith("/I2C_SDA")], "the router routed a hand net"
+    rep = json.load(open(os.path.join(p.build, "route-report.json")))
+    sda = next(v for k, v in rep["nets"].items() if k.endswith("/I2C_SDA"))
+    usb = next(v for k, v in rep["nets"].items() if k.endswith("/USB_D_P"))
+    assert sda["status"] == "hand" and sda["mode"] == "hand", sda
+    assert usb["status"] == "routed" and usb["mode"] == "guided" and usb["length_mm"] > 0, usb
+    r2 = driver.route(p, nets=["I2C_SDA"], live=False, log=lambda m: None)["summary"]
+    assert r2["routed"] == 1 and not r2["left_for_hand"], r2
+    assert [t for t in Board.load(p.pcb).tracks if t.net.endswith("/I2C_SDA")], "named, the hand net was not routed"
+
+    # the app: the plan per net, a net moved by the user, the preset; the route tool's reply
+    pid = ProjectStore().import_copy(FIXTURE, "Routing plan").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            js = await (await c.get(f"/api/projects/{pid}/routing")).json()
+            by = {n["net"]: n for n in js["nets"]}
+            assert by["USB_D_P"]["mode"] == "guided" and by["I2C_SDA"]["mode"] == "auto" and by["USB_D_P"]["status"] == "routed", by
+            assert js["preset"] == "balanced" and {x["id"] for x in js["presets"]} == set(routeplan.PRESETS), js
+            assert (await c.post(f"/api/projects/{pid}/routing", json={"net": "I2C_SDA", "mode": "hand"})).status == 200
+            assert (await c.post(f"/api/projects/{pid}/routing", json={"preset": "clean"})).status == 200
+            assert (await c.post(f"/api/projects/{pid}/routing", json={"net": "I2C_SDA", "mode": "maybe"})).status == 400
+            assert (await c.post(f"/api/projects/{pid}/routing", json={"preset": "fastest"})).status == 400
+            js = await (await c.get(f"/api/projects/{pid}/routing")).json()
+            assert js["nets"][0]["net"] == "I2C_SDA" and js["nets"][0]["mode"] == "hand" and js["preset"] == "clean", js["nets"][:2]
+            assert any("I2C_SDA to hand routing" in u for u in rt.user_changes) and any("Few vias preset" in u for u in rt.user_changes), rt.user_changes
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            bp = rt.p.tw.pcb
+            from tw.pcb import client as twpcb
+            twpcb.apply(rt.p.tw, [{"op": "delete", "nets": ["/MCU/I2C_SDA", "/MCU/I2C_SCL"], "kinds": ["track", "via"]}])
+            out = (await T["route"]({}))["content"][0]["text"]
+            assert "Left for hand routing" in out and "I2C_SDA" in out and "preset clean" in out, out
+            assert not [t for t in Board.load(bp).tracks if t.net.endswith("/I2C_SDA")], "the route tool routed a hand net"
+            q = (await T["board"]({"what": "routing"}))["content"][0]["text"]
+            assert q.startswith("router preset: Few vias") and "I2C_SDA: set by you" in q and "last route: hand" in q, q
+            assert "USB_D_P: differential pair with USB_D_N [routed together" in q and "AUTO (" in q, q
+            assert [t for t in Board.load(bp).tracks if t.net.endswith("/I2C_SCL")], "the route tool did not route I2C_SCL"
+            rt.stop()
+    asyncio.run(go())
+
+
 @test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on
@@ -5256,7 +5347,7 @@ def main():
     ok = fail = skip = 0
     t_all = time.time()
     for fn, needs in TESTS:
-        if only and only not in fn.__name__:
+        if only and not any(k in fn.__name__ for k in only.split(",")):
             continue
         if fast and fn.__name__ in ("checks_selftest_catches_every_planted_fault", "router_reroutes_cleanly"):
             continue
