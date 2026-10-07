@@ -3520,6 +3520,59 @@ def simulation_and_regulator_heat_as_evidence():
 
 
 @test()
+def setup_says_when_a_pick_cannot_work():
+    """While the guided start fills in, each pick is checked against the plan: a header longer than any edge, a
+    289-ball BGA on 2 layers, a 2.54 mm header under a 5 mm height limit, a floorplan bigger than the size limit cannot
+    work; Ethernet on 2 layers and 20 A on 1 oz copper are tight -- each with its fix. Claude is told about each once;
+    the user's new limit is checked at once."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import canvas, feasible, agent_tools
+    p = ProjectStore().create("Feasibility", "", {"layers": 2})
+    p.cfg["constraints"] = {"layers": 2, "max_height_mm": 5, "max_size_mm": [45, 70], "max_input_a": 20}
+    p.save()
+    cv = {"requirements": {"items": [{"label": "Network", "value": "10/100 Ethernet over RMII"}]},
+          "parts": {"items": [{"role": "MCU", "mpn": "MIMXRT1176DVMAA", "package": "BGA-289 0.8 mm", "qty": 1},
+                              {"role": "GPIO", "mpn": "2x20 pin header 2.54", "package": "2.54 mm", "qty": 2}]},
+          "floorplan": {"board": {"w": 40, "h": 65}, "holes": [], "keepouts": [],
+                        "items": [{"id": "long", "label": "2x40 header", "ref": "J9", "edge": "top", "at": 20, "w": 101.6, "h": 5.08}]}}
+    for sec in ("requirements", "parts", "floorplan"):
+        canvas.update(p.root, sec, cv[sec])
+    got = feasible.check(p.root)
+    keys = {i["key"]: i for i in got}
+    assert keys["fit:long"]["level"] == "impossible" and "make that side at least" in keys["fit:long"]["why"], keys.get("fit:long")
+    assert keys["bga:MIMXRT1176DVMAA"]["level"] == "impossible" and "6 layers" in keys["bga:MIMXRT1176DVMAA"]["why"]
+    assert keys["height:a 2.54 mm pin header"]["level"] == "impossible"
+    assert keys["pairs-2l"]["level"] == "tight" and keys["current"]["level"] == "tight" and "2 oz" in keys["current"]["fix"]
+    assert [i["level"] for i in got] == sorted([i["level"] for i in got], key=lambda l: l != "impossible"), "impossible first"
+    assert all(i["fix"] and i["why"] for i in got)
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            js = await (await c.get(f"/api/projects/{p.id}/canvas")).json()
+            assert any(i["key"] == "fit:long" for i in js["feasibility"]), js.get("feasibility")
+            rt = app.rt(p.id)
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = (await T["canvas"]({"section": "requirements", "data": cv["requirements"]}))["content"][0]["text"]
+            assert "CANNOT WORK: J9 2x40 header does not fit. J9 2x40 header is 80 mm long and the top edge is 40 mm: make that side" in out \
+                and "tell the user now" in out, out
+            out = (await T["canvas"]({"section": "requirements", "data": cv["requirements"]}))["content"][0]["text"]
+            assert "CANNOT WORK" not in out, "told twice"
+            events = []
+            rt.hub.emit = lambda type_, **kw: events.append((type_, kw))
+            r = await c.patch(f"/api/projects/{p.id}", json={"constraints": {"max_size_mm": [30, 30]}})
+            assert r.status == 200
+            fz = next(kw["canvas"]["feasibility"] for t, kw in events if t == "canvas.update")
+            assert any(i["key"] == "size" for i in fz), fz
+            assert any("cannot work" in u and "x 30 mm" in u for u in rt.user_changes), rt.user_changes
+            rt.stop()
+    asyncio.run(go())
+
+
+@test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on
     one edge never overlap, blocks sit inside the board clear of the holes, the connectors and each other (a bottom-side
@@ -3552,7 +3605,7 @@ def floorplan_comes_out_solved():
                 assert not fpsolve._hit(rects[a], rects[b]), (a, b, rects[a], rects[b])
     assert fpsolve._hit(rects["mezz"], rects["mcu"]), "a bottom-side connector may sit under the MCU"
     assert not fpsolve._hit(rects["usbc"], rects["swd"], fpsolve.CONN_GAP - 0.01)
-    assert any("J5 turned to lie along the left edge" in l for l in got["solved"]["lines"]), got["solved"]
+    assert any("J5 GPIO 2x20 left turned to lie along the left edge" in l for l in got["solved"]["lines"]), got["solved"]
     # what cannot fit, and what would: a 60 mm header on a 40 x 40 board
     small, rep = fpsolve.solve({"board": {"w": 40, "h": 40}, "holes": [], "keepouts": [],
                                 "items": [{"id": "long", "label": "2x30 header", "edge": "top", "at": 20, "w": 76.2, "h": 5.08}]})

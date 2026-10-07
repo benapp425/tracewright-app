@@ -23,7 +23,7 @@ def load(root):
             d = json.load(f)
     except (OSError, ValueError):
         d = {}
-    return {k: d.get(k) for k in SECTIONS} | {"updated": d.get("updated"), "pending": d.get("pending") or []}
+    return {k: d.get(k) for k in SECTIONS} | {"updated": d.get("updated"), "pending": d.get("pending") or [], "told": d.get("told") or []}
 
 
 def set_pending(root, codes, on):
@@ -423,9 +423,22 @@ def solve_saved(root):
 
 
 def enrich(root, cv):
+    """The canvas as the app shows it: each part's stock, price and JLC library from the sourcing cache, and what
+    cannot work or is tight as set (feasible.py)."""
+    cv = enrich_parts(root, cv)
+    try:
+        from . import feasible
+        cv = {**cv, "feasibility": feasible.check(root, cv)}
+    except Exception:                                     # a check must never take the canvas down
+        import traceback
+        traceback.print_exc()
+    return cv
+
+
+def enrich_parts(root, cv):
     """The canvas with each part's stock, price and JLC library from the sourcing cache."""
     parts = (cv.get("parts") or {}).get("items") or []
-    if not parts:
+    if not parts or "found" in parts[0]:
         return cv
     from .bom import sourcing_index
     idx = sourcing_index(root)
@@ -455,3 +468,15 @@ def phase(cfg):
     """'intake' | 'ready' for a guided project that has not started; None otherwise."""
     st = start_of(cfg)
     return st.get("phase") if st and st.get("phase") in ("intake", "ready") else None
+
+
+def untold(root, issues):
+    """The issues Claude has not been told about yet (and they are marked told)."""
+    with _lock:
+        d = load(root)
+        told = set(d.get("told") or [])
+        new = [i for i in issues if i["key"] not in told]
+        if new:
+            d["told"] = sorted(told | {i["key"] for i in new})[-200:]
+            _save(root, {k: v for k, v in d.items() if v is not None})
+        return new

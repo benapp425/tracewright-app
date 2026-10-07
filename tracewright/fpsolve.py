@@ -73,7 +73,9 @@ def side(o):
 
 
 def _name(o):
-    return o.get("ref") or o.get("label") or o["id"]
+    """How the user knows it: "J9 2x40 header", else its label or id."""
+    ref, label = o.get("ref") or "", o.get("label") or ""
+    return f"{ref} {label}".strip() if ref and label and label != ref else ref or label or o["id"]
 
 
 def solve(fp):
@@ -113,9 +115,10 @@ def solve(fp):
             if along > L - 1.0:
                 rep["unfit"].append(c["id"])
                 longer = max(W, H) if L < max(W, H) else None
-                rep["lines"].append(f"{_name(c)} is {along:g} mm long and the {e} edge is {L:g} mm" +
-                                    (f": put it on a {longer:g} mm edge" if longer and longer > along + 1 else "") +
-                                    f", or make that side at least {math.ceil(along + 2):g} mm")
+                other = longer and longer > along + 1
+                rep["lines"].append(f"{_name(c)} is {along:g} mm long and the {e} edge is {L:g} mm: " +
+                                    (f"put it on a {longer:g} mm edge, or make" if other else "make") +
+                                    f" that side at least {math.ceil(along + 2):g} mm")
                 placed_conn.append(c)
                 continue
             if _fixed(c):

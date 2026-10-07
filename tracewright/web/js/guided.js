@@ -2,7 +2,7 @@
 // diagram, the connectors on a sketch of the board with their pinouts, and a live BOM with JLC stock and
 // price. Claude fills it with its canvas tool; when the intake is done a Start card appears, and Start
 // opens the full workspace.
-import { h, clear, api, toast, btn } from "./util.js";
+import { h, clear, api, toast, btn, confirmDialog } from "./util.js";
 import { icon } from "./icons.js";
 import { diagramSVG } from "./blockdiagram.js";
 import { limitsPanel, limitsSummary } from "./limits.js";
@@ -55,6 +55,7 @@ export class GuidedCanvas {
     const fpFocus = !!(this.fpView && this.fpView.el.contains(document.activeElement));     // and the floorplan its keys
     const c = this.cv, el = clear(this.el);
     const cards = [];
+    if (c.feasibility && c.feasibility.length) cards.push(["feasibility", this.feasCard(c.feasibility)]);
     if (c.phase === "ready" && c.plan) cards.push(["plan", this.startCard(c.plan)]);
     if (c.requirements && c.requirements.items && c.requirements.items.length) cards.push(["requirements", this.reqCard(c.requirements)]);
     if (c.diagram && c.diagram.blocks && c.diagram.blocks.length) cards.push(["diagram", this.diagramCard(c.diagram)]);
@@ -75,9 +76,25 @@ export class GuidedCanvas {
     return h("section.gd-card", h("div.gd-h", h("span.gd-hi", icon(ic, 15)), h("b", title), sub ? h("span.gd-sub", sub) : null), ...body);
   }
 
+  // ------------------------------------------------------------------ what cannot work, or is tight, as set
+  feasCard(list) {
+    const bad = list.filter((i) => i.level === "impossible"), tight = list.filter((i) => i.level !== "impossible");
+    const row = (i) => h("div.gd-fz." + (i.level === "impossible" ? "bad" : "tight"),
+      icon(i.level === "impossible" ? "circle-x" : "triangle-alert", 14),
+      h("div", h("b", i.what), h("div.gd-fzw", i.why), h("div.gd-fzf", i.fix)));
+    return h("section.gd-card.gd-feas" + (bad.length ? ".bad" : ""),
+      h("div.gd-h", h("span.gd-hi" + (bad.length ? ".bad" : ".warn"), icon(bad.length ? "circle-x" : "triangle-alert", 15)),
+        h("b", bad.length ? "Can't work as set" : "Tight"),
+        h("span.gd-sub", [bad.length ? `${bad.length} to fix` : "", tight.length ? `${tight.length} tight` : ""].filter(Boolean).join(" · "))),
+      ...bad.map(row), ...tight.map(row));
+  }
+
   // ------------------------------------------------------------------ start
   startCard(plan) {
     const go = btn("play", "Start design", { onclick: async () => {
+      const bad = (this.cv.feasibility || []).filter((i) => i.level === "impossible");
+      if (bad.length && !await confirmDialog({ title: "Start with this unresolved?", ok: "Start anyway",
+        text: bad.map((i) => `${i.what}: ${i.fix}`).join("\n") })) return;
       go.disabled = true; go.classList.add("busy");
       try { await api(`/api/projects/${enc(this.pid)}/start`, { body: {} }); }
       catch (e) { toast(e.message, "error"); go.disabled = false; go.classList.remove("busy"); }

@@ -930,6 +930,14 @@ def make_app():
             if now.get("layers"):                          # the fab settings follow the limit
                 p.cfg.setdefault("fab", {})["layers"] = now["layers"]
         p.save()
+        if "constraints" in body:                          # the user's new limit, checked against the plan at once
+            from . import canvas, feasible
+            cv = await asyncio.to_thread(lambda: canvas.enrich(p.root, canvas.load(p.root)))
+            rt.hub.emit("canvas.update", canvas=cv)
+            new = [i for i in await asyncio.to_thread(canvas.untold, p.root, cv.get("feasibility") or []) if i["level"] == "impossible"]
+            if new:
+                rt.user_changes.append("with the limits the user just set, this cannot work (tell them, with the fix): " +
+                                       " | ".join(feasible.lines(new)))
         return jresp(p.summary())
 
     @routes.get("/api/constraints")

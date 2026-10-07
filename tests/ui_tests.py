@@ -1241,7 +1241,7 @@ async def floorplan_solve_and_names(t):
         fp = t.s.get(f"api/projects/{t.pid}/canvas")["floorplan"]
         hdr = next(i for i in fp["items"] if i["id"] == "hdrL")
         check(hdr["rot"] == 90, hdr)
-        await t.page.wait("document.querySelector('.fp-solved') && document.querySelector('.fp-solved').textContent.includes('J5 turned')", 5)
+        await t.page.wait("document.querySelector('.fp-solved') && document.querySelector('.fp-solved').textContent.includes('J5 GPIO 2x20 left turned')", 5)
         clash = await t.page.js("""(() => { const b = [...document.querySelectorAll('.fp-cls text')].map((x) => x.getBBox());
           for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) {
             const p = b[i], q = b[j];
@@ -1273,6 +1273,42 @@ async def open_in_kicad_up_front(t):
     await t.page.key("Escape")
     await t.page.wait("[...document.querySelectorAll('.ov-actions button')].some((b) => b.innerText.includes('Open in KiCad'))", 10)
     await t.shot("open-in-kicad")
+
+
+@test
+async def setup_card_says_what_cannot_work(t):
+    """The guided start's canvas leads with what cannot work as set (and what is tight), each with its fix; Start asks
+    before going ahead with it unresolved."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg["start"] = {"mode": "guided", "phase": "ready"}
+    cfg["constraints"] = {"layers": 2, "max_height_mm": 5}
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    cvp = os.path.join(root, ".tracewright", "canvas.json")
+    with open(cvp, "w") as f:
+        json.dump({"plan": {"summary": "A small breakout.", "steps": ["Schematic", "Layout"]},
+                   "parts": {"items": [{"role": "MCU", "mpn": "MIMXRT1176DVMAA", "package": "BGA-289 0.8 mm", "qty": 1},
+                                       {"role": "GPIO", "mpn": "2x20 pin header", "package": "2.54 mm", "qty": 1}]},
+                   "floorplan": {"board": {"w": 40, "h": 40}, "holes": [], "keepouts": [],
+                                 "items": [{"id": "long", "label": "2x40 header", "ref": "J9", "edge": "top", "at": 20, "w": 80, "h": 5.08}]}}, f)
+    try:
+        await t.page.goto(t.s.url + f"#/p/{t.pid}")
+        await t.page.wait("document.querySelector('.gd-feas.bad') && document.querySelectorAll('.gd-feas .gd-fz').length >= 3", 20)
+        rows = await t.page.js("[...document.querySelectorAll('.gd-fz')].map((r) => r.innerText)")
+        check(any("J9 2x40 header does not fit" in r for r in rows) and any("6 layers" in r for r in rows) and any("height limit is 5 mm" in r for r in rows), rows)
+        check(all(len(r.splitlines()) >= 3 for r in rows), "each row: what, why, the fix")
+        await t.shot("setup-cannot-work")
+        await t.page.js("[...document.querySelectorAll('.gd-start button')].find((b) => b.textContent.includes('Start design')).click(); 1")
+        await t.page.wait("[...document.querySelectorAll('.modal .btn')].some((b) => b.textContent === 'Start anyway')", 5)
+        await t.page.js("[...document.querySelectorAll('.modal .btn')].find((b) => b.textContent === 'Cancel').click(); 1")
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(cvp)
 
 
 # ------------------------------------------------------------------ running

@@ -984,7 +984,11 @@ def tool_list(rt, app):
         kept = [o.get("ref") or o.get("label") or o["id"] for o in (sec.get("items") or []) + (sec.get("holes") or [])
                 if args["section"] == "floorplan" and o.get("moved")]
         solved = (sec.get("solved") or {}).get("lines") or [] if args["section"] == "floorplan" else []
-        return _text(f"canvas {args['section']} updated ({n} item{'s' if n != 1 else ''})" +
+        from . import feasible
+        new = await run(cvs.untold, p.root, await run(feasible.check, p.root, cv))
+        said = ("\nChecked against the user's picks -- tell the user now, plainly, with the fix (or change your plan):\n- " +
+                "\n- ".join(feasible.lines(new)) if new else "")
+        return _text(f"canvas {args['section']} updated ({n} item{'s' if n != 1 else ''})" + said +
                      (f"; kept where the user put them: {', '.join(kept)}" if kept else "") +
                      ("\nSolved so nothing overlaps or sticks out:\n- " + "\n- ".join(solved) +
                       "\nTell the user about anything that does not fit, and what would." if solved else ""))

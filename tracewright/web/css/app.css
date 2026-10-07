@@ -2348,3 +2348,11 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .fp-solve { position: absolute; top: 4px; right: 4px; z-index: 2; }
 .fp-solved { font-size: 11.5px; color: var(--text-3); text-align: center; margin: 2px 12px 6px; line-height: 1.45; }
 .fp-lead { stroke: var(--text-4); stroke-width: 1; stroke-dasharray: 2 2; }
+/* guided start: what cannot work as set, or is tight (guided.js feasCard; feasible.py) */
+.gd-feas { border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.gd-feas.bad { border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.gd-hi.bad { background: var(--err-soft); color: var(--err); } .gd-hi.warn { background: var(--warn-soft); color: var(--warn); }
+.gd-fz { display: flex; gap: 9px; align-items: flex-start; padding: 8px 2px; border-top: 1px solid var(--line); font-size: 13px; }
+.gd-fz:first-of-type { border-top: 0; }
+.gd-fz svg.ic { flex: none; margin-top: 2px; } .gd-fz.bad svg.ic { color: var(--err); } .gd-fz.tight svg.ic { color: var(--warn); }
+.gd-fzw { color: var(--text-2); margin-top: 2px; } .gd-fzf { color: var(--text-3); margin-top: 2px; }
