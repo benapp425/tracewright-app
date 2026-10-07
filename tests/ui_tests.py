@@ -157,7 +157,7 @@ async def six_places_and_the_address_follows(t):
     await t.open_project()
     places = await t.page.js("[...document.querySelectorAll('.tabs .tab[data-place]')].map((e) => e.dataset.place)")
     check(places == ["overview", "design", "parts", "checks", "simulate", "project"], f"places: {places}")
-    for place, views in (("design", ["board", "schematic", "3d"]), ("parts", ["bom", "outputs"]),
+    for place, views in (("design", ["board", "schematic", "3d"]), ("parts", ["bom", "outputs", "make"]),
                          ("checks", ["checks", "signoff", "rules"]), ("project", ["docs", "files", "history"])):
         await t.place(place)
         sub = await t.page.js("[...document.querySelectorAll('.subnav button')].map((b) => b.dataset.view)")
@@ -173,8 +173,8 @@ async def six_places_and_the_address_follows(t):
 async def no_ask_claude_buttons_anywhere(t):
     await t.open_project()
     seen = []
-    for place, views in (("overview", [None]), ("design", ["board", "schematic", "3d"]), ("parts", ["bom", "outputs"]),
-                         ("checks", ["checks", "signoff", "rules"]), ("project", ["docs", "files", "history"])):
+    for place, views in (("overview", [None]), ("design", ["board", "schematic", "3d"]), ("parts", ["bom", "outputs", "make"]),
+                         ("checks", ["checks", "signoff", "rules"]), ("simulate", [None]), ("project", ["docs", "files", "history"])):
         for v in views:
             await t.place(place, v)
             await asyncio.sleep(0.6)
@@ -1517,6 +1517,45 @@ async def simulate_the_board_as_laid_out(t):
         if os.path.isdir(sim_dir):
             for f in set(os.listdir(sim_dir)) - before:
                 os.remove(os.path.join(sim_dir, f))
+
+
+@test
+async def make_view_gets_the_board_built(t):
+    """Parts > Make: the BOM's health with its score, the test points, a fab drawing made and listed, a panel made and
+    shown, the enclosure checked, and a block saved to the library and removed again."""
+    root = t.s.demo["root"]
+    cfg_path = os.path.join(root, "tracewright.json")
+    cfg0 = open(cfg_path).read()
+    try:
+        await t.open_project()
+        await t.place("parts", "make")
+        await t.page.wait("document.querySelector('.mk-score b') && document.querySelector('[data-sec=tp] table')", 60)
+        check(await t.page.js("/\\d/.test(document.querySelector('.mk-score b').textContent)"), "a BOM score")
+        tp = await t.page.js("document.querySelector('[data-sec=tp] table').innerText")
+        check("GND" in tp and "through-hole pin J1" in tp, tp)
+        await t.page.js("[...document.querySelectorAll('[data-sec=draw] button')].find((b) => b.textContent.includes('Fab drawing')).click(); 1")
+        await t.page.wait("[...document.querySelectorAll('[data-sec=draw] .mk-file a')].some((a) => a.textContent.includes('fab-drawing.pdf'))", 60)
+        await t.page.js("[...document.querySelectorAll('[data-sec=panel] button')].find((b) => b.textContent.includes('Make the panel')).click(); 1")
+        await t.page.wait("document.querySelector('.mk-panel') && document.querySelector('[data-sec=panel] .sm-lines')", 90)
+        await t.page.wait("document.querySelector('.mk-panel').naturalWidth > 0", 20)
+        await t.shot("make-panel")
+        await t.page.js("(() => { const i = [...document.querySelectorAll('[data-sec=enc] input')]; const set = (k, v) => { i[k].value = v; i[k].dispatchEvent(new Event('input')); }; "
+                        "set(0, '56'); set(1, '41'); set(2, '15'); return 1; })()")
+        await t.page.js("[...document.querySelectorAll('[data-sec=enc] button')].find((b) => b.textContent.includes('Check the fit')).click(); 1")
+        await t.page.wait("document.querySelector('[data-sec=enc] .sm-lines') && document.querySelector('[data-sec=enc] .sm-lines').innerText.includes('fits')", 60)
+        # a block
+        await t.page.js("(() => { const i = [...document.querySelectorAll('[data-sec=blocks] input')]; i[0].value = '3.3 V LDO'; i[1].value = 'U1, C1, C2, C3'; "
+                        "[...document.querySelectorAll('[data-sec=blocks] button')].find((b) => b.textContent.includes('Save as a block')).click(); return 1; })()")
+        await t.page.wait("document.querySelector('.mk-block') && document.querySelector('.mk-block').innerText.includes('3.3 V LDO')", 60)
+        await t.shot("make-blocks")
+        await t.page.js("document.querySelector('.mk-block .tbtn').click(); 1")
+        await t.page.wait("document.querySelector('.modal')", 10)
+        await t.page.js("[...document.querySelectorAll('.modal button')].find((b) => b.textContent === 'Remove').click(); 1")
+        await t.page.wait("!document.querySelector('.mk-block')", 20)
+    finally:
+        open(cfg_path, "w").write(cfg0)
+        for sub in ("panel", "enclosure"):
+            shutil.rmtree(os.path.join(root, "build", sub), ignore_errors=True)
 
 
 # ------------------------------------------------------------------ running

@@ -4125,6 +4125,80 @@ def simulation_of_the_board_as_laid_out():
     asyncio.run(go())
 
 
+@test(needs=("kicad", "kpy"))
+def getting_the_board_built():
+    """Parts > Make: the BOM's health, the test points (ground on a through-hole pin, the rest added where there is
+    room), the fab drawing and the assembly drawing as PDFs, a V-scored panel that keeps every copy a circuit of its own
+    (and says when a connector reaches into the next board), the enclosure fit with its wall openings and an OpenSCAD
+    box, and a block saved from one design, read back, listed and removed; the endpoints and Claude's tools."""
+    import types
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools, bomhealth, blocks
+    from tw import testpoints, drawings, panel, enclosure, kicad
+    from tw.board import Board
+    from tw.checks.context import Context
+    p = fixture_copy("make")
+    ctx = Context(p, offline=True)
+    tp = testpoints.plan(ctx)
+    by = {i["net"]: i["at"] for i in tp["items"]}
+    assert by["GND"]["kind"] == "through-hole pin" and by["RESET"]["kind"] == "add" and by["+3V3"].get("via"), by
+    assert not tp["close"] and len(tp["add"]) >= 4, tp["lines"]
+    fab = drawings.fab_drawing(p)
+    assert os.path.getsize(fab["pdf"]) > 10000 and fab["pages"] == 2 and any("Smallest track" in n for n in fab["notes"]), fab
+    asm = drawings.assembly(p)
+    assert len(asm) == 1 and asm[0].endswith("-assembly-top.pdf") and os.path.getsize(asm[0]) > 10000, asm
+    pn = panel.make(p, 2, 2)
+    b = Board.load(pn["pcb"])
+    assert len(b.nets) == 4 * len(Board.load(p.pcb).nets) and pn["size"] == [100.2, 80.2], (len(b.nets), pn["size"])
+    assert any("J1 reaches" in l for l in pn["lines"]) and os.path.getsize(pn["zip"]) > 50000, pn["lines"]
+    d = kicad.drc(pn["pcb"], os.path.join(p.build, "panel", "drc.json"), parity=False)
+    assert not d["unconnected_items"] and not [v for v in d["violations"] if v["type"] not in ("courtyards_overlap",)], d["violations"][:3]
+    assert not any("J1 reaches" in l for l in panel.make(p, 1, 3)["lines"])
+    tri = types.SimpleNamespace(outline=[[(0, 0), (10, 0), (0, 10)]])
+    assert panel.shape(tri)[0] is False
+    f = enclosure.fit(ctx, {"w": 56, "l": 41, "h": 15})
+    assert f["ok"] and {o["ref"] for o in f["openings"]} == {"J1", "J2"} and len(f["holes"]) == 4, f["lines"]
+    assert not enclosure.fit(ctx, {"w": 40, "l": 30, "h": 8})["ok"]
+    txt, _ = enclosure.scad(ctx, {"w": 56, "l": 41, "h": 15})
+    assert "module lid()" in txt and "// J1" in txt and txt.count("cylinder(d =") == 8, txt[:400]
+
+    pid = ProjectStore().import_copy(FIXTURE, "Make demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            js = await (await c.get(f"/api/projects/{pid}/make")).json()
+            assert js["bom"]["score"] is not None and js["testpoints"]["items"] and js["blocks"] == [], {k: js[k] for k in ("bom", "blocks")}
+            h = bomhealth.health(rt.p.tw, rt.board())
+            assert h["rows"] and all("flags" in r for r in h["rows"]), h
+            r = await c.post(f"/api/projects/{pid}/make/drawings", json={"which": "fab"})
+            assert r.status == 200 and (await r.json())["files"][0].endswith("-fab-drawing.pdf")
+            r = await c.post(f"/api/projects/{pid}/make/enclosure", json={"w": 56, "l": 41, "h": 15})
+            body = await r.json()
+            assert r.status == 200 and body["ok"] and body["files"][0].endswith("-enclosure.scad"), body
+            assert (await c.post(f"/api/projects/{pid}/make/enclosure", json={"w": 56})).status == 422
+            r = await c.post(f"/api/projects/{pid}/blocks", json={"name": "3.3 V LDO", "refs": ["U1", "C1", "C2", "C3"], "description": "AMS1117 from 5 V"})
+            body = await r.json()
+            assert r.status == 200 and {"+5V", "+3V3", "GND"} <= set(body["ports"]), body
+            items = (await (await c.get("/api/blocks")).json())["items"]
+            assert items[0]["name"] == "3.3 V LDO" and items[0]["parts"] == 4, items
+            b = await (await c.get(f"/api/blocks/{items[0]['id']}")).json()
+            assert "PARTS" in b["text"] and "U1:" in b["text"] and "PLACEMENT" in b["text"], b["text"][:300]
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = (await T["blocks"]({"action": "list"}))["content"][0]["text"]
+            assert "3.3 V LDO" in out, out
+            out = (await T["make"]({"kind": "bom"}))["content"][0]["text"]
+            assert out.startswith("BOM health"), out
+            assert (await c.delete(f"/api/blocks/{items[0]['id']}")).status == 200 and blocks.items() == []
+            assert (await c.post(f"/api/projects/{pid}/blocks", json={"name": "x", "refs": ["Q99"]})).status == 400
+            rt.stop()
+    asyncio.run(go())
+
+
 @test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on

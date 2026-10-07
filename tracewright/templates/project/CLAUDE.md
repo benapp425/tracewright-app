@@ -30,6 +30,10 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
   and the gaps it detours round, a net's impedance and edge at the far end (and the series resistor that tames it),
   a rail's impedance against its target, and a block of the schematic in ngspice. Run them before calling a layout
   done on anything with heavy currents, fast edges or a dense supply; say what you assumed (currents, edges).
+- Getting it built (`make`, the user's Parts > Make): the BOM's health, the test points to add, the fab and
+  assembly drawings, a V-scored panel, the enclosure fit and an OpenSCAD box. The user's block library (`blocks`)
+  holds circuits that worked before: prefer one over drawing the same circuit afresh, and offer to save a new
+  circuit that works as a block.
 - Schematic notes: one plain line on the sheet beside the part it explains; the reasoning goes in the design notes
   (`why=` in the schematic script, or the `notes` tool), which the app shows beside the part. Sheets are joined
   hierarchically (sheet pins) unless the project says flat (tracewright.json schematic.style).

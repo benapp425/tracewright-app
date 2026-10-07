@@ -2457,3 +2457,20 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .sm-srow { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
 .sm-srow input { height: 26px; font-size: 12px; } .sm-why { color: var(--text-3); font-size: 11.5px; }
 .sm-runs { display: flex; flex-direction: column; gap: 10px; }
+/* Parts > Make */
+.makeview { overflow: auto; padding: 6px 18px 30px; display: flex; flex-direction: column; gap: 6px; max-width: 1100px; }
+.mk-sec { padding: 12px 0 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.mk-h { display: flex; align-items: center; gap: 8px; } .mk-h h3 { margin: 0; font-size: 14px; } .mk-sub { font-size: 12px; color: var(--text-3); }
+.mk-score { display: flex; gap: 14px; align-items: flex-start; }
+.mk-score > b { font-size: 26px; font-weight: 650; min-width: 48px; } .mk-score b.ok { color: var(--ok); } .mk-score b.warn { color: var(--warn); } .mk-score b.bad { color: var(--err); }
+.mk-lines { font-size: 13px; line-height: 1.55; color: var(--text-2); padding-top: 4px; }
+.mk-flag { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); }
+.mk-flag.error svg.ic { color: var(--err); } .mk-flag.warning svg.ic { color: var(--warn); }
+.mk-file { display: flex; align-items: center; gap: 8px; font-size: 12.5px; } .mk-file a { color: var(--text); }
+.mk-at { color: var(--text-4); font-size: 11.5px; }
+.mk-panel { max-width: 560px; background: #fff; border-radius: 8px; padding: 8px; }
+.mk-block { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); }
+.mk-desc { font-size: 12px; color: var(--text-2); }
+.mk-notes summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); } .mk-notes ol { font-size: 12px; color: var(--text-2); margin: 6px 0; }
+.sm-lines.bad { border-left: 3px solid var(--err); }
+.mk-wait { padding: 14px 0; }

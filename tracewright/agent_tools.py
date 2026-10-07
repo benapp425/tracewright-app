@@ -1053,6 +1053,84 @@ def tool_list(rt, app):
             hub.emit("sims.changed")
         return _text("\n".join(lines))
 
+    @reg("blocks", "The user's block library: circuits built once and wanted again (a USB-C input, a buck, a crystal). "
+         "action list | read (id: the parts with values and part numbers, the connections inside, the ports to join to "
+         "this design's nets, the design notes, where the parts sat) | save (name, refs, description: these parts of this "
+         "design as a block) | remove (id). To use a block: read it, draw its parts and connections into this design's "
+         "schematic script with its ports on this design's nets, keep its notes, and place its parts as it says.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "read", "save", "remove"]},
+                                           "id": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"},
+                                           "refs": {"type": "array", "items": {"type": "string"}}},
+          "required": ["action"]})
+    async def blocks_tool(args):
+        from . import blocks
+        a = args["action"]
+        try:
+            if a == "list":
+                its = blocks.items()
+                return _text("\n".join(f"{b['id']}: {b['name']} ({b['parts']} parts; ports {', '.join(b['ports'])})"
+                                       + (f" -- {b['description']}" if b.get("description") else "") for b in its) or "the library is empty")
+            if a == "read":
+                return _text(blocks.text(blocks.get(args.get("id"))))
+            if a == "save":
+                b = await run(blocks.save, p.reload(), args.get("refs") or [], args.get("name"), args.get("description") or "")
+                return _text(f"saved {b['id']}: {len(b['parts'])} parts, ports {', '.join(x['name'] for x in b['ports'])}")
+            blocks.remove(args.get("id"))
+            return _text("removed")
+        except KeyError:
+            return _text(f"no block {args.get('id')}", error=True)
+        except ValueError as e:
+            return _text(str(e), error=True)
+
+    @reg("make", "Get the board built: kind testpoints (the nets a person or fixture needs to touch and where: side F|B) | "
+         "drawings (which fab: the fab drawing with outline, stack-up, drills and notes; which assembly: top and bottom "
+         "assembly drawings) | panel (nx, ny, rail mm, rails tb|lr|all|none: a V-scored panel with rails, tooling holes, "
+         "fiducials, its Gerbers) | enclosure (w, l, h: the box's inside in mm; standoff, gap, lid: will the board and its "
+         "parts fit, the wall openings its connectors need, an OpenSCAD enclosure) | bom (the BOM's health).",
+         {"type": "object", "properties": {"kind": {"type": "string", "enum": ["testpoints", "drawings", "panel", "enclosure", "bom"]},
+                                           "side": {"type": "string"}, "which": {"type": "string"}, "nx": {"type": "integer"},
+                                           "ny": {"type": "integer"}, "rail": {"type": "number"}, "rails": {"type": "string"},
+                                           "w": {"type": "number"}, "l": {"type": "number"}, "h": {"type": "number"},
+                                           "standoff": {"type": "number"}, "gap": {"type": "number"}, "lid": {"type": "number"}},
+          "required": ["kind"]})
+    async def make_tool(args):
+        from tw.checks.context import Context
+        tw = proj()
+        k = args["kind"]
+        if not tw.has_pcb() and k != "bom":
+            return _text("no board yet", error=True)
+
+        def work():
+            if k == "bom":
+                from . import bomhealth
+                r = bomhealth.health(tw, rt.board() if tw.has_pcb() else None)
+                bad = [x for x in r["rows"] if any(f["sev"] in ("error", "warning") for f in x["flags"])]
+                return [f"BOM health {r['score']}"] + r["lines"] + [f"  {', '.join(x['refs'][:4])} {x['value']}: " + "; ".join(f["text"] for f in x["flags"]) for x in bad[:12]]
+            if k == "testpoints":
+                from tw import testpoints
+                return testpoints.plan(Context(tw, offline=True), "F" if args.get("side") == "F" else "B")["lines"]
+            if k == "drawings":
+                from tw import drawings
+                if args.get("which") == "assembly":
+                    return [f"wrote {os.path.relpath(f, tw.root)}" for f in drawings.assembly(tw)]
+                r = drawings.fab_drawing(tw)
+                return [f"wrote {os.path.relpath(r['pdf'], tw.root)}"] + r["notes"]
+            if k == "panel":
+                from tw import panel
+                r = panel.make(tw, args.get("nx", 2), args.get("ny", 2), float(args.get("rail", 5)), args.get("rails", "tb"))
+                return r["lines"] + [f"wrote {os.path.relpath(r['zip'], tw.root)}"]
+            from tw import enclosure
+            box = {key: args[key] for key in ("w", "l", "h") if args.get(key)}
+            if len(box) < 3:
+                raise ValueError("the box's inside: w, l and h in mm")
+            opts = {key: float(args[key]) for key in ("standoff", "gap", "lid") if args.get(key) is not None}
+            return enclosure.fit(Context(tw, offline=True), box, **opts)["lines"]
+        try:
+            lines = await run(work)
+        except ValueError as e:
+            return _text(str(e), error=True)
+        return _text("\n".join(lines))
+
     @reg("simulate", "Simulate a circuit with KiCad's ngspice to show a requirement holds: a filter's corner, a divider's "
          "or a sense amplifier's output, an RC delay, an LED's current, a regulator's start-up into its load. netlist: a "
          "SPICE netlist with its analysis (.op, .tran, .ac, .dc); probes: vectors to read (v(out), i(v1)); name: short, for "

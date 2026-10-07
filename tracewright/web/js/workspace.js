@@ -22,27 +22,28 @@ import { Inspector } from "./inspector.js";
 import { limitsPanel } from "./limits.js";
 import { SignoffView } from "./signoff.js";
 import { SimulateView } from "./simulate.js";
+import { MakeView } from "./make.js";
 
 const enc = encodeURIComponent;
 export const TABS = [
   ["overview", "Overview", "layout-grid"], ["board", "Board", "circuit-board"], ["schematic", "Schematic", "waypoints"], ["3d", "3D", "box"],
   ["bom", "BOM", "list"], ["checks", "Checks", "list-checks"], ["signoff", "Sign-off", "badge-check"], ["outputs", "Order", "shopping-cart"], ["rules", "Rules", "sliders-horizontal"],
-  ["simulate", "Simulate", "activity"], ["docs", "Docs", "file-text"], ["files", "Files", "folder"], ["history", "History", "history"],
+  ["simulate", "Simulate", "activity"], ["make", "Make", "wrench"], ["docs", "Docs", "file-text"], ["files", "Files", "folder"], ["history", "History", "history"],
 ];
 // Six places, each holding one or more views (Design: the board, schematic and 3D model ...).
 export const PLACES = [
   ["overview", "Overview", "layout-grid", ["overview"]],
   ["design", "Design", "circuit-board", ["board", "schematic", "3d"]],
-  ["parts", "Parts", "list", ["bom", "outputs"]],
+  ["parts", "Parts", "list", ["bom", "outputs", "make"]],
   ["checks", "Checks", "list-checks", ["checks", "signoff", "rules"]],
   ["simulate", "Simulate", "activity", ["simulate"]],
   ["project", "Project", "folder", ["docs", "files", "history"]],
 ];
-const SUB = { board: "Board", schematic: "Schematic", "3d": "3D", bom: "BOM", outputs: "Order", checks: "Checks", signoff: "Sign-off", rules: "Design rules", simulate: "Simulate",
+const SUB = { board: "Board", schematic: "Schematic", "3d": "3D", bom: "BOM", outputs: "Order", checks: "Checks", signoff: "Sign-off", rules: "Design rules", simulate: "Simulate", make: "Make",
   docs: "Docs", files: "Files", history: "History" };
 export const placeOf = (view) => (PLACES.find((p) => p[3].includes(view)) || PLACES[1])[0];
 export const tabKey = (i) => i < 9 ? `mod+${i + 1}` : null;
-const VIEWS = { overview: OverviewPanel, board: BoardView, schematic: SchematicView, "3d": Viewer3D, bom: BomView, checks: ChecksPanel, signoff: SignoffView, rules: RulesView, simulate: SimulateView,
+const VIEWS = { overview: OverviewPanel, board: BoardView, schematic: SchematicView, "3d": Viewer3D, bom: BomView, checks: ChecksPanel, signoff: SignoffView, rules: RulesView, simulate: SimulateView, make: MakeView,
   files: FilesPanel, history: HistoryPanel, outputs: OutputsPanel, docs: DocsPanel };
 const STAGE_ICON = { done: "check", blocked: "x", active: null, todo: null, skipped: null };
 

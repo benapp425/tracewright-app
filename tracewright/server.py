@@ -1785,6 +1785,131 @@ def make_app():
         rt.user_changes.append(f"simulate ({kind}, by the user): " + "; ".join((keep.get("lines") or [])[:2]))
         return jresp(res)
 
+    @routes.get("/api/projects/{pid}/make")
+    async def make_get(request):
+        """Parts > Make: the BOM's health, the test points, the drawings, the panel, the enclosure, the block library."""
+        from . import bomhealth, blocks
+        rt = app.rt(request.match_info["pid"])
+        p = rt.p.reload()
+
+        def work():
+            out = {"board": p.tw.has_pcb(), "schematic": p.tw.has_sch(), "blocks": blocks.items(), "files": {},
+                   "enclosure": p.cfg.get("enclosure") or None}
+            if p.tw.has_sch():
+                try:
+                    out["bom"] = bomhealth.health(p.tw, rt.board() if p.tw.has_pcb() else None)
+                except Exception as e:
+                    out["bom"] = {"score": None, "lines": [f"The BOM could not be read: {e}"], "rows": []}
+            if p.tw.has_pcb() and p.tw.has_sch():
+                from tw.checks.context import Context
+                from tw import testpoints
+                out["testpoints"] = testpoints.plan(Context(p.tw, offline=True), (p.cfg.get("make") or {}).get("tp_side", "B"))
+            for sub in ("docs", "panel", "enclosure"):
+                d = os.path.join(p.tw.build, sub)
+                for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+                    if f.endswith((".pdf", ".zip", ".scad", ".svg", ".step")) and ("fab-drawing" in f or "assembly-" in f or sub != "docs"):
+                        out["files"][f] = {"path": f"build/{sub}/{f}", "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(os.path.getmtime(os.path.join(d, f))))}
+            return out
+        return jresp(await asyncio.to_thread(work))
+
+    @routes.post("/api/projects/{pid}/make/{kind}")
+    async def make_run(request):
+        """drawings {which: fab | assembly} | panel {nx, ny, rail, rails, fiducials, tooling} | enclosure {w, l, h,
+        standoff, gap, lid} (fit, the OpenSCAD file, and the board's STEP) | testpoints {side}."""
+        kind = request.match_info["kind"]
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        p = rt.p.reload()
+        if not p.tw.has_pcb():
+            return err("there is no board yet", 404)
+
+        def work():
+            from tw.checks.context import Context
+            if kind == "drawings":
+                from tw import drawings
+                if body.get("which") == "assembly":
+                    files = drawings.assembly(p.tw)
+                    return {"files": [os.path.relpath(f, p.root) for f in files], "lines": [f"{len(files)} assembly drawing{'s' if len(files) != 1 else ''}"]}
+                r = drawings.fab_drawing(p.tw)
+                return {"files": [os.path.relpath(r["pdf"], p.root)], "lines": ["The fab drawing: outline, stack-up, drills and notes"], "notes": r["notes"]}
+            if kind == "panel":
+                from tw import panel
+                r = panel.make(p.tw, body.get("nx", 2), body.get("ny", 2), float(body.get("rail", 5)), body.get("rails", "tb"),
+                               body.get("fiducials", True), body.get("tooling", True))
+                return {"files": [os.path.relpath(f, p.root) for f in (r["pcb"], r["zip"], r["svg"]) if f], "lines": r["lines"],
+                        "svg": os.path.relpath(r["svg"], p.root) if r["svg"] else None, "size": r["size"]}
+            if kind == "enclosure":
+                from tw import enclosure
+                box = {k: float(body[k]) for k in ("w", "l", "h") if body.get(k)}
+                if len(box) < 3:
+                    raise ValueError("the box's inside: width, length and height in mm")
+                opts = {k: float(body[k]) for k in ("standoff", "gap", "lid") if body.get(k) is not None}
+                txt, r = enclosure.scad(Context(p.tw, offline=True), box, **opts)
+                d = os.path.join(p.tw.build, "enclosure")
+                os.makedirs(d, exist_ok=True)
+                from tw.drawings import fname
+                scad = os.path.join(d, f"{fname(p.tw)}-enclosure.scad")
+                open(scad, "w").write(txt)
+                files = [os.path.relpath(scad, p.root)]
+                if body.get("step"):
+                    from tw.outputs import Outputs
+                    o = Outputs(p.tw)
+                    o.step()
+                    st = [f for f in os.listdir(o.fab) if f.endswith(".step")]
+                    files += [os.path.relpath(os.path.join(o.fab, f), p.root) for f in st]
+                p.cfg["enclosure"] = {**box, **opts}
+                p.save()
+                return {**r, "files": files}
+            if kind == "testpoints":
+                from tw import testpoints
+                p.cfg.setdefault("make", {})["tp_side"] = "F" if body.get("side") == "F" else "B"
+                p.save()
+                return testpoints.plan(Context(p.tw, offline=True), p.cfg["make"]["tp_side"])
+            raise LookupError(kind)
+        try:
+            res = await asyncio.to_thread(work)
+        except LookupError:
+            return err("no such thing to make", 404)
+        except ValueError as e:
+            return err(str(e), 422)
+        rt.user_changes.append(f"make ({kind}, by the user): " + "; ".join((res.get("lines") or [])[:2]))
+        return jresp(res)
+
+    @routes.get("/api/blocks")
+    async def blocks_list(request):
+        from . import blocks
+        return jresp({"items": blocks.items()})
+
+    @routes.get("/api/blocks/{bid}")
+    async def blocks_get(request):
+        from . import blocks
+        try:
+            b = blocks.get(request.match_info["bid"])
+        except KeyError:
+            return err("no such block", 404)
+        return jresp({**b, "text": blocks.text(b)})
+
+    @routes.delete("/api/blocks/{bid}")
+    async def blocks_delete(request):
+        from . import blocks
+        try:
+            blocks.remove(request.match_info["bid"])
+        except KeyError:
+            return err("no such block", 404)
+        return jresp({"ok": True})
+
+    @routes.post("/api/projects/{pid}/blocks")
+    async def blocks_save(request):
+        """{name, description, refs}: save those parts of this design as a block."""
+        from . import blocks
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            b = await asyncio.to_thread(blocks.save, rt.p.reload(), body.get("refs") or [], body.get("name"), body.get("description") or "")
+        except ValueError as e:
+            return err(str(e))
+        return jresp({"ok": True, "id": b["id"], "parts": len(b["parts"]), "ports": [x["name"] for x in b["ports"]]})
+
     @routes.get("/api/projects/{pid}/sims")
     async def sims_list(request):
         """The simulations kept in docs/sim (Claude's simulate tool): each one's probes, results, pass criterion and
