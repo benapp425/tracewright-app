@@ -283,7 +283,7 @@ export class ProjectsPage {
         h("div.field", h("label", "Name"), name),
         h("div.field", h("label", "Description"), brief, h("div.hint", "Claude asks about anything that's missing."), adv),
         h("div.opts", { style: { marginBottom: "16px" } },
-          h("span.small.muted", "Layers"), seg([[2, "2"], [4, "4"], [6, "6"]], () => layers, (v) => layers = v),
+          h("span.small.muted", "Layers"), seg([2, 4, 6, 8, 10, 12].map((n) => [n, String(n)]), () => layers, (v) => layers = v),
           h("span.small.muted", { style: { marginLeft: "6px" } }, "Fab"), seg([["jlcpcb", "JLCPCB"], ["pcbway", "PCBWay"], ["oshpark", "OSH Park"]], () => fab, (v) => fab = v),
           h("label.row.small", { style: { marginLeft: "6px", cursor: "pointer" } }, asw, "Assembly")),
         h("div.field", h("label", "Workflow"), modes),

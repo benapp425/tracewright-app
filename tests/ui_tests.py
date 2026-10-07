@@ -152,6 +152,21 @@ async def home_lists_the_demo(t):
 
 
 @test
+async def new_project_offers_every_layer_count(t):
+    # every layer count the toolkit can build a stack-up for, offered when a project starts (it stopped at 6 in 1.1.0)
+    sys.path.insert(0, os.path.join(ROOT, "tracewright", "toolkit"))
+    from tw import stackup
+    await t.page.goto(t.s.url)
+    new = "[...document.querySelectorAll('.page-head button')].find((b) => b.textContent.trim() === 'New project')"
+    await t.page.wait(f"!!{new}", 30)
+    await t.page.js(f"{new}.click(); 1")
+    got = await t.page.wait("(() => { const s = document.querySelector('.modal .opts .seg'); "
+                            "return s && [...s.querySelectorAll('button')].map((b) => b.textContent); })()", 10)
+    check(got == [str(n) for n in stackup.COUNTS], f"layer choices {got}; the toolkit builds {list(stackup.COUNTS)}")
+    await t.page.js("[...document.querySelectorAll('.modal button')].find((b) => b.textContent.trim() === 'Cancel').click(); 1")
+
+
+@test
 async def home_draws_at_once_while_the_list_loads(t):
     # no saved list: placeholder cards while the server's list is on its way, then the projects
     await t.page.js("localStorage.removeItem('tw.projects'); 1")
