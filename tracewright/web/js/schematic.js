@@ -1,6 +1,6 @@
 // The live schematic: KiCad's own plot of each sheet (SVG), with clickable symbols over it, find,
 // and the review flags.
-import { h, clear, api, toast, menu, confirmDialog, modal } from "./util.js";
+import { h, clear, api, toast, menu, confirmDialog, modal, promptDialog, popover } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
 import { renameLabel, schStep } from "./schedit.js";
@@ -42,12 +42,15 @@ export class SchematicView {
       style: { display: "none" } });
     this.styleSep = h("div.tsep", { style: { display: "none" } });
     this.hudTc = h("div.hud.tc");
+    this.notes = []; this.showNotes = localStorage.getItem("tw.sch.notes") !== "0";
+    this.notesBtn = h("button.tbtn" + (this.showNotes ? ".on" : ""), { onclick: () => this.toggleNotes(), "data-tip": "Design notes: the reasoning beside each part" },
+      icon("message-square", 15), this.notesCount = h("span.tcount", ""));
     this.undoBtn = h("button.tbtn", { onclick: () => schStep(this.ws, true), "data-tip": "Undo", "data-kbd": "mod+z", disabled: true }, icon("undo-2", 15));
     this.redoBtn = h("button.tbtn", { onclick: () => schStep(this.ws, false), "data-tip": "Redo", "data-kbd": "mod+shift+z", disabled: true }, icon("redo-2", 15));
     this.el.appendChild(h("div.viewer.paper", this.svg,
       h("div.hud.tl", this.tabs),
       h("div.hud.tr", h("div.hudbox", this.styleBtn, this.styleSep, h("div.findbox", icon("search", 13), this.findIn, this.findRes), h("div.tsep"),
-        this.undoBtn, this.redoBtn, h("div.tsep"), this.flagBtn, h("div.tsep"),
+        this.undoBtn, this.redoBtn, h("div.tsep"), this.notesBtn, this.flagBtn, h("div.tsep"),
         h("button.tbtn", { "data-tip": "Zoom out", onclick: () => this.zoom(1.4) }, icon("zoom-out", 15)),
         h("button.tbtn", { "data-tip": "Zoom in", onclick: () => this.zoom(1 / 1.4) }, icon("zoom-in", 15)),
         h("button.tbtn", { "data-tip": "Fit the sheet", "data-kbd": "f", onclick: () => this.fit() }, icon("scan", 15)))),
@@ -111,7 +114,39 @@ export class SchematicView {
     const m = 25;
     this.setVB(x0 - m, y0 - m, x1 - x0 + 2 * m, y1 - y0 + 2 * m, true);
   }
-  reload() { this.loadHistory(); if (!this.el.classList.contains("on")) { this.stale = true; return; } this.load(true); }
+  reload() { this.loadHistory(); this.loadNotes(); if (!this.el.classList.contains("on")) { this.stale = true; return; } this.load(true); }
+
+  // ------------------------------------------------------------------ design notes: the reasoning, beside what it explains
+  async loadNotes() {
+    try { this.notes = (await api(`/api/projects/${encodeURIComponent(this.pid)}/schematic/notes`)).notes || []; } catch { return; }
+    if (this.sheets.length) this.drawOverlay();
+  }
+  toggleNotes() {
+    this.showNotes = !this.showNotes;
+    localStorage.setItem("tw.sch.notes", this.showNotes ? "1" : "0");
+    this.notesBtn.classList.toggle("on", this.showNotes);
+    this.drawOverlay();
+  }
+  noteText(n) {
+    const a = n.anchor || {}, on = a.ref ? a.ref + (a.pin ? ` pin ${a.pin}` : "") : `net ${a.net}`;
+    return `<b>${escH(on)}</b>${n.short ? ` · ${escH(n.short)}` : ""}<br>${escH(n.why || "")}<br><span class="k">${n.by === "user" ? "your note" : "Claude's note"}</span>`;
+  }
+  openNote(n, anchorEl) {
+    const a = n.anchor || {};
+    const rm = n.by === "user" ? h("button.btn.sm", { onclick: async () => {
+      try { await api(`/api/projects/${encodeURIComponent(this.pid)}/schematic/notes`, { body: { action: "remove", id: n.id } }); pop.close(); this.loadNotes(); }
+      catch (e) { toast(e.message, "error"); }
+    } }, "Remove") : null;
+    const pop = popover(anchorEl, h("div.snote", h("div.snote-h", icon("message-square", 13), h("b", a.ref ? a.ref + (a.pin ? ` pin ${a.pin}` : "") : `net ${a.net}`),
+      h("span.snote-by", n.by === "user" ? "your note" : "Claude's note")), n.short ? h("div.snote-s", n.short) : null, h("div.snote-w", n.why || ""),
+      rm ? h("div.snote-acts", rm) : null), { cls: "snote-pop" });
+  }
+  async addNote(refs) {
+    const text = await promptDialog({ title: `A note on ${refs[0]}`, label: "The reasoning (kept off the sheet; Claude reads it)", multiline: true, ok: "Add note" });
+    if (!text || !text.trim()) return;
+    try { await api(`/api/projects/${encodeURIComponent(this.pid)}/schematic/notes`, { body: { action: "add", anchor: { ref: refs[0] }, why: text.trim() } }); this.loadNotes(); }
+    catch (e) { toast(e.message, "error"); }
+  }
 
   // what Undo and Redo would do (the app's schematic edits; schedit.py)
   async loadHistory() {
@@ -141,7 +176,7 @@ export class SchematicView {
       return;
     }
     this.loading.style.display = "none";
-    if (!this._history) this.loadHistory();
+    if (!this._history) { this.loadHistory(); this.loadNotes(); }
     this.version = d.version;
     this.sheets = d.sheets;
     if (!this.cur || !this.sheets.find((s) => s.name_path === this.cur)) this.cur = this.sheets[0].name_path;
@@ -335,6 +370,21 @@ export class SchematicView {
       r.addEventListener("click", (e) => { if (this.flags.active) return; e.stopPropagation(); this.tip.style.display = "none"; renameLabel(this.ws, r, lab, this.cur); });
       this.overlay.appendChild(r);
     }
+    const here = (this.notes || []).filter((n) => n.sheet_path === this.cur && n.x != null);
+    if (this.notesCount) this.notesCount.textContent = here.length ? String(here.length) : "";
+    if (this.showNotes) for (const n of here) {
+      const g = document.createElementNS(NS, "g");
+      g.setAttribute("class", "sch-note" + (n.by === "user" ? " mine" : ""));
+      g.setAttribute("transform", `translate(${n.x + 1.6} ${n.y - 1.6})`);
+      const c = document.createElementNS(NS, "circle"); c.setAttribute("r", 1.5);
+      const t = document.createElementNS(NS, "text"); t.setAttribute("y", 0.6); t.textContent = "i";
+      g.append(c, t);
+      g.style.cursor = "pointer";
+      g.addEventListener("mouseenter", (e) => { if (!this.flags.active) this.showTip(e, null, this.noteText(n)); });
+      g.addEventListener("mouseleave", () => { this.tip.style.display = "none"; });
+      g.addEventListener("click", (e) => { if (this.flags.active) return; e.stopPropagation(); this.tip.style.display = "none"; this.openNote(n, g); });
+      this.overlay.appendChild(g);
+    }
     for (const ch of s.children || []) {
       const r = document.createElementNS(NS, "rect");
       r.setAttribute("x", ch.at[0]); r.setAttribute("y", ch.at[1]); r.setAttribute("width", ch.size[0]); r.setAttribute("height", ch.size[1]);
@@ -378,6 +428,7 @@ export class SchematicView {
         const b = this.selBox();
         if (b) this.flags.create({ x: b[0], y: b[1], region: b, refs });
       } }, icon("flag", 14), h("span", "Flag")),
+      refs.length === 1 ? h("button.tbtn", { "data-tip": "Add a design note to it (the reasoning, kept off the sheet)", onclick: () => this.addNote(refs) }, icon("message-square", 14), h("span", "Note")) : null,
       h("button.tbtn", { onclick: () => { this.ws.show("board"); this.ws.view("board").probe(refs, "schematic", true); }, "data-tip": "Show on the board" }, icon("circuit-board", 14)),
       h("button.tbtn", { onclick: () => { this.ws.show("bom"); this.ws.view("bom").probe(refs, "schematic"); }, "data-tip": "Show in the BOM" }, icon("list", 14)),
       h("button.tbtn", { onclick: () => this.clearSel(), "data-tip": "Clear the selection" }, icon("x", 14)));

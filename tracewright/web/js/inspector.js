@@ -62,10 +62,24 @@ export class Inspector {
       params(info, 4),
       pinsTable(info, 8, (p) => this.goNet(p)),
       findingsLine(info),
+      this.notesBox(info.ref),
       h("div.in-acts",
         h("button.btn.sm.primary", { onclick: () => this.open(info) }, icon("fullscreen", 13), "Open"),
         info.in_schematic ? h("button.btn.sm", { onclick: () => editPart(this.ws, info), "data-tip": "Its value, footprint, part number, LCSC code; fitted or not" }, icon("pencil", 13), "Edit") : null,
         datasheetButton(this.ws, info, "sm"), this.libraryButton(info)));
+  }
+
+  // the part's design notes: the reasoning behind it, kept off the sheet
+  notesBox(ref) {
+    const box = h("div.in-notes", { style: { display: "none" } });
+    api(`/api/projects/${enc(this.pid)}/schematic/notes`).then((r) => {
+      const ns = (r.notes || []).filter((n) => n.anchor && n.anchor.ref === ref);
+      if (!ns.length || !box.isConnected) return;
+      box.style.display = "";
+      box.append(...ns.map((n) => h("div.in-note", icon("message-square", 12),
+        h("div", n.anchor.pin ? h("b", `Pin ${n.anchor.pin}: `) : null, n.short ? h("b", n.short + " ") : null, n.why || ""))));
+    }).catch(() => {});
+    return box;
   }
 
   // keep this part for other projects (My parts)

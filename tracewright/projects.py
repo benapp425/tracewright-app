@@ -394,7 +394,9 @@ class ProjectStore:
                "fab": {"house": options.get("fab_house", config.settings().get("fab_house", "jlcpcb")),
                        "layers": int(options.get("layers", 2)), "assembly": bool(options.get("assembly", True))},
                "checks": {}, "stages": {"brief": {"status": "active", "note": "", "updated": now()}},
-               "run_mode": options.get("run_mode") if options.get("run_mode") in RUN_MODES else "autonomous"}
+               "run_mode": options.get("run_mode") if options.get("run_mode") in RUN_MODES else "autonomous",
+               # sheets joined strictly by sheet pins unless the user picks global labels (the guided start asks)
+               "schematic": {"style": options.get("schematic_style") if options.get("schematic_style") in ("hierarchical", "flat") else "hierarchical"}}
         if options.get("workflow") == "guided":
             cfg["start"] = {"mode": "guided", "phase": "intake", "since": now()}
         scaffold.new_project(root, cfg, brief)

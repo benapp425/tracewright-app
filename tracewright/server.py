@@ -1207,6 +1207,56 @@ def make_app():
             return jresp({"empty": True})
         return jresp(js)
 
+    @routes.get("/api/projects/{pid}/schematic/notes")
+    async def sch_notes_get(request):
+        """The design notes (tw/sch/notes.py) with where each sits on the sheets: {notes: [{id, anchor, short, why, by,
+        sheet_path, x, y}]} -- a part's at its top-right corner, a pin's at its end, a net's at its first label."""
+        from tw.sch import notes as dn
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_sch():
+            return jresp({"notes": []})
+        js = await asyncio.to_thread(rt.schematic_json)
+        out = []
+        for n in await asyncio.to_thread(dn.load, rt.p.tw):
+            a, placed = n["anchor"], None
+            for sh in js["sheets"]:
+                if a.get("ref"):
+                    sym = next((y for y in sh["symbols"] if y["ref"] == a["ref"]), None)
+                    if sym:
+                        pin = next((q for q in sym["pins"] if str(q[0]) == a.get("pin")), None) if a.get("pin") else None
+                        placed = (sh["name_path"], pin[3], pin[4]) if pin else (sh["name_path"], sym["bbox"][2], sym["bbox"][1])
+                        break
+                elif a.get("net"):
+                    lab = next((l for l in sh["labels"] if l["text"] == a["net"]), None)
+                    if lab:
+                        placed = (sh["name_path"], lab["x"], lab["y"])
+                        break
+            out.append({**n, **({"sheet_path": placed[0], "x": placed[1], "y": placed[2]} if placed else {})})
+        return jresp({"notes": out})
+
+    @routes.post("/api/projects/{pid}/schematic/notes")
+    async def sch_notes_post(request):
+        """The user's own design note: {action: add, anchor: {ref, pin?} | {net}, why} | {action: remove, id}."""
+        from tw.sch import notes as dn
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        try:
+            if body.get("action") == "remove":
+                await asyncio.to_thread(dn.remove, rt.p.tw, str(body.get("id") or ""))
+                rt.user_changes.append(f"design notes: the user removed note {body.get('id')}")
+                return jresp({"ok": True})
+            text = str(body.get("why") or "").strip()
+            if not text:
+                return err("the note is empty")
+            n = await asyncio.to_thread(dn.add, rt.p.tw, body.get("anchor") or {}, text, "", "", "user")
+        except (ValueError, KeyError) as e:
+            return err(str(e).strip("'"))
+        a = n["anchor"]
+        rt.user_changes.append(f"design notes: the user noted on {a.get('ref') or 'net ' + a.get('net', '')}"
+                               f"{' pin ' + a['pin'] if a.get('pin') else ''}: {text[:200]}")
+        rt.hub.emit("schematic.notes")
+        return jresp(n)
+
     @routes.post("/api/projects/{pid}/schematic/edit")
     async def schematic_edit(request):
         """An edit made in the schematic view: {ops, label} (schedit.py: a part's fields, its DNP / BOM / board flags, a

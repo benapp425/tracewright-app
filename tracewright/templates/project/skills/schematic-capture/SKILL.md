@@ -18,11 +18,20 @@ description: Draw or change the schematic - generate it with tw.sch for new desi
 - Alone in a group: `g.led("+3V3", "R1k", "LED_R")`; a divider: `g.divider("VBAT", "VBAT_SENSE", "R100k", "R33k",
   cap="C100n", kind="analog")` (rail, resistor, the tap labelled, resistor, ground; the filter capacitor beside);
   notes: `g.note("C2 22u keeps the LDO stable.", near="C2")`.
+- Notes come in two layers. On the sheet: one plain line an engineer reads at a glance, beside the part it is about:
+  `g.note("Boot straps: IO2, IO8 high", near=r202, why="IO2 must be high at reset (ESP32-C3 data sheet ch. 4); IO8 ...")`.
+  The reasoning, numbers and data sheet references go in `why=` (or `g.why(part, text)` alone): the design notes,
+  kept off the sheet, shown in the app beside the part. No paragraphs and no chapter references on the sheet. For a
+  schematic that is not script-drawn, the `notes` tool adds them.
+- Draw support parts at the pin they serve: `g.pull(u, "EN", "R10k", "+3V3", net="EN", cap="C1u")` for an RC on an
+  enable, `decouple` for supply pins, `series` for line parts. Give every connector pin's net its signal's name, and
+  every sheet its title.
 - `p.layout()` per page, then `d.write(hw)` and `tw.sch.finish(project)`: it reports `connections` ("as asked", or
   what KiCad's netlist does differently -- fix those before anything else), `crowded` (patterns drawn aside
   because there was no room at the pin: give the group more room or split it) and `plot` (the sheets as KiCad
   plots them: every place text overlaps text, a wire, a symbol or a block border, read from the strokes -- fix each
-  one, it is what the user will see). The engine sizes text with KiCad's own glyph widths (tw.font), so what it
+  one, it is what the user will see), `notes` (notes to rewrite: too long, or not beside a part) and `critic` (notes
+  far from their parts, support parts drawn away from their pin, connector pins without names, sheets without titles). The engine sizes text with KiCad's own glyph widths (tw.font), so what it
   places clear is clear on the plot. Signals leaving a group get labels; signals on several sheets get global
   labels, redrawn in the project's style.
 

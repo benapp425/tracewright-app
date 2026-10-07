@@ -2541,6 +2541,96 @@ def schematic_laid_out_by_rule():
 
 
 @test(needs=("kicad",))
+def schematic_notes_in_two_layers():
+    """Comments in two layers: a short line on the sheet beside its part, the reasoning in the design notes (tied to the
+    part, kept off the sheet, shown in the app beside it); a long note, or one with no part, is reported back; an RC on a
+    pin is drawn at the pin; finish() reports the critic; new boards are joined by sheet pins; the notes API and tool."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools
+    from tw.sch import Design, finish, notes as dn
+    from tw.sch.auto import Page
+    from tw.examples.demo_board import catalog
+    from tw.netlist import Netlist
+    import math
+    cat = catalog()
+    root = os.path.join(TMP, "notes2")
+    hw = os.path.join(root, "hardware", "n")
+    os.makedirs(hw)
+    json.dump({"name": "N", "kicad_project": "hardware/n/n.kicad_pro"}, open(os.path.join(root, "tracewright.json"), "w"))
+    d = Design("n", title="Notes", company="t")
+    r = d.root("Cover", paper="A4")
+    sh = d.sheet("MCU", "mcu.kicad_sch", "MCU", paper="A4")
+    r.subsheet(sh, (38.1, 40.64), (50.8, 25.4), [])
+    pg = Page(d, sh, base=100, catalog=cat)
+    g = pg.group("PROCESSOR")
+    u = g.part("MCU", "U", ref="U101")
+    g.decouple(u, "8", ["C100n"], "+3V3")
+    g.power(u, "4", "GND")
+    rr, cc = g.pull(u, "1", "R10k", "+3V3", net="RESET", ref="R101", cap="C10u", cap_ref="C150")
+    g.nc(u, ["2", "3", "5", "6", "7"])
+    g.note("Reset RC: about 10 ms", near=rr, why="10k and 1u hold the MCU in reset for about 10 ms while the supply settles.")
+    g.why("net:RESET", "A programmer pulls RESET low to flash the part.")
+    g.note("This note goes on and on about why the reset network was chosen and what else might have worked instead")
+    pg.layout()
+    d.write(hw)
+    open(os.path.join(hw, "n.kicad_pro"), "w").write("{}")
+    res = finish(env.Project(root))
+    assert res.get("connections") == "as asked", res.get("connections")
+    assert any("no part to sit beside" in x for x in res["notes"]) and any("long note" in x for x in res["notes"]), res.get("notes")
+    assert "critic" in res and isinstance(res["critic"].get("count"), int), res.get("critic")
+    nl = Netlist.load(os.path.join(env.Project(root).build, "n.net"))
+    assert nl.net_of("C150", "1") == nl.net_of("U101", "1") == nl.net_of("R101", "2") and nl.net_of("C150", "2") == "GND"
+    ns = dn.load(hw)
+    by = {(n["anchor"].get("ref") or "net:" + n["anchor"].get("net", "")): n for n in ns}
+    assert by["R101"]["by"] == "script" and by["R101"]["short"] == "Reset RC: about 10 ms" and "10 ms" in by["R101"]["why"], ns
+    assert "net:RESET" in by and by["net:RESET"]["why"].startswith("A programmer"), ns
+    from tw.schematic import Hierarchy
+    h = Hierarchy.load(env.Project(root).sch)
+    syms = {s_.ref: s_ for s_ in next(x for x in h.sheets if x.filename == "mcu.kicad_sch").symbols}
+    upin = next((x, y) for n_, _, _, x, y in syms["U101"].pins if str(n_) == "1")
+    cpin = min((math.hypot(x - upin[0], y - upin[1]) for _, _, _, x, y in syms["C150"].pins))
+    assert cpin < 25, f"the RC's capacitor is {cpin:.0f} mm from the pin it serves"
+    # running the script again keeps notes by others, rewrites its own
+    dn.add(hw, {"ref": "U101"}, "Keep it away from the heater.", by="user")
+    d.write(hw)
+    assert sum(1 for n in dn.load(hw) if n["by"] == "user") == 1 and sum(1 for n in dn.load(hw) if n["by"] == "script") == 2
+    # new boards are joined by sheet pins unless the user picks flat
+    p = ProjectStore().create("Style default", "", {"layers": 2})
+    assert p.cfg["schematic"]["style"] == "hierarchical"
+    # the notes in the app: placed beside their part; the user's own; Claude's notes tool
+    pid = ProjectStore().import_copy(FIXTURE, "Notes demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = await T["notes"]({"action": "add", "ref": "R4", "why": "Holds the ATtiny85 out of reset when nothing drives it."})
+            assert not out.get("is_error"), out
+            out = await T["notes"]({"action": "add", "ref": "R4", "why": "short"})
+            assert out.get("is_error"), out
+            r_ = await c.post(f"/api/projects/{pid}/schematic/notes", json={"action": "add", "anchor": {"ref": "U2", "pin": "1"}, "why": "Mind the programmer's pull."})
+            mine = await r_.json()
+            assert r_.status == 200 and mine["by"] == "user", mine
+            got = (await (await c.get(f"/api/projects/{pid}/schematic/notes")).json())["notes"]
+            r4 = next(n for n in got if n["anchor"].get("ref") == "R4")
+            u2 = next(n for n in got if n["anchor"].get("ref") == "U2")
+            assert r4["sheet_path"] and r4["x"] is not None and u2["x"] is not None, got
+            assert any("noted on U2 pin 1" in x for x in rt.user_changes), rt.user_changes
+            text = (await T["notes"]({"action": "list", "ref": "R4"}))["content"][0]["text"]
+            assert "Holds the ATtiny85" in text, text
+            from tw import design
+            assert "note: Holds the ATtiny85" in design.text(rt.p.tw, ref="R4")
+            r_ = await c.post(f"/api/projects/{pid}/schematic/notes", json={"action": "remove", "id": mine["id"]})
+            assert r_.status == 200 and not [n for n in dn.load(rt.p.tw) if n["by"] == "user"]
+            rt.stop()
+    asyncio.run(go())
+
+
+@test(needs=("kicad",))
 def net_kinds_part_inspector_and_schematic_conventions():
     """Every net gets a kind by the checks' rules (ground, a supply with its voltage, a differential pair
     with its partner, a clock, a signal); the inspector's part info has the pins with their nets and

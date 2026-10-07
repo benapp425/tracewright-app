@@ -121,7 +121,7 @@ GROUPS = ["Requirements", "KiCad", "Schematic", "Parts & BOM", "Placement", "Rou
 def load_all():
     """Import every check module (registration happens on import)."""
     from . import kicad_reports, schematic_checks, bom, placement, routing, power, signal, dfm, lessons, cpl, assembly  # noqa: F401
-    from . import integrity, power_layout, si_layout, layout_quality, nets, requirements  # noqa: F401
+    from . import integrity, power_layout, si_layout, layout_quality, nets, requirements, schematic_notes  # noqa: F401
     return REGISTRY
 
 

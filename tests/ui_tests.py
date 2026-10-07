@@ -1311,6 +1311,36 @@ async def setup_card_says_what_cannot_work(t):
         os.remove(cvp)
 
 
+@test
+async def design_notes_beside_parts(t):
+    """A design note (the reasoning, kept off the sheet) shows as a marker beside its part on the schematic: hover
+    shows it, a click opens it; the toolbar hides them; the part's card lists it."""
+    root = t.s.demo["root"]
+    path = os.path.join(root, "hardware", "demo", "design-notes.json")
+    with open(path, "w") as f:
+        json.dump({"notes": [{"id": "n1", "anchor": {"ref": "R4"}, "short": "Reset pull-up", "by": "claude",
+                              "why": "Holds the ATtiny85 out of reset when nothing drives RESET; the programmer pulls it low."}]}, f)
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.ws)", 30)
+        await t.page.js(f"{BV}.ws.show('schematic'); 1")
+        SV = f"{BV}.ws.views.schematic"
+        await t.page.wait(f"{SV} && {SV}.sheets && {SV}.sheets.length > 0", 20)
+        mcu = await t.page.js(f"{SV}.sheets.find((s) => s.symbols.some((y) => y.ref === 'R4')).name_path")
+        await t.page.js(f"{SV}.showSheet({json.dumps(mcu)}); 1")
+        await t.page.wait("document.querySelector('.sch-note')", 10)
+        await t.page.js("document.querySelector('.sch-note').dispatchEvent(new MouseEvent('click', { bubbles: true })); 1")
+        await t.page.wait("document.querySelector('.snote-pop') && document.querySelector('.snote-pop').innerText.includes('Holds the ATtiny85')", 5)
+        await t.shot("design-note")
+        await t.page.key("Escape")
+        await t.page.js(f"{SV}.toggleNotes(); 1")
+        check(await t.page.js("document.querySelectorAll('.sch-note').length") == 0, "the toggle does not hide the notes")
+        await t.page.js(f"{SV}.toggleNotes(); {SV}.toggle('R4'); 1")
+        await t.page.wait("document.querySelector('.inspector .in-note') && document.querySelector('.inspector .in-note').innerText.includes('Holds the ATtiny85')", 15)
+    finally:
+        os.remove(path)
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

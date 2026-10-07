@@ -355,7 +355,10 @@ class Design:
                 pg.emitted = True
             with open(os.path.join(hw_dir, ".tracewright-nets.json"), "w") as f:
                 json.dump({"nets": auto.intended(self), "crowded": [c for pg in self.pages for c in pg.crowded],
+                           "notes": [c for pg in self.pages for c in getattr(pg, "note_issues", [])],
                            "attrs": self.net_attrs}, f, indent=1)
+            from . import notes as design_notes          # the reasoning behind the sheets, kept beside them
+            design_notes.replace_script(hw_dir, [n for pg in self.pages for n in getattr(pg, "design_notes", [])])
         elif self.net_attrs:                           # hand-placed sheets: only what the nets are
             with open(os.path.join(hw_dir, ".tracewright-nets.json"), "w") as f:
                 json.dump({"attrs": self.net_attrs}, f, indent=1)

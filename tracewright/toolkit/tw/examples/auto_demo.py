@@ -34,13 +34,17 @@ def schematic(hw_dir, name="demo", libname="Demo_USB-C_ATtiny"):
     usb.net(j1, ["A6", "B6"], "USB_D_P")
     usb.nc(j1, ["A8", "B8"])
     usb.power(j1, ["A1", "SH"], "GND")
-    usb.note("Rd 5.1k on each CC pin: a USB-C source turns VBUS on.", near="R1")
+    usb.note("Rd 5k1 on CC1/CC2: 5 V sink", near="R1",
+             why="A USB-C source only turns VBUS on when it sees Rd (5.1 kΩ to ground) on a CC pin; one on each pin "
+                 "works whichever way the plug goes in (USB Type-C spec, 4.5.1.2).")
     reg = p.group("3.3 V REGULATOR")
     u1 = reg.part("LDO", "U", ref="U1")
     reg.decouple(u1, "3", ["C10u"], "+5V", refs=["C1"])
     reg.decouple(u1, "2", ["C22u", "C100n"], "+3V3", refs=["C2", "C3"])
     reg.power(u1, "1", "GND")
-    reg.note("C2 22u at the output keeps the AMS1117 stable.", near=u1)
+    reg.note("C2 22u keeps the LDO stable", near=u1,
+             why="The AMS1117 needs at least 22 µF with some ESR at its output to stay stable (data sheet, Stability); "
+                 "a tantalum or an X5R with a small series resistor.")
     led = p.group("POWER LED")
     led.led("+3V3", "R1k", "LED_R", refs=("R3", "D1"))
     p.layout()

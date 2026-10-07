@@ -25,5 +25,8 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
   divider or sense amplifier's output, an RC delay, an LED's current, a supply's start-up), show it with the
   `simulate` tool (KiCad's ngspice): it keeps the netlist and plot in docs/sim and records the result as the
   requirement's evidence. The regulators' heat (power.thermal) goes with the temperature requirements by itself.
+- Schematic notes: one plain line on the sheet beside the part it explains; the reasoning goes in the design notes
+  (`why=` in the schematic script, or the `notes` tool), which the app shows beside the part. Sheets are joined
+  hierarchically (sheet pins) unless the project says flat (tracewright.json schematic.style).
 - The copper layers (2 to 10) are a plan you make with the `stackup` tool -- signal layers and their routing
   directions, planes and their nets, the fab's build -- before the board is made; the router follows it.

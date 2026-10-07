@@ -260,6 +260,7 @@ export class Workspace {
     ev.on("annotations", (e) => this.viewIf("board", (v) => v.setAnnotations(e.items)));
     ev.on("live.selection", (e) => { this.viewIf("board", (v) => v.kicadSelection(e.items)); this.chat.setKicadSelection(e.items); });
     ev.on("schematic.changed", () => { this.viewIf("schematic", (v) => v.reload()); this.inspector.invalidate(); });
+    ev.on("schematic.notes", () => { this.viewIf("schematic", (v) => v.loadNotes()); this.inspector.invalidate(); });
     ev.on("checks.start", () => this.renderChecks(null, true));
     ev.on("checks.done", (e) => {
       if (e.error) { toast("Checks failed: " + e.error, "error"); this.renderChecks(this.p.checks); return; }

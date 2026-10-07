@@ -35,6 +35,8 @@ def finish(project, erc=True, plot=True):
         out["connections"] = auto.check_netlist(Netlist.load(net), d.get("nets") or {}) or "as asked"
         if d.get("crowded"):
             out["crowded"] = d["crowded"]
+        if d.get("notes"):                              # notes to rewrite: long, or not beside a part
+            out["notes"] = d["notes"]
     if erc:
         d = kicad.erc(project.sch, os.path.join(project.build, "erc.json"))
         v = [x for s in d.get("sheets", []) for x in s.get("violations", [])]
@@ -44,7 +46,28 @@ def finish(project, erc=True, plot=True):
         out["erc"] = {"violations": len(v), "by_type": by}
     if plot:
         out["plot"] = plot_check(project)
+        out["critic"] = critic(project)
     return out
+
+
+def critic(project):
+    """The sheets read as a person would: notes short and beside their parts, support parts at the pin they serve,
+    connector pins named, titles filled (the sch.notes, sch.support and sch.labels checks). {count, items}."""
+    try:
+        from ..checks import load_all
+        from ..checks.context import Context
+        ctx = Context(project, offline=True)
+        items = []
+        for c in load_all():
+            if c.id in ("sch.notes", "sch.support", "sch.labels"):
+                try:
+                    items += [f"{f.message}" for f in c.fn(ctx) if f.severity in ("error", "warning")]
+                except Exception as e:                  # NotApplicable and the like: nothing to say
+                    if type(e).__name__ != "NotApplicable":
+                        items.append(f"{c.id}: {type(e).__name__}: {e}"[:160])
+        return {"count": len(items), "items": items[:15]}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"[:200]}
 
 
 def plot_check(project):

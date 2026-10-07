@@ -87,6 +87,7 @@ export function stepText(name, inp) {
       parts: "Updated the parts list" }[inp.section] || "Updated the canvas"];
     case "ready_to_start": return ["Ready to start"];
     case "outputs": return ["Generated fab outputs"];
+    case "notes": return [inp.action === "add" ? `Noted the reasoning on ${inp.ref || inp.net || ""}${inp.pin ? " pin " + inp.pin : ""}` : inp.action === "remove" ? "Removed a design note" : "Read the design notes", inp.action === "add" ? inp.why : ""];
     case "design": return [inp.ref ? `Read ${inp.ref}'s pins` : inp.net ? `Read the net ${inp.net}` : "Read the design"];
     case "stackup": return [{ plan: `Planned the stack-up${inp.layers ? `: ${inp.layers} layers` : ""}`, apply: "Put the stack-up on the board" }[inp.action] || "Looked at the stack-up", inp.action === "plan" ? inp.why : ""];
     case "simulate": return [`Simulated ${inp.label || inp.name || "a circuit"}`, arr(inp.probes).join(", ")];

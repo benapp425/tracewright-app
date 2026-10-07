@@ -320,12 +320,15 @@ class Group:
         self._ask("decouple", inst, pin, caps=list(caps), rail=rail, refs=refs)
         return refs
 
-    def pull(self, inst, pin, key, to, net=None, ref=None):
+    def pull(self, inst, pin, key, to, net=None, ref=None, cap=None, cap_ref=None, gnd="GND"):
         """A pull-up (to a rail) or pull-down (to ground) on the pin's line; the line carries `net`'s label
-        beyond it."""
+        beyond it. cap: a capacitor from the same line to ground, drawn with it at the pin (an enable's RC delay,
+        a reset's filter): pull(u, "EN", "R10k", "+3V3", net="EN", cap="C1u"). Returns the resistor's reference,
+        or (resistor, capacitor) with a cap."""
         ref = ref or self.page.ref("R")
-        self._ask("pull", inst, pin, key=key, to=to, net=net, ref=ref)
-        return ref
+        cap_ref = (cap_ref or self.page.ref("C")) if cap else None
+        self._ask("pull", inst, pin, key=key, to=to, net=net, ref=ref, cap=cap, cap_ref=cap_ref, gnd=gnd)
+        return (ref, cap_ref) if cap else ref
 
     def series(self, inst, pin, key, net, ref=None, before=None):
         """A part in line with the pin (series resistor, ferrite): a stub, the part along the pin's
@@ -355,9 +358,18 @@ class Group:
         self.later.append(("led", rail, rkey, dkey, refs, gnd))
         return refs
 
-    def note(self, text, near=None):
-        """A short note beside what it explains (a reference, or a part), wherever it lands clear."""
-        self.later.append(("note", text, near.ref if hasattr(near, "ref") else near))
+    def note(self, text, near=None, why=None, pin=None):
+        """A short note on the sheet, beside what it explains -- near: the part (or its reference; pin: one of its pins)
+        -- in plain words an engineer reads at a glance: "Boot straps: IO2, IO8 high", "Vout = 0.8 V x (1 + R1/R2)".
+        why: the reasoning, numbers and source, kept off the sheet in the design notes (the app shows it on hover)."""
+        self.later.append(("note", text, near.ref if hasattr(near, "ref") else near, why, pin))
+
+    def why(self, near, text, pin=None):
+        """The reasoning behind a part, pin or net ("net:EN"), kept off the sheet in the design notes."""
+        from .notes import anchor_of
+        a = anchor_of(near, pin)
+        if a:
+            self.page.design_notes.append({"anchor": a, "short": "", "why": str(text), "sheet": self.page.sheet.filename})
 
     # ------------------------------------------------------------------ drawing the patterns
     def _order(self, rq):
@@ -714,15 +726,18 @@ class Group:
 
     def _draw_pull(self, rq):
         inst, pin, key, to, net, ref = rq["inst"], rq["pin"], rq["key"], rq["to"], rq["net"], rq["ref"]
+        cap, cap_ref, gnd = rq.get("cap"), rq.get("cap_ref"), rq.get("gnd") or "GND"
         p, d = inst.pin(pin), inst.pin_dir(pin)
         down = is_ground(to)
         name = net or f"{inst.ref}_{pin}"
         self._connect(name, inst.ref, pin)
         for reach in [k * P for k in range(2, 17)]:
-            for tail in (P, 2 * P):
+            for tail in ((P, 2 * P) if not cap else (3 * P, 4 * P)):
                 t = _add(p, d, reach)
                 end = _add(t, d, tail)
                 sides = [None] if d[1] == 0 else [RIGHT, LEFT]
+                if cap and d[1] != 0:
+                    sides = []                             # an RC on a vertical pin: drawn below, beside the part
                 for side in sides:
                     if d[1] == 0:
                         r = self._two(key, ref, t, "down") if down else self._two(key, ref, (t[0], snap(t[1] - 7.62)), "down")
@@ -737,6 +752,11 @@ class Group:
                     items = self._wire_items([p, end], inst.ref) + self._part_items(r) + self._power_items(to, rp)
                     for w in extra:
                         items += self._wire_items(w, ref)
+                    if cap:                                # the capacitor from the same line down to ground
+                        ct = t if not down else _add(t, d, 2 * P)
+                        c = self._two(cap, cap_ref, ct, "down")
+                        ops += [("part", c), ("power", gnd, c.pin("2"), 0)] + ([("junction", ct)] if ct != t else [])
+                        items += self._part_items(c) + self._power_items(gnd, c.pin("2"))
                     if net:
                         ops.append(("label", name, end, d))
                         items.append(("label", _label_box(name, end, d), None))
@@ -744,13 +764,30 @@ class Group:
                         self._commit(ops, items)
                         self._connect(name, ref, joint)
                         self._connect(to, ref, railp)
+                        if cap:
+                            self._connect(name, cap_ref, "1")
+                            self._connect(gnd, cap_ref, "2")
                         return
-        if d[1] == 0 and self._dogleg_pull(inst, p, d, key, ref, to, net, name):
+        if not cap and d[1] == 0 and self._dogleg_pull(inst, p, d, key, ref, to, net, name):
             return
-        # no room on the line: its label at the pin, the resistor aside with the same label
+        # no room on the line: its label at the pin, the resistor aside with the same label (and its capacitor)
         self._draw_net({"inst": inst, "pin": pin, "name": name, "pins": [pin]}, record=False)
         self._aside_pull(key, ref, to, name)
-        self.page.crowded.append(f"{inst.ref} pin {pin}: {ref} drawn beside the part {getattr(self, 'why', '')}")
+        if cap:
+            self._aside_rc_cap(cap, cap_ref, name, gnd)
+        self.page.crowded.append(f"{inst.ref} pin {pin}: {ref}{' and ' + cap_ref if cap else ''} drawn beside the part {getattr(self, 'why', '')}")
+
+    def _aside_rc_cap(self, key, ref, name, gnd):
+        """An RC's capacitor where there was no room at the pin: from a label of the line down to ground."""
+        def make(x, y):
+            c = self._two(key, ref, (x, y), "down")
+            lab = (x, y)
+            ops = [("part", c), ("power", gnd, c.pin("2"), 0), ("label", name, lab, UP)]
+            items = self._part_items(c) + self._power_items(gnd, c.pin("2")) + [("label", _label_box(name, lab, UP), None)]
+            return ops, items
+        self._commit(*self._free_spot(make))
+        self._connect(name, ref, "1")
+        self._connect(gnd, ref, "2")
 
     def _dogleg_pull(self, inst, p, d, key, ref, to, net, name):
         """Out a little, down (or up) past the other pins' lines, then out to the resistor: the escape a
@@ -1069,7 +1106,7 @@ class Group:
                 self._draw_divider(*item[1:])
         for item in self.later:
             if item[0] == "note":
-                self._draw_note(item[1], item[2])
+                self._draw_note(*item[1:])
         self.later = []
 
     def _draw_led(self, rail, rkey, dkey, refs, gnd):
@@ -1131,9 +1168,26 @@ class Group:
                 return
         raise RuntimeError(f"no room for the divider {r1ref} / {r2ref}")
 
-    def _draw_note(self, text, near):
+    def _draw_note(self, text, near, why=None, pin=None):
+        from .notes import anchor_of
+        lines = str(text).split("\n")
+        if not near:
+            self.page.note_issues.append(f"note with no part to sit beside: \u201c{lines[0][:50]}\u201d (give it near=)")
+        if max(len(l) for l in lines) > 72 or len(lines) > 2:
+            self.page.note_issues.append(f"long note: \u201c{lines[0][:50]}...\u201d -- one plain line on the sheet; the reasoning in why=")
+        if why and near:
+            a = anchor_of(near, pin)
+            if a:
+                self.page.design_notes.append({"anchor": a, "short": str(text), "why": str(why), "sheet": self.page.sheet.filename})
         inst = self.parts.get(near) if isinstance(near, str) else None
-        x0, y0, x1, y1 = inst.bbox() if inst else self.bbox()
+        if inst is not None and pin is not None:            # beside one pin: the note sits at the pin's end
+            try:
+                px, py = inst.pin(str(pin))
+                x0, y0, x1, y1 = px - 1.27, py - 1.27, px + 1.27, py + 1.27
+            except Exception:
+                x0, y0, x1, y1 = inst.bbox()
+        else:
+            x0, y0, x1, y1 = inst.bbox() if inst else self.bbox()
         tb = _text_box(text, (0, 0))
         w, h = tb[2] - tb[0], tb[3] - tb[1]
         spots = [(x0, y1 + 3.81), (x1 + 3.81, y0), (x0 - w - 3.81, y0), (x0, y0 - h - 3.81)]
@@ -1187,6 +1241,8 @@ class Page:
         self.groups = []
         self.nets = {}                   # net -> {(ref, pin)}: what the drawing must connect
         self.crowded = []
+        self.design_notes = []           # the reasoning behind parts, pins and nets, kept off the sheet (notes.py)
+        self.note_issues = []            # notes too long, or with no part to sit beside: told to Claude by finish()
         self._n = {}
         self.placed = None
         if not hasattr(design, "pages"):

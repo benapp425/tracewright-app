@@ -65,6 +65,13 @@ def text(project, ref=None, net=None, pins=8):
         f = p.get("fields") or {}
         out = [f"{ref} {p['value']}  {f.get('MPN') or ''} {f.get('LCSC') or ''}".rstrip(),
                f"  footprint {p['footprint']}  sheet {p.get('sheet') or '/'}  {_where(board, ref)}{'  NOT FITTED' if p.get('dnp') else ''}"]
+        try:
+            from .sch import notes as dn
+            for n_ in dn.for_ref(project, ref):
+                out.append(f"  note{' (pin ' + n_['anchor']['pin'] + ')' if n_['anchor'].get('pin') else ''}: "
+                           f"{n_.get('short') + ' -- ' if n_.get('short') else ''}{n_['why']}")
+        except Exception:
+            pass
         for pin in sorted(nl.pins_of(ref), key=_nat):
             n = nl.pin.get((ref, pin)) or ""
             nm = nl.pin_name(ref, pin)

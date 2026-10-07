@@ -120,7 +120,24 @@ export class GuidedCanvas {
     } }, h("summary", h("span", "Advanced"), sum), h("div.gd-advb"));
     const body = adv.lastChild;
     if (this.advOpen) adv.dispatchEvent(new Event("toggle"));
-    return this.card("list", "Requirements", null, h("div.gd-req", r.items.map((i) => h("div.gd-rq", h("span", i.label), h("b", i.value)))), adv);
+    return this.card("list", "Requirements", null, h("div.gd-req", r.items.map((i) => h("div.gd-rq", h("span", i.label), h("b", i.value)))),
+      this.styleRow(), adv);
+  }
+
+  // how the schematic's sheets will be joined: chosen before there is one (then the Schematic tab switches it)
+  styleRow() {
+    if (this.ws.p && this.ws.p.has_sch) return null;
+    const cur = ((this.ws.p && this.ws.p.schematic) || {}).style || "hierarchical";
+    const pick = async (style) => {
+      try {
+        const s = await api(`/api/projects/${enc(this.pid)}`, { method: "PATCH", body: { schematic: { style } } });
+        this.ws.p = { ...this.ws.p, ...s };
+        this.render();
+      } catch (e) { toast(e.message, "error"); }
+    };
+    return h("div.gd-style", h("span", "Schematic sheets"),
+      h("div.seg", [["hierarchical", "Hierarchical", "Sheet pins only: the top sheet shows what goes where"], ["flat", "Flat", "Global labels join the pages"]]
+        .map(([k, t, tip]) => h("button" + (cur === k ? ".on" : ""), { onclick: () => pick(k), "data-tip": tip }, t))));
   }
 
   // ------------------------------------------------------------------ block diagram

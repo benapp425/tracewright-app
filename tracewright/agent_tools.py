@@ -115,6 +115,42 @@ def tool_list(rt, app):
             return _text("There is no schematic yet.", error=True)
         return _text(await run(design.text, tw, args.get("ref") or None, args.get("net") or None))
 
+    @reg("notes", "Design notes: the reasoning behind a part, one of its pins, or a net, kept off the sheet. The app shows "
+         "each beside what it explains (the user hovers it), and the user adds their own. The sheet keeps one plain line "
+         "an engineer reads at a glance; the why, the numbers and the source go here. action: list (ref?: one part's) | "
+         "add (ref, pin?, or net; why; short?: the sheet's line it goes with) | remove (id). The schematic script's own "
+         "(g.note(..., why=...), g.why(...)) are rewritten each time it runs.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "add", "remove"]}, "ref": {"type": "string"},
+                                           "pin": {"type": "string"}, "net": {"type": "string"}, "why": {"type": "string"},
+                                           "short": {"type": "string"}, "id": {"type": "string"}}, "required": ["action"]})
+    async def notes_t(args):
+        from tw.sch import notes as dn
+        tw = proj()
+        a = args["action"]
+        if a == "list":
+            ns = await run(dn.for_ref, tw, args["ref"]) if args.get("ref") else await run(dn.load, tw)
+            if not ns:
+                return _text("no design notes" + (f" on {args['ref']}" if args.get("ref") else ""))
+            where = lambda x: x.get("ref", "") + (f" pin {x['pin']}" if x.get("pin") else "") if x.get("ref") else "net " + x.get("net", "")
+            return _text("\n".join(f"{n['id']} [{n.get('by')}] {where(n['anchor'])}: {n.get('short') + ' -- ' if n.get('short') else ''}{n['why']}"
+                                   for n in ns))
+        if a == "remove":
+            try:
+                await run(dn.remove, tw, args.get("id") or "")
+            except KeyError:
+                return _text(f"no note {args.get('id')}", error=True)
+            hub.emit("schematic.notes")
+            return _text(f"removed {args.get('id')}")
+        anchor = {"net": args["net"]} if args.get("net") else {"ref": args.get("ref"), "pin": args.get("pin")}
+        if len(str(args.get("why") or "").strip()) < 8:
+            return _text("why: the reasoning, in a sentence or two", error=True)
+        try:
+            n = await run(dn.add, tw, anchor, args["why"], args.get("short") or "", "", "claude")
+        except ValueError as e:
+            return _text(str(e), error=True)
+        hub.emit("schematic.notes")
+        return _text(f"noted {n['id']} on {n['anchor']}")
+
     @reg("board", "Query the board. what: summary | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
          "ref: pads with nets and positions) | nets (net -> pads) | net (one net: pads, tracks, vias, length) | "
          "outline | unrouted (from the last DRC) | zones. Coordinates in mm (KiCad axes, y down). When KiCad has the "

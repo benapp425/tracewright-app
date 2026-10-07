@@ -99,6 +99,14 @@ def plant_text_narration(p):
     _edit(p.sch, lambda t: t.replace("\n\t(sheet\n", "\n" + note + "\t(sheet\n", 1))
 
 
+def plant_long_note(p):
+    # a paragraph on a sheet, far from the part it talks about
+    note = ('\t(text "R4 pulls RESET up so the ATtiny85 runs when nothing drives it; a programmer pulls it low to flash it (datasheet ch. 20)."\n'
+            '\t\t(exclude_from_sim no)\n\t\t(at 200.66 180.34 0)\n\t\t(effects\n\t\t\t(font\n\t\t\t\t(size 1.27 1.27)\n\t\t\t)\n'
+            '\t\t\t(justify left)\n\t\t)\n\t\t(uuid "0badc0de-0000-4000-a000-000000000004")\n\t)\n')
+    _edit(os.path.join(p.hw, "mcu.kicad_sch"), lambda t: t.replace("\n\t(symbol\n", "\n" + note + "\t(symbol\n", 1))
+
+
 def plant_dru(p):
     # one misspelt constraint: KiCad ignores the whole file without a word
     path = os.path.splitext(p.pcb)[0] + ".kicad_dru"
@@ -441,6 +449,24 @@ def mem_regulators(ctx):
     ctx._cache["netlist"] = nl.mutated({("C2", "1"): "unconnected-(C2-Pad1)"})     # the LDO's 22 uF output capacitor gone
 
 
+def mem_support(ctx):
+    # R4, the reset pull-up, drawn 100 mm from U2 pin 1 and joined to it by a label
+    for sh in ctx.hier.sheets:
+        for sym in sh.symbols:
+            if sym.ref == "R4":
+                sym.pins = [(n, nm, t, x + 100.0, y) for n, nm, t, x, y in sym.pins]
+
+
+def mem_labels(ctx):
+    # J2 pin 3 on a net KiCad named, not I2C_SDA
+    nl = ctx.netlist
+    old = nl.pin.get(("J2", "3"))
+    nl.pin[("J2", "3")] = "Net-(J2-Pad3)"
+    if old in nl.nets:
+        nl.nets[old] = [x for x in nl.nets[old] if x != ("J2", "3")]
+    nl.nets["Net-(J2-Pad3)"] = [("J2", "3")]
+
+
 def mem_ldo_heat(ctx):
     ctx.p.cfg.setdefault("checks", {})["currents"] = {"+3V3": 1.2}               # 5 V -> 3.3 V at 1.2 A in a SOT-223
 
@@ -539,6 +565,9 @@ CASES = [
     ("sch.style", "a ground symbol turned upside down", ("file", plant_style), "points up"),
     ("sch.text", "a part count written inside a sheet symbol", ("file", plant_text_in_sheet), "inside the sheet symbol"),
     ("sch.text", "a note explaining how labels work", ("file", plant_text_narration), "how schematics work"),
+    ("sch.notes", "a paragraph about R4, far from it", ("file", plant_long_note), "long note"),
+    ("sch.support", "R4 drawn 100 mm from the pin it pulls up", ("mem", mem_support), "R4 serves U2 pin 1"),
+    ("sch.labels", "J2 pin 3 on a net with no name", ("mem", mem_labels), "J2: 1 pin on nets with no name"),
     ("sch.conventions", "IEC values chosen, a resistor written 5.1k", ("mem", mem_conventions), "writes values"),
     ("sch.nets", "J2 pin 3 on 'I2C_SDA1' instead of I2C_SDA", ("mem", mem_sch_nets), "I2C_SDA1"),
     ("nets.model", "a net declared under a name no net has", ("mem", mem_nets_model), "VCC_OLD"),

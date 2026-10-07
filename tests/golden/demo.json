@@ -271,7 +271,15 @@
    "findings": [],
    "status": "skipped"
   },
+  "sch.labels": {
+   "findings": [],
+   "status": "pass"
+  },
   "sch.nets": {
+   "findings": [],
+   "status": "pass"
+  },
+  "sch.notes": {
    "findings": [],
    "status": "pass"
   },
@@ -286,6 +294,13 @@
   "sch.style": {
    "findings": [],
    "status": "pass"
+  },
+  "sch.support": {
+   "findings": [
+    "support:R1:J1:A5",
+    "support:R4:U2:1"
+   ],
+   "status": "warn"
   },
   "sch.text": {
    "findings": [],
