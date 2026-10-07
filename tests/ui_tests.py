@@ -145,7 +145,8 @@ def check(ok, what):
 @test
 async def home_lists_the_demo(t):
     await t.page.goto(t.s.url)
-    names = await t.page.wait("[...document.querySelectorAll('.pcard')].map((c) => c.textContent).join('|') || null", 30)
+    # the cards of the list, not the placeholders drawn while it loads (empty: they would join to "||")
+    names = await t.page.wait("[...document.querySelectorAll('.pcard:not(.skel)')].map((c) => c.textContent).join('|') || null", 30)
     check("Demo" in names, f"no demo card on the home screen: {names!r}")
     await t.shot("home")
 
