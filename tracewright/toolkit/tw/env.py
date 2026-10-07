@@ -99,12 +99,16 @@ def share_dir(kind):
     return p if os.path.isdir(p) else None
 
 
+class KiCadMissing(RuntimeError):
+    """KiCad (or its Python) is not on this machine: an error the app reports like any other; `tw` prints it and stops."""
+
+
 def require(what="cli"):
     k = kicad()
     if not k.get(what):
         hint = {"cli": "Install KiCad 9 or 10, or set TW_KICAD_CLI to kicad-cli.",
                 "python": "Set TW_KICAD_PYTHON to a Python that can `import pcbnew` (KiCad's bundled Python)."}
-        raise SystemExit(f"KiCad {what} not found. {hint.get(what, '')}")
+        raise KiCadMissing(f"KiCad {what} not found. {hint.get(what, '')}")
     return k[what]
 
 

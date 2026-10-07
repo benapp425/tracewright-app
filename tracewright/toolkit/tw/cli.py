@@ -561,6 +561,9 @@ def main(argv=None):
     except kicad.KiCadError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except env.KiCadMissing as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

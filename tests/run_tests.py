@@ -6034,7 +6034,7 @@ def main():
             fn()
             ok += 1
             print(f"  ok   {fn.__name__}  ({time.time() - t0:.1f} s)", flush=True)
-        except Exception as e:
+        except (Exception, SystemExit) as e:          # SystemExit: a tool that gave up (no KiCad) fails its test, not the run
             fail += 1
             print(f"  FAIL {fn.__name__}: {type(e).__name__}: {e}", flush=True)
             if "-v" in sys.argv:
