@@ -9,8 +9,10 @@ Ops (coordinates in board mm, KiCad axes: y down, angles CCW in degrees):
   {"op": "move", "ref": "U1", "x": 10, "y": 20, "rot": 90, "side": "F"|"B", "locked": false}
   {"op": "track", "net": "GND", "layer": "F.Cu", "a": [x, y], "b": [x, y], "w": 0.25}
   {"op": "tracks", "items": [{net, layer, a, b, w}, ...]}
-  {"op": "via", "net": "GND", "x": 1, "y": 2, "d": 0.6, "drill": 0.3}
+  {"op": "via", "net": "GND", "x": 1, "y": 2, "d": 0.6, "drill": 0.3, "kind": "through" | "micro" | "blind" | "buried",
+   "layers": ["F.Cu", "In1.Cu"]}        (kind and layers for HDI vias; a through via spans the board)
   {"op": "delete", "nets": [...], "uuids": [...], "region": [x0, y0, x1, y1], "kinds": ["track", "via"], "all": false}
+      kinds may hold "zone"; "names": [...] picks zones (rule areas too) by name
   {"op": "track_set", "uuid": "...", "a": [x, y], "b": [x, y], "w": 0.3, "layer": "B.Cu", "net": "GND"}
   {"op": "via_set", "uuid": "...", "x": 1, "y": 2, "d": 0.6, "drill": 0.3}
   {"op": "zone_set", "uuid": "...", "polygon": [[x, y], ...], "net": "GND", "priority": 1, "layers": [...]}
@@ -23,6 +25,9 @@ Ops (coordinates in board mm, KiCad axes: y down, angles CCW in degrees):
   {"op": "floorplan", "rects": [{"rect": [x0, y0, x1, y1], "label": "MCU"}, ...], "layer": "Dwgs.User"}
       the guided start's plan, drawn as one group named "Floorplan" (drawn again each time)
   {"op": "value", "ref": "R1", "value": "10k"}
+  {"op": "footprint", "dir": ".../Package_BGA.pretty", "name": "BGA-64_...", "ref": "U9", "value": "", "x": 10, "y": 20,
+                      "rot": 0, "side": "F", "nets": {"A1": "GND", ...}}     (a library footprint onto the board; its
+      pads' nets made if the board has none of that name)
   {"op": "lock", "refs": [...], "locked": true}
   {"op": "layers", "copper": 4}
   {"op": "layer_types", "types": {"In1.Cu": "power", "In2.Cu": "signal"}}   (power: a plane layer)
@@ -125,13 +130,50 @@ def add_via(b, v, changes):
     via.SetPosition(P(v["x"], v["y"]))
     via.SetWidth(MM(float(v.get("d", 0.6))))
     via.SetDrill(MM(float(v.get("drill", 0.3))))
-    via.SetViaType(pcbnew.VIATYPE_THROUGH)
-    via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+    kind = v.get("kind") or "through"
+    vt = {"through": "VIATYPE_THROUGH", "micro": "VIATYPE_MICROVIA", "blind": "VIATYPE_BLIND", "buried": "VIATYPE_BURIED"}.get(kind)
+    if vt is None:
+        raise ValueError(f"via kind {kind!r}: through, micro, blind or buried")
+    via.SetViaType(getattr(pcbnew, vt, None) if hasattr(pcbnew, vt) else pcbnew.VIATYPE_BLIND_BURIED)
+    ls = v.get("layers") or ["F.Cu", "B.Cu"]
+    if kind == "through":
+        ls = ["F.Cu", "B.Cu"]
+    if len(ls) != 2:
+        raise ValueError("a via's layers: the two it joins, e.g. [\"F.Cu\", \"In1.Cu\"]")
+    via.SetLayerPair(layer_id(b, ls[0]), layer_id(b, ls[1]))
     n = net(b, v.get("net"))
     if n is not None:
         via.SetNet(n)
     b.Add(via)
-    changes.append({"kind": "via", "net": v.get("net", ""), "x": v["x"], "y": v["y"], "d": v.get("d", 0.6), "uuid": via.m_Uuid.AsString()})
+    changes.append({"kind": "via", "net": v.get("net", ""), "x": v["x"], "y": v["y"], "d": v.get("d", 0.6), "uuid": via.m_Uuid.AsString(),
+                    **({"via_kind": kind, "layers": list(ls)} if kind != "through" else {})})
+
+
+def add_footprint(b, op, changes):
+    fp = pcbnew.FootprintLoad(op["dir"], op["name"])
+    if fp is None:
+        raise ValueError(f"no footprint {op['name']} in {op['dir']}")
+    lib = os.path.splitext(os.path.basename(op["dir"].rstrip("/")))[0]
+    fp.SetFPID(pcbnew.LIB_ID(lib, op["name"]))
+    fp.SetReference(op["ref"])
+    fp.SetValue(op.get("value") or op["name"])
+    b.Add(fp)
+    if op.get("side", "F") == "B":
+        fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_LEFT_RIGHT if hasattr(pcbnew, "FLIP_DIRECTION_LEFT_RIGHT") else False)
+    fp.SetPosition(P(op["x"], op["y"]))
+    fp.SetOrientationDegrees(float(op.get("rot", 0)))
+    nets = op.get("nets") or {}
+    for pad in fp.Pads():
+        name = nets.get(pad.GetNumber())
+        if not name:
+            continue
+        ni = b.FindNet(name)
+        if ni is None:
+            ni = pcbnew.NETINFO_ITEM(b, name)
+            b.Add(ni)
+        pad.SetNet(ni)
+    changes.append({"kind": "footprint", "ref": op["ref"], "x": op["x"], "y": op["y"]})
+    return True
 
 
 def _xy(v):
@@ -164,9 +206,10 @@ def do_delete(b, op, changes):
                 hit = hit or not nets
         if hit:
             victims.append(t)
+    names = set(op.get("names") or [])
     if "zone" in kinds:
         for z in list(b.Zones()):
-            named = bool(uuids) and z.m_Uuid.AsString() in uuids
+            named = (bool(uuids) and z.m_Uuid.AsString() in uuids) or (bool(names) and z.GetZoneName() in names)
             if z.GetIsRuleArea() and not named:          # a keep-out goes only when it is named
                 continue
             if everything or (nets and z.GetNetname() in nets) or named:
@@ -309,7 +352,12 @@ def do_rule_area(b, op, changes):
     z.SetIsRuleArea(True)
     ls = pcbnew.LSET()
     for l in op.get("layers") or ["F.Cu"]:
-        ls.AddLayer(layer_id(b, l))
+        if l == "*.Cu":                              # every copper layer the board has
+            for lid in range(pcbnew.PCB_LAYER_ID_COUNT):
+                if pcbnew.IsCopperLayer(lid) and b.IsLayerEnabled(lid):
+                    ls.AddLayer(lid)
+        else:
+            ls.AddLayer(layer_id(b, l))
     z.SetLayerSet(ls)
     z.SetZoneName(op.get("name", "keepout"))
     z.SetDoNotAllowTracks(bool(op.get("no_tracks", True)))
@@ -453,6 +501,8 @@ def apply_ops(b, ops, changes, stop_on_error=True):
             elif kind == "via":
                 add_via(b, op, changes)
                 r = True
+            elif kind == "footprint":
+                r = add_footprint(b, op, changes)
             elif kind == "vias":
                 for v in op.get("items", []):
                     add_via(b, v, changes)

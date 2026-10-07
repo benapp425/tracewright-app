@@ -1,4 +1,4 @@
-"""Board stack-ups, 2 to 10 copper layers: what each layer is for (signal or plane), the net each plane carries, the
+"""Board stack-ups, 2 to 12 copper layers: what each layer is for (signal or plane), the net each plane carries, the
 direction each signal layer is routed in, and the build between them (the fab's standard stack-up: dielectric
 thicknesses and permittivity, which set trace impedance).
 
@@ -23,7 +23,7 @@ current stack-up and its impedance calculator, then set the plan's preset to mat
 import os, re
 from .sexp import parse, find
 
-COUNTS = (2, 4, 6, 8, 10)
+COUNTS = (2, 4, 6, 8, 10, 12)
 ROLES = ("signal", "plane")
 DIRS = ("x", "y", "any")
 
@@ -52,12 +52,22 @@ PRESETS = {
         ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.0152), ("core", 0.21, 4.6, "FR4"),
         ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.0152), ("core", 0.21, 4.6, "FR4"),
         ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.035)]},
+    "12L-1.6-2116": {"layers": 12, "title": "12 layers, 1.6 mm, 2116 prepreg (a typical build: confirm it with the fab)", "build": [
+        ("copper", 0.035), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.0152), ("core", 0.145, 4.6, "FR4"),
+        ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.0152), ("core", 0.145, 4.6, "FR4"),
+        ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.0152), ("core", 0.145, 4.6, "FR4"),
+        ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.0152), ("core", 0.145, 4.6, "FR4"),
+        ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.0152), ("core", 0.145, 4.6, "FR4"),
+        ("copper", 0.0152), ("prepreg", 0.1088, 4.16, "2116"), ("copper", 0.035)]},
 }
-DEFAULT_PRESET = {2: "JLC-2L-1.6", 4: "JLC04161H-7628", 6: "JLC06161H-2116", 8: "JLC08161H-2116", 10: "JLC10161H-2116"}
+DEFAULT_PRESET = {2: "JLC-2L-1.6", 4: "JLC04161H-7628", 6: "JLC06161H-2116", 8: "JLC08161H-2116", 10: "JLC10161H-2116",
+                  12: "12L-1.6-2116"}
 
 # Where to start: every signal layer next to a plane, ground planes paired with the fast layers.
 #   G ground plane, P supply plane, S signal
-TEMPLATES = {2: "SS", 4: "SGPS", 6: "SGSPGS", 8: "SGSGPSGS", 10: "SGSSGPSSGS"}
+TEMPLATES = {2: "SS", 4: "SGPS", 6: "SGSPGS", 8: "SGSGPSGS", 10: "SGSSGPSSGS", 12: "SGSGSPGSGSGS"}
+# HDI with microvias: a signal layer under each outer layer, where the microvias from the pads land
+TEMPLATES_HDI = {4: "SSGS", 6: "SSGPSS", 8: "SSGSPGSS", 10: "SSGSGPSGSS", 12: "SSGSGSPGSGSS"}
 
 
 def names(n):
@@ -88,11 +98,12 @@ def _ground(nets):
     return "GND"
 
 
-def default_plan(n, nets=None):
-    """A sensible plan for n layers. nets: {net: pad count} (to pick the ground and supply nets)."""
+def default_plan(n, nets=None, hdi=False):
+    """A sensible plan for n layers. nets: {net: pad count} (to pick the ground and supply nets); hdi: the microvia
+    layout (signal layers under the outer ones)."""
     if n not in COUNTS:
-        raise ValueError(f"{n} layers: choose 2, 4, 6, 8 or 10")
-    t = TEMPLATES[n]
+        raise ValueError(f"{n} layers: choose 2, 4, 6, 8, 10 or 12")
+    t = TEMPLATES_HDI[n] if hdi and n in TEMPLATES_HDI else TEMPLATES[n]
     ls = names(n)
     roles = ["signal" if c == "S" else "plane" for c in t]
     gnd, sup = _ground(nets), _supply(nets) or _ground(nets)
@@ -108,9 +119,10 @@ def default_plan(n, nets=None):
     return {"layers": n, "preset": DEFAULT_PRESET[n], "roles": roles, "planes": planes, "directions": directions}
 
 
-def validate(plan, nets=None, limit=None):
+def validate(plan, nets=None, limit=None, hdi_cfg=None):
     """(plan, problems): the plan filled in and tidied, and what is wrong with it -- [("error"|"warning", text)].
-    nets: the board's or schematic's nets (names or {name: pads}); limit: the agreed copper layer count, if any."""
+    nets: the board's or schematic's nets (names or {name: pads}); limit: the agreed copper layer count, if any;
+    hdi_cfg: the project's HDI settings (microvias land on the layer under each outer one)."""
     p = dict(plan or {})
     out = []
     try:
@@ -118,9 +130,10 @@ def validate(plan, nets=None, limit=None):
     except (TypeError, ValueError):
         n = 0
     if n not in COUNTS:
-        return p, [("error", f"{n or 'no'} copper layers: a board has 2, 4, 6, 8 or 10")]
+        return p, [("error", f"{n or 'no'} copper layers: a board has 2, 4, 6, 8, 10 or 12")]
     p["layers"] = n
-    base = default_plan(n, nets if isinstance(nets, dict) else {x: 1 for x in nets or []})
+    micro = bool(hdi_cfg and hdi_cfg.get("on") and hdi_cfg.get("microvias"))
+    base = default_plan(n, nets if isinstance(nets, dict) else {x: 1 for x in nets or []}, hdi=micro and bool(p.get("hdi_layout", True)))
     ls = names(n)
     roles = [str(r).lower() for r in (p.get("roles") or base["roles"])]
     roles = ["plane" if r in ("plane", "power", "ground", "gnd") else "signal" if r in ("signal", "mixed", "s") else r for r in roles]
@@ -180,6 +193,11 @@ def validate(plan, nets=None, limit=None):
                     out.append(("warning", f"{ls[i]} and {ls[i + 1]} both run along {dirs[ls[i]]}: broadside coupling"))
         if not any(short(v).upper() in ("GND", "DGND", "VSS", "0V") for v in planes.values()):
             out.append(("warning", "no ground plane"))
+        if micro:
+            for l in (ls[1],):                       # where the top side's microvias land (most BGAs sit on top)
+                if roles[ls.index(l)] == "plane":
+                    out.append(("warning", f"microvias land on {l}, a {short(planes.get(l, ''))} plane: ground balls drop "
+                                           f"straight onto it, but signals cannot escape there (make {l} a signal layer)"))
     if p.get("why") is not None:
         p["why"] = str(p["why"])[:600]
     return p, out

@@ -29,7 +29,7 @@ const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").r
 
 export const ICON = { status: "info", design: "list", board: "circuit-board", show: "target", annotate: "map-pin", place: "move", route: "route", copper: "layers",
   sync_board: "refresh-cw", silk: "pencil", run_checks: "list-checks", render: "image", parts: "microchip", stage: "list-todo", lessons: "book-open",
-  snapshot: "bookmark", kicad: "plug", outputs: "package", review: "flag", agenda: "list-todo", stackup: "layers", simulate: "activity",
+  snapshot: "bookmark", kicad: "plug", outputs: "package", review: "flag", agenda: "list-todo", stackup: "layers", fanout: "waypoints", region: "square-dashed", routing_plan: "route", simulate: "activity",
   evidence: "badge-check", waive: "shield-check", library: "bookmark", nets: "waypoints", canvas: "layout-grid",
   Bash: "terminal", Read: "file-text", Grep: "search", Glob: "search", Edit: "pencil", Write: "pencil", MultiEdit: "pencil", NotebookEdit: "pencil",
   WebFetch: "external-link", WebSearch: "search", TodoWrite: "list-todo", Skill: "sparkles", Task: "bot", Agent: "bot", TaskOutput: "terminal", TaskStop: "circle-stop" };
@@ -90,6 +90,9 @@ export function stepText(name, inp) {
     case "notes": return [inp.action === "add" ? `Noted the reasoning on ${inp.ref || inp.net || ""}${inp.pin ? " pin " + inp.pin : ""}` : inp.action === "remove" ? "Removed a design note" : "Read the design notes", inp.action === "add" ? inp.why : ""];
     case "design": return [inp.ref ? `Read ${inp.ref}'s pins` : inp.net ? `Read the net ${inp.net}` : "Read the design"];
     case "stackup": return [{ plan: `Planned the stack-up${inp.layers ? `: ${inp.layers} layers` : ""}`, apply: "Put the stack-up on the board" }[inp.action] || "Looked at the stack-up", inp.action === "plan" ? inp.why : ""];
+    case "region": return [inp.action === "add" ? `Set the region ${inp.name || ""}` : inp.action === "remove" ? `Removed the region ${inp.name || ""}` : "Read the regions"];
+    case "routing_plan": return [inp.action === "layers" ? `Put ${inp.net} on ${arr(inp.layers).join(", ") || "any layer"}` : `Set ${inp.net} to ${inp.mode || "its rule"}`];
+    case "fanout": return [`Fanned out ${inp.ref || "a part"}${inp.method ? " (" + inp.method + ")" : ""}`];
     case "simulate": return [`Simulated ${inp.label || inp.name || "a circuit"}`, arr(inp.probes).join(", ")];
     case "evidence": return [inp.action === "add" ? `Recorded evidence for ${inp.requirement || "a requirement"}` : inp.action === "remove" ? "Removed evidence" : "Read the requirements' evidence", inp.action === "add" ? inp.label : ""];
     case "waive": return [inp.action === "propose" ? `Proposed a waiver: ${inp.title || inp.key || ""}` : inp.action === "withdraw" ? "Withdrew a waiver" : "Read the waivers"];

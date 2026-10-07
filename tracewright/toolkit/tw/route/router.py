@@ -330,9 +330,15 @@ class Board:
         cls = self.net_class.get(net, "Default")
         self.stamp(net, cls, [layer], "seg", (a[0], a[1], b[0], b[1], w / 2))
 
-    def stamp_via(self, net, pos, d):
+    def stamp_via(self, net, pos, d, layers=None):
+        """A via's copper; layers: the ones a microvia or blind via spans (None: a through via, every layer). The
+        router's own vias go through every layer, so one on any spanned layer is blocked there as well."""
         cls = self.net_class.get(net, "Default")
-        self.stamp(net, cls, list(self.layers), "circle", (pos[0], pos[1], d / 2))
+        ls = list(self.layers) if layers is None else [l for l in layers if l in self.layers]
+        if ls:
+            self.stamp(net, cls, ls, "circle", (pos[0], pos[1], d / 2))
+        elif layers is not None:                      # spans no routing layer (planes only): it still takes the column
+            self.stamp(net, cls, list(self.layers), "circle", (pos[0], pos[1], d / 2), via_only=True)
 
     def reserve(self, net, layers, pts):
         """Keep an area for a pour of `net` (other nets route around it)."""
@@ -654,17 +660,21 @@ class Router:
         return out
 
     def connect(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, cell_cost=None, margin=None, layers=None,
-                keep_to=None):
+                keep_to=None, escape=None):
         """Route one connection; returns the committed route record or None. layers: only these routing layers;
-        keep_to: [layers, N] cells the path may be pulled tight over (with its own): a sketch's band."""
+        escape: [(layer index, cell indices)] kept open off those layers (a pad's way to its via); keep_to: [layers, N]
+        cells the path may be pulled tight over (with its own): a sketch's band."""
         lt, lv = self.B.legal(net, prof)
         if layers is not None:
             keep = [li for li, l in enumerate(self.B.layers) if l in layers]
             if keep and len(keep) < len(self.B.layers):
+                full = lt
                 lt = lt.copy()
                 for li in range(len(self.B.layers)):
                     if li not in keep:
                         lt[li] = 0
+                for li, idx in escape or ():
+                    lt[li][idx] = full[li][idx]
         if cell_cost is None and self.use_hist:
             cell_cost = self.hist
         path = self.astar(net, prof, sources, targets, fcu_factor, allow_vias, _legal=(lt, lv), cell_cost=cell_cost,

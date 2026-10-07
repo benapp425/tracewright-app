@@ -1,8 +1,9 @@
 """The routing plan: which nets the router takes on its own, which it routes with rules it must keep, and which are left
 for a person (or Claude in the editor) -- each with the reason and the rules, so nobody has to guess.
 
-    plan = classify(project)     {net: {"mode": "auto" | "guided" | "hand", "why", "rules": [..], "order", "kind"}}
-    set_mode(project, net, mode) / preset(project) / set_preset(project, name)
+    plan = classify(project)     {net: {"mode": "auto" | "guided" | "hand", "why", "rules": [..], "order", "kind",
+                                         "layers": [..] | None, "suggest": {"layers", "why"} | None}}
+    set_mode(project, net, mode) / set_layers(project, net, layers) / preset(project) / set_preset(project, name)
     PRESETS: how the router weighs vias against length and bends
 
 Hand: RF feeds (an antenna's line wants its impedance kept, short and straight), current-sense lines (a Kelvin pair
@@ -10,6 +11,9 @@ read at the resistor's pads), high voltage (creepage). Guided: differential pair
 impedance), clocks and crystals (short, no vias), switching nodes (short and wide), heavy currents (wide), length
 groups. Auto: the rest. The user can move any net to another mode (tracewright.json route.modes), and the router
 follows: hand nets are left alone, guided ones go first with their rules.
+
+The layer plan (route.layers {net: [layers]}): the layers a net is routed on, with a short escape on its pads' own layer.
+Pairs, fast lines and RF get a suggestion (the signal layers beside a ground plane); it is kept only once set.
 """
 import re
 
@@ -52,6 +56,40 @@ def overrides(project):
     return dict((_cfg(project).get("route") or {}).get("modes") or {})
 
 
+def layer_plan(project):
+    return dict((_cfg(project).get("route") or {}).get("layers") or {})
+
+
+def set_layers(project, net, layers, copper=None):
+    """The layers `net` is routed on (None: any). copper: the board's layers, to check the names."""
+    lp = project.cfg.setdefault("route", {}).setdefault("layers", {})
+    if not layers:
+        lp.pop(net, None)
+    else:
+        layers = [str(l) for l in layers]
+        bad = [l for l in layers if not l.endswith(".Cu") or (copper and l not in copper)]
+        if bad:
+            raise ValueError(f"not a copper layer of this board: {', '.join(bad)}")
+        lp[net] = layers
+    _save(project)
+
+
+def _beside_ground(project):
+    """Signal layers next to a ground plane, from the stack-up plan (None without one)."""
+    from . import stackup
+    plan = stackup.get(_cfg(project))
+    if not plan or plan.get("layers", 2) < 4:
+        return None
+    ls = stackup.names(plan["layers"])
+    gnd = lambda n: bool(re.fullmatch(r"(GND|DGND|VSS|0V|AGND)", _short(n), re.I))
+    out = []
+    for i, (l, r) in enumerate(zip(ls, plan["roles"])):
+        if r == "signal" and any(0 <= j < len(ls) and plan["roles"][j] == "plane" and gnd(plan["planes"].get(ls[j], ""))
+                                 for j in (i - 1, i + 1)):
+            out.append(l)
+    return out or None
+
+
 def set_mode(project, net, mode):
     if mode not in MODES and mode is not None:
         raise ValueError(f"mode: one of {', '.join(MODES)}")
@@ -79,6 +117,8 @@ def classify(project, nl=None, model=None):
             model = for_context(ctx)
     recs = model.records if model is not None else {}
     over = overrides(project)
+    lplan = layer_plan(project)
+    beside = _beside_ground(project)
     parts = getattr(nl, "parts", {}) or {}
     out = {}
     for net, nodes in (nl.nets or {}).items():
@@ -128,7 +168,12 @@ def classify(project, nl=None, model=None):
             if m in MODES and m != mode:
                 why = f"set by you; by rule {SAYS[mode]} ({why})"
                 mode = m
-        out[net] = {"mode": mode, "why": why, "rules": rules, "order": order, "kind": kind}
+        layers = lplan.get(net) or lplan.get(name)
+        suggest = None
+        if beside and kind in ("pair", "fast", "clock", "rf"):
+            sl = beside[:1] if kind == "rf" else beside
+            suggest = {"layers": sl, "why": "over a ground plane: a clean return path" + (" and its impedance" if kind in ("pair", "rf") else "")}
+        out[net] = {"mode": mode, "why": why, "rules": rules, "order": order, "kind": kind, "layers": layers, "suggest": suggest}
     return out
 
 

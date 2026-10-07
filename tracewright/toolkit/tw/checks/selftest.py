@@ -218,6 +218,12 @@ def mem_dfm_copper(ctx):
     ctx.board.vias.append(v)
 
 
+def mem_hdi_off(ctx):
+    v = Via()
+    v.x, v.y, v.d, v.drill, v.layers, v.net, v.kind, v.uuid, v.locked = 104.0, 104.0, 0.25, 0.1, ["F.Cu", "B.Cu"], "GND", "micro", "", False
+    ctx.board.vias.append(v)
+
+
 def mem_usb_c(ctx):
     nl = ctx.netlist
     ctx._cache["netlist"] = nl.mutated({("J1", "B5"): nl.pin[("J1", "A5")]})       # CC2 tied to CC1
@@ -590,6 +596,7 @@ CASES = [
     ("power.decoupling", "C4 lifted off +3V3", ("mem", mem_decoupling), "U2"),
     ("dfm.rules", "board minimum track 0.05 mm", ("mem", mem_dfm_rules), "track"),
     ("dfm.copper", "a via with a 0.1 mm drill", ("mem", mem_dfm_copper), "drill"),
+    ("hdi.vias", "a laser microvia on a board built without HDI", ("mem", mem_hdi_off), "HDI is off"),
     ("lessons.usb_c", "CC2 tied to CC1", ("mem", mem_usb_c), "CC1 and CC2"),
     ("lessons.i2c", "SDA pull-up lifted from 3V3", ("mem", mem_i2c), "SDA"),
     ("lessons.led", "D1 straight across +3V3", ("mem", mem_led), "D1"),

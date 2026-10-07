@@ -114,6 +114,14 @@
    "findings": [],
    "status": "pass"
   },
+  "hdi.fanout": {
+   "findings": [],
+   "status": "skipped"
+  },
+  "hdi.vias": {
+   "findings": [],
+   "status": "pass"
+  },
   "hs.pairs": {
    "findings": [
     "hs:layers:USB_D_P",

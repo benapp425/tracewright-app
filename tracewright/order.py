@@ -62,7 +62,7 @@ def specs(board):
     min_drill = min((v.drill for v in board.vias), default=None)
     from tw import stackup
     return {"w": round(w, 1), "h": round(h, 1), "layers": len(board.copper), "thickness": board.thickness or 1.6,
-            "stackup": stackup.identify(board),
+            "stackup": stackup.identify(board), "hdi": any(v.kind != "through" for v in board.vias),
             "copper_oz": oz or 1, "smd_sides": smd_sides, "finish": "ENIG" if fine else "HASL (lead free)",
             "fine": [f"{r} ({p:g} mm)" for r, p in fine[:6]],
             "min_track": round(min_track, 3) if min_track else None, "min_drill": round(min_drill, 3) if min_drill else None,
@@ -106,14 +106,18 @@ def estimate(sp, totals, m, qty):
         pcb = 55.0 + 0.03 * area * n
     elif sp["layers"] <= 8:
         pcb = 120.0 + 0.045 * area * n
-    else:
+    elif sp["layers"] <= 10:
         pcb = 180.0 + 0.06 * area * n
+    else:
+        pcb = 260.0 + 0.08 * area * n
+    if sp.get("hdi"):                                   # laser vias, filled vias in pads: a sequential build
+        pcb = pcb * 1.8 + 80.0
     if sp["copper_oz"] >= 2:
         pcb *= 1.6
     if sp["finish"].startswith("ENIG"):
         pcb += 15.0
     out = {"qty": n, "pcb": round(pcb, 2), "lines": []}
-    out["lines"].append([f"{n} boards, {sp['layers']} layers, {sp['w']:g} × {sp['h']:g} mm", round(pcb, 2)])
+    out["lines"].append([f"{n} boards, {sp['layers']} layers{', HDI' if sp.get('hdi') else ''}, {sp['w']:g} × {sp['h']:g} mm", round(pcb, 2)])
     parts = totals.get("cost")
     if m == "jlc":
         standard = len(sp["smd_sides"]) > 1

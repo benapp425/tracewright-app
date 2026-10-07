@@ -19,7 +19,10 @@ def apply(project, ops, save=True, live="auto", fill_after=False, stop_on_error=
             from .. import live as livemod
             link = livemod.link_for(project.pcb)
             if link is not None:
-                if all(o.get("op") in LIVE_OPS for o in ops):
+                hdi_vias = any((o.get("kind") or "through") != "through" for o in ops if o.get("op") == "via") or \
+                    any((v.get("kind") or "through") != "through" for o in ops if o.get("op") == "vias" for v in o.get("items") or [])
+                zones = any(o.get("op") == "delete" and (o.get("names") or "zone" in (o.get("kinds") or [])) for o in ops)
+                if all(o.get("op") in LIVE_OPS for o in ops) and not hdi_vias and not zones:   # the live API: through vias, no zones
                     res = link.apply(ops)
                     res["via"] = "live"
                     if save and res.get("ok"):

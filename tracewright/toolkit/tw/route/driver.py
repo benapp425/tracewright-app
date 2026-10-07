@@ -57,11 +57,29 @@ def dump_for_router(b, routing=R.LAYERS):
         for a, c in zip(pts, pts[1:]):
             d["tracks"].append({"a": a, "b": c, "w": t.w, "layer": t.layer, "net": t.net})
     for v in b.vias:
-        d["vias"].append({"pos": (v.x, v.y), "d": v.d, "drill": v.drill, "net": v.net})
+        d["vias"].append({"pos": (v.x, v.y), "d": v.d, "drill": v.drill, "net": v.net,
+                          "layers": v.span(b.copper), "kind": v.kind or "through"})
     return d
 
 
 NECK_W, NECK_CL = 0.15, 0.15      # escapes from fine-pitch pads (JLC: 0.1 / 0.1 minimum)
+
+
+def neck_values(b):
+    """(width, clearance) of tracks between fine-pitch pads: 0.1 mm under a ball grid of 0.8 mm or finer on four or more
+    layers (one track between the balls; the fabs make 0.09 mm there), else 0.15 mm."""
+    from .. import escape
+    if len(b.copper) >= 4 and any((g := escape.grid(fp)) and g["pitch"] <= 0.8 for fp in b.fp_list):
+        return 0.1, 0.1
+    return NECK_W, NECK_CL
+
+
+def neck_board_rules(project, neck_w, neck_cl):
+    """The board's minimum track and clearance no higher than the neck-down (else KiCad's DRC flags every escape)."""
+    if neck_w >= 0.127 or not project.pro:
+        return {}
+    from ..pro import set_board_rules
+    return set_board_rules(project.pro, {"min_track_width": neck_w, "min_clearance": neck_cl}, lower_only=True)
 
 
 def profiles_for(pro, net_class, nets, necks=False, neck_w=NECK_W, neck_cl=NECK_CL):
@@ -161,11 +179,13 @@ def islands(B, Rt, net, pads, existing):
         if "via" in (ka, kb):
             v = x if ka == "via" else y
             o, ko = (y, kb) if ka == "via" else (x, ka)
+            span = v.get("layers")                     # None: a through via (every layer)
             if ko == "seg":
-                return any(geom.dist(e, v["pos"]) <= v["d"] / 2 for e in (o["a"], o["b"]))
+                return (span is None or o["layer"] in span) and any(geom.dist(e, v["pos"]) <= v["d"] / 2 for e in (o["a"], o["b"]))
             if ko == "pad":
-                return any(geom.inside(v["pos"], pl["outline"]) for l in o["shape"] for pl in o["shape"][l])
-            return geom.dist(o["pos"], v["pos"]) < 0.01
+                return any(geom.inside(v["pos"], pl["outline"]) for l in o["shape"] if span is None or l in span for pl in o["shape"][l])
+            other = o.get("layers")
+            return geom.dist(o["pos"], v["pos"]) < 0.01 and (span is None or other is None or bool(set(span) & set(other)))
         return False
     n = len(nodes)
     if segs or vias:
@@ -191,6 +211,12 @@ def islands(B, Rt, net, pads, existing):
         if segs_in:
             cells += Rt.cells_of(segs_in)
             pts += [s[1] for s in segs_in]
+        for k, v in members:                          # a via's landing on each routing layer it reaches (fan-outs)
+            if k != "via":
+                continue
+            j, i = B.cell(*v["pos"])
+            cells += [(li, j * B.nx + i) for li, l in enumerate(B.layers) if v.get("layers") is None or l in v["layers"]]
+            pts.append(tuple(v["pos"]))
         out.append((cells, pts, len(pads_in)))
     return out
 
@@ -229,6 +255,26 @@ class GridRoute:
         except Exception:
             self.modes = {}
         self.left_for_hand = []
+        self.off_plan = []
+
+    def _plan_layers(self, net, pads):
+        """(layers, escapes) from the layer plan: the routing layers the net keeps to, and round each of its pads on
+        another layer a 1.5 mm patch of that layer (the pad's way to its via). (None, None) without a plan."""
+        m = self.modes.get(net) or self.modes.get(net.rsplit("/", 1)[-1]) or {}
+        want = [l for l in (m.get("layers") or []) if l in self.routing]
+        if not want or len(want) == len(self.routing):
+            return None, None
+        B = self.B
+        esc, r = [], int(round(1.5 / R.RES))
+        for p in pads:
+            for l in p["layers"]:
+                if l not in B.layers or l in want:
+                    continue
+                j0, i0 = B.cell(*p["pos"])
+                jj, ii = np.mgrid[max(0, j0 - r):min(B.ny, j0 + r + 1), max(0, i0 - r):min(B.nx, i0 + r + 1)]
+                inside = (jj - j0) ** 2 + (ii - i0) ** 2 <= r * r
+                esc.append((B.layers.index(l), (jj[inside] * B.nx + ii[inside]).ravel()))
+        return want, esc
 
     def _mode(self, net):
         m = self.modes.get(net) or self.modes.get(net.rsplit("/", 1)[-1]) or {}
@@ -263,9 +309,31 @@ class GridRoute:
         nets = sorted(b.nets)
         self.net_class = {n: self.pro.class_of(n, nl_class.get(n)) for n in nets}
         self.necks = fine_pitch_areas(b, routing=self.routing)
-        profs, clear = profiles_for(self.pro, self.net_class, nets, necks=bool(self.necks))
-        B = R.Board(dump, profs, clear, self.net_class, necks=[r for _, r in self.necks], layers=self.routing)
+        self.neck_w, self.neck_cl = neck_values(b)
+        from .. import regions as regmod                 # the user's regions: finer tracks, more spacing
+        try:
+            self.regions = regmod.for_router(self.p, b)
+        except Exception:
+            self.regions = []
+        fine = [box for _, box, kind, _, _ in self.regions if kind == "neck"]
+        for _, _, kind, tw_, cl_ in self.regions:
+            if kind == "neck":
+                self.neck_w, self.neck_cl = min(self.neck_w, tw_), min(self.neck_cl, cl_)
+        profs, clear = profiles_for(self.pro, self.net_class, nets, necks=bool(self.necks or fine), neck_w=self.neck_w, neck_cl=self.neck_cl)
+        B = R.Board(dump, profs, clear, self.net_class, necks=[r for _, r in self.necks] + fine, layers=self.routing)
         B.stamp_pads()
+        for _, box, kind, _, cl_ in self.regions:     # more spacing: pads inside keep the region's clearance round them
+            if kind != "spacing":
+                continue
+            for p in dump["pads"]:
+                if not (box[0] <= p["pos"][0] <= box[2] and box[1] <= p["pos"][1] <= box[3]):
+                    continue
+                cls = self.net_class.get(p["net"], "Default")
+                extra = cl_ - clear.get(cls, 0.2)
+                if extra > 0:
+                    for lname, pl in p["shape"].items():
+                        for poly in pl:
+                            B.stamp(p["net"] or f"__nc_{p['ref']}_{p['num']}", cls, [lname], "poly", poly["outline"], extra=extra)
         B.stamp_rules()
         for hole in dump.get("cutouts", []):
             B.stamp("", "Default", list(B.layers), "poly", hole, extra=0.3, block_all_vias=True)
@@ -277,7 +345,7 @@ class GridRoute:
             if t["layer"] in B.layers:
                 B.stamp_track(t["net"], t["layer"], t["a"], t["b"], t["w"])
         for v in dump["vias"]:
-            B.stamp_via(v["net"], v["pos"], v["d"])
+            B.stamp_via(v["net"], v["pos"], v["d"], v.get("layers") if v.get("kind", "through") != "through" else None)
         B.snapshot()
         Rt = R.Router(B, bend45=self.bends[0], bend90=self.bends[1], via=self.via_cost, directions=stackup_dirs(self.plan))
         if self.layer_dirs:                           # layer directions: F.Cu runs along y, B.Cu along x
@@ -310,7 +378,9 @@ class GridRoute:
             span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
             w = self.B.profiles[prof].w
             power = w >= 0.39 or any(k in prof.upper() for k in ("PWR", "POWER", "SUPPLY"))
-            out.append(Job(net, prof, pads, (0 if mode == "guided" else 1, order, 0 if power else 1, span)))    # guided first
+            job = Job(net, prof, pads, (0 if mode == "guided" else 1, order, 0 if power else 1, span))    # guided first
+            job.layers, job.escape = self._plan_layers(net, pads)
+            out.append(job)
         out.sort(key=lambda j: j.key)
         return out
 
@@ -416,6 +486,9 @@ class GridRoute:
     # ------------------------------------------------------------------ routing
     def route_job(self, job, keep_going=False, allow_vias=True, cell_cost=None, layers=None, keep_to=None):
         B, Rt = self.B, self.Rt
+        escape = None
+        if layers is None and getattr(job, "layers", None):     # the layer plan, with its pads' escapes
+            layers, escape = job.layers, job.escape
         isl = islands(B, Rt, job.net, job.pads, {"tracks": [t for t in self.dump["tracks"]],
                                                   "vias": self.dump["vias"]})
         if len(isl) < 2:
@@ -428,7 +501,7 @@ class GridRoute:
             nxt = min(rest, key=lambda g: min(geom.dist(a, q) for a in g[1] for q in pts))
             rest.remove(nxt)
             rec = Rt.connect(job.net, job.prof, tree, nxt[0], fcu_factor=job.fcu, allow_vias=allow_vias, cell_cost=cell_cost,
-                             layers=layers, keep_to=keep_to)
+                             layers=layers, keep_to=keep_to, escape=escape)
             if rec is None:
                 fail = (list(tree), nxt[0], f"({nxt[1][0][0]:.1f}, {nxt[1][0][1]:.1f})")
                 if not keep_going:
@@ -504,6 +577,13 @@ class GridRoute:
                 Rt.rebuild()
                 fail = self.route_job(job)
                 cc = None
+            if fail is not None and getattr(job, "layers", None):    # no way on its planned layers: any, and say so
+                Rt.rip([net])
+                Rt.rebuild()
+                job.layers = None
+                fail = self.route_job(job)
+                if fail is None:
+                    self.off_plan.append(net)
             if fail is not None and mate in by_net and any(r["net"] == mate for r in Rt.routes) and not job.__dict__.get("swapped"):
                 # the partner walled it in (a USB-C receptacle's D- pads sit between the D+ pads): route this
                 # half first, then the partner beside it, the way the breakout is drawn by hand
@@ -620,7 +700,7 @@ class GridRoute:
             e["layers"] |= {l for l, a, b, w in r["segments"]}
         self.per_net = {n: {"length_mm": round(v["length_mm"], 1), "vias": v["vias"], "layers": sorted(v["layers"])} for n, v in per.items()}
         summary = {"nets": total, "routed": total - len(failed), "failed": failed, "tracks": len(segs), "vias": len(vias),
-                   "preset": self.preset, "left_for_hand": sorted(self.left_for_hand),
+                   "preset": self.preset, "left_for_hand": sorted(self.left_for_hand), "off_layer_plan": sorted(self.off_plan),
                    "length_mm": round(length, 1), "seconds": round(time.time() - t0, 1), "escapes": n_esc,
                    "stitching_vias": n_stitch, "neck_areas": [ref for ref, _ in self.necks],
                    "coupled_pairs": self._coupled_pairs(),
@@ -934,7 +1014,8 @@ def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_pr
     if apply and (segs or vias or clear):
         from ..pcb import client, rules
         if g.necks:
-            rules.ensure_rules(project, dict([rules.neck_rule(NECK_CL)]))
+            rules.ensure_rules(project, dict([rules.neck_rule(g.neck_cl)]), replace=True)
+            neck_board_rules(project, g.neck_w, g.neck_cl)
         out["apply"] = client.apply(project, g.ops(segs, vias), live=live)
         if out["apply"].get("ok") and g.planes:
             from ..pcb import stitch
@@ -972,6 +1053,8 @@ def _report(project, g, summary):
             e.update(status="routed", **per[k])
             if "no vias" in m["rules"] and per[k]["vias"]:
                 e["note"] = f"{per[k]['vias']} via{'s' if per[k]['vias'] > 1 else ''} on a line meant to have none"
+            if k in {short(n) for n in getattr(g, "off_plan", [])}:
+                e["note"] = (e.get("note", "") + "; " if e.get("note") else "") + "no room on its planned layers: routed on others"
         else:
             e["status"] = "untouched"
         nets[net] = e

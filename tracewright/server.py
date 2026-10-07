@@ -1087,6 +1087,175 @@ def make_app():
             rt.user_changes.append("board (the user, in the app): " + boardedit.describe(ops, res.get("changes")))
         return jresp({"ok": True, "via": res.get("via"), "changes": res.get("changes") or [], "history": hist})
 
+    async def _board_ops(pid, ops, label, said):
+        """Board ops from an app action (fan-out, a region) as one undo step, as an edit in the board view is."""
+        from . import boardedit
+        from tw.pcb import client
+        rt = app.rt(pid)
+        async with rt.edit_lock:
+            def run():
+                with rt.edits.lock:
+                    snap = rt.edits.before()
+                    rt.mark_app_edit(10)
+                    try:
+                        res = client.apply(rt.p.tw, ops, save=True, live="auto")
+                    except Exception as e:
+                        res = {"ok": False, "error": str(e)}
+                    if not res.get("ok"):
+                        rt.edits.failed(snap)
+                        return res, None
+                    rt.edits.done(snap, label)
+                    boardedit.record(rt.p, ops, res.get("changes"))
+                    return res, rt.edits.state()
+            res, hist = await asyncio.to_thread(run)
+        if not res.get("ok"):
+            errs = [r.get("error") for r in res.get("results") or [] if isinstance(r, dict) and r.get("error")]
+            return None, (errs[0] if errs else res.get("error")) or "the change did not apply"
+        rt.user_changes.append(said)
+        rt.hub.emit("board.changed", version=-1, source="app")
+        return {"ok": True, "history": hist}, None
+
+    @routes.get("/api/projects/{pid}/board/space")
+    async def board_space(request):
+        """Where tracks fit: each routing layer's free share, the connections still to route against the room, the
+        crowded regions in words (tw/space.py)."""
+        from tw import space
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        cls = request.query.get("class") or "Default"
+        try:
+            return jresp(await asyncio.to_thread(space.congestion, rt.p.reload().tw, cls))
+        except ValueError as e:
+            return err(str(e), 422)
+
+    @routes.get("/api/projects/{pid}/board/why")
+    async def board_why(request):
+        """What keeps a track off one point: ?x=&y=&layer=&net= (tw/space.py)."""
+        from tw import space
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        try:
+            x, y = float(request.query["x"]), float(request.query["y"])
+        except (KeyError, ValueError):
+            return err("x and y in mm")
+        b = await asyncio.to_thread(rt.board)
+        return jresp(await asyncio.to_thread(space.why, rt.p.tw, x, y, request.query.get("layer") or "F.Cu",
+                                             request.query.get("net") or None, b))
+
+    @routes.get("/api/projects/{pid}/escape")
+    async def escape_get(request):
+        """The dense parts' escape plans and the HDI settings (Board > Routing > Fan-out)."""
+        from tw import escape, hdi
+        rt = app.rt(request.match_info["pid"])
+        p = rt.p.reload()
+        out = {"hdi": hdi.get(p.cfg), "hdi_text": hdi.describe(p.cfg), "parts": []}
+        if p.tw.has_pcb():
+            b = await asyncio.to_thread(rt.board)
+            out["parts"] = await asyncio.to_thread(escape.plan, p.tw, b)
+            have = {(round(v.x, 2), round(v.y, 2)) for v in b.vias}
+            for pl in out["parts"]:
+                fp = b.footprints.get(pl["ref"])
+                if fp is not None and pl["kind"] == "array":
+                    bb = fp.bbox()
+                    pl["vias_under"] = sum(1 for v in b.vias if bb[0] <= v.x <= bb[2] and bb[1] <= v.y <= bb[3])
+        return jresp(out)
+
+    @routes.post("/api/projects/{pid}/escape")
+    async def escape_fanout(request):
+        """{ref, method?}: fan the part out (its vias, and dog-bone stubs), one undo step."""
+        from tw import escape
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: fan out when it is done, or stop it", 409)
+        body = await request.json()
+        try:
+            ops, summ = await asyncio.to_thread(escape.fanout, rt.p.reload().tw, str(body.get("ref") or ""), body.get("method") or None)
+        except ValueError as e:
+            return err(str(e), 422)
+        if not ops:
+            return jresp({"ok": True, "summary": summ})
+        res, e = await _board_ops(pid, ops, f"Fan out {summ['ref']}",
+                                  f"board (the user, in the app): fanned out {summ['ref']} ({summ['method']}, {summ['vias']} vias)")
+        if e:
+            return err(str(e)[:300], 422)
+        return jresp({**res, "summary": summ})
+
+    @routes.get("/api/projects/{pid}/hdi")
+    async def hdi_get(request):
+        from tw import hdi
+        p = app.rt(request.match_info["pid"]).p.reload()
+        return jresp({"hdi": hdi.get(p.cfg), "text": hdi.describe(p.cfg), "notes": hdi.fab_notes(p.cfg)})
+
+    @routes.post("/api/projects/{pid}/hdi")
+    async def hdi_post(request):
+        """The HDI settings (the user's choice: it costs more). On, its DRC rules for microvias and blind vias go in."""
+        from tw import hdi
+        from tw.pcb import rules as dru
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        p = rt.p.reload()
+        try:
+            new = hdi.validate({**hdi.get(p.cfg), **{k: v for k, v in body.items() if k in hdi.DEFAULT}})
+        except ValueError as e:
+            return err(str(e))
+        was = hdi.get(p.cfg)
+        p.cfg["hdi"] = new
+        p.save()
+        if new["on"] and p.tw.has_pcb():
+            await asyncio.to_thread(dru.ensure_rules, p.tw, hdi.dru_rules(p.cfg), True)
+        if was["on"] != new["on"]:
+            rt.user_changes.append("HDI: the user turned it " + ("on (" + hdi.describe(p.cfg)[8:] + ")" if new["on"] else "off: through vias only, none in pads"))
+        else:
+            rt.user_changes.append("HDI settings: " + hdi.describe(p.cfg))
+        rt.hub.emit("routing.changed")
+        return jresp({"ok": True, "hdi": new, "text": hdi.describe(p.cfg)})
+
+    @routes.get("/api/projects/{pid}/regions")
+    async def regions_get(request):
+        from tw import regions
+        rt = app.rt(request.match_info["pid"])
+        p = rt.p.reload()
+        b = await asyncio.to_thread(rt.board) if p.tw.has_pcb() else None
+        return jresp({"regions": regions.listing(p.tw, b), "kinds": regions.KINDS})
+
+    @routes.post("/api/projects/{pid}/regions")
+    async def regions_post(request):
+        """{name, kind, polygon, layers?, track?, clearance?} adds (or redraws) a region; {remove: name} takes it off."""
+        from tw import regions
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: change regions when it is done, or stop it", 409)
+        body = await request.json()
+        p = rt.p.reload()
+        b = await asyncio.to_thread(rt.board)
+        try:
+            if body.get("remove"):
+                ops = regions.remove(p.tw, str(body["remove"]))
+                label, said = f"Remove region {body['remove']}", f"regions: the user removed {body['remove']}"
+            else:
+                ops = regions.add(p.tw, body.get("name"), body.get("polygon"), body.get("kind"), body.get("layers"),
+                                  body.get("track"), body.get("clearance"), by="user", copper=b.copper)
+                r = next(x for x in p.tw.cfg.get("regions") or [] if x["name"] == regions._name_ok(body.get("name")))
+                label, said = f"Region {r['name']}", "regions: the user set " + regions.describe(r)
+        except KeyError:
+            return err("no such region", 404)
+        except ValueError as e:
+            return err(str(e))
+        p.reload()
+        res, e = await _board_ops(pid, ops + [{"op": "fill"}], label, said)
+        if e:
+            return err(str(e)[:300], 422)
+        rt.hub.emit("routing.changed")
+        return jresp(res)
+
     async def _board_step(request, back):
         pid = request.match_info["pid"]
         rt = app.rt(pid)
@@ -1240,7 +1409,7 @@ def make_app():
 
     @routes.post("/api/projects/{pid}/routing")
     async def routing_post(request):
-        """{preset} | {net, mode: auto | guided | hand | null (back to the rule)}."""
+        """{preset} | {net, mode: auto | guided | hand | null (back to the rule)} | {net, layers: [...] | null}."""
         from tw import routeplan
         rt = app.rt(request.match_info["pid"])
         body = await request.json()
@@ -1249,6 +1418,10 @@ def make_app():
             if body.get("preset"):
                 await asyncio.to_thread(routeplan.set_preset, p, body["preset"])
                 rt.user_changes.append(f"routing: the user chose the {routeplan.PRESETS[body['preset']]['label']} preset")
+            elif body.get("net") and "layers" in body:
+                b_ = await asyncio.to_thread(rt.board) if p.tw.has_pcb() else None
+                await asyncio.to_thread(routeplan.set_layers, p, str(body["net"]), body.get("layers"), b_.copper if b_ else None)
+                rt.user_changes.append(f"routing: the user put {body['net']} on " + (", ".join(body["layers"]) if body.get("layers") else "any layer"))
             elif body.get("net"):
                 await asyncio.to_thread(routeplan.set_mode, p, str(body["net"]), body.get("mode"))
                 rt.user_changes.append(f"routing: the user set {body['net']} to " +

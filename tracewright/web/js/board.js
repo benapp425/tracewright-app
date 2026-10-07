@@ -1,7 +1,7 @@
 // The live board: a canvas view of the .kicad_pcb that follows every change -- Claude's placement
 // (animated), the router (net by net), the user's moves in KiCad, highlights, notes and findings --
 // with a layers panel, find, a measuring tool and the review flags.
-import { h, clear, api, toast, btn, promptDialog } from "./util.js";
+import { h, clear, api, toast, btn, promptDialog, confirmDialog, modal } from "./util.js";
 import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
 import { FloorplanView } from "./floorplan.js";
@@ -37,7 +37,7 @@ export class BoardView {
     this.el = el; this.ws = ws; this.pid = ws.pid;
     this.data = null; this.scale = 10; this.ox = 0; this.oy = 0; this.side = "F";
     this.vis = { "F.Cu": true, "B.Cu": true, inner: true, zones: true, silk: true, labels: true, unrouted: true, findings: true,
-                 fab: false, courtyard: false, notes: true, vias: true, flags: true, netnames: true };
+                 fab: false, courtyard: false, notes: true, vias: true, flags: true, netnames: true, space: false };
     this.sel = new Set(); this.selNet = null; this.kicadSel = new Set();
     this.hl = null; this.anim = {}; this.override = {}; this.live = []; this.notes = []; this.findings = [];
     this.tool = "select"; this.measure = null;
@@ -147,7 +147,8 @@ export class BoardView {
   setTool(t, quiet) {
     this.tool = t;
     for (const [k, b] of Object.entries(this.toolBtns)) if (k !== "flag") b.classList.toggle("on", k === t);
-    this.viewer.classList.toggle("tool-measure", t === "measure");
+    this.viewer.classList.toggle("tool-measure", t === "measure" || t === "region");
+    if (t === "region") toast("Drag a box over the area", "info", 2500);
     if (t !== "measure") { this.measure = null; this.measureEl.style.display = "none"; this.dirty(); }
     if (t !== "select" && !quiet && this.flags.active) this.flags.toggle(false);
   }
@@ -157,6 +158,8 @@ export class BoardView {
     try { d = await api(`/api/projects/${encodeURIComponent(this.pid)}/board`); }
     catch (e) { toast("Board: " + e.message, "error"); return; }
     this.stale = false;
+    this.space = null; this.whyCache = new Map();
+    if (this.vis.space) this.loadSpace();
     if (d.empty) { this.data = null; this.showBanner(); this.dirty(); this.flagLayer.update(); return; }
     this.banner.style.display = "none";
     const firstData = !this.data;
@@ -462,6 +465,12 @@ export class BoardView {
         this.dirty();
         return;
       }
+      if (this.tool === "region" && e.button === 0) {
+        const [x, y] = this.snapPoint(...this.toWorld(px, py));
+        this.regionRect = { a: [x, y], b: [x, y] };
+        this.dirty();
+        return;
+      }
       if (this.ed.down(e, px, py)) return;
       drag = { x: e.clientX, y: e.clientY, ox: this.ox, oy: this.oy, moved: false, px, py, shift: e.shiftKey };
     });
@@ -469,6 +478,7 @@ export class BoardView {
       const r = c.getBoundingClientRect();
       const px = e.clientX - r.left, py = e.clientY - r.top;
       if (this.measure && this.measure.on) { this.measure.b = this.snapPoint(...this.toWorld(px, py)); this.dirty(); return; }
+      if (this.regionRect) { this.regionRect.b = this.snapPoint(...this.toWorld(px, py)); this.dirty(); return; }
       if (this.ed.move(e, px, py)) return;
       if (drag) {
         const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
@@ -483,6 +493,7 @@ export class BoardView {
     });
     addEventListener("mouseup", (e) => {
       if (this.measure && this.measure.on) { this.measure.on = false; this.dirty(); return; }
+      if (this.regionRect) { const r = this.regionRect; this.regionRect = null; this.dirty(); this.regionDone(r.a, r.b); return; }
       if (this.ed.up(e)) return;
       if (!drag) return;
       c.classList.remove("panning");
@@ -697,6 +708,8 @@ export class BoardView {
       }
     }
     if (html && this.panel === "copper") html += `<br><span class="k">click: spotlight the net</span>`;
+    if (!html && this.vis.space && this.data) { this.whyAt(px, py, x, y); return; }
+    this.whyKey = null;
     if (!html) { this.tip.style.display = "none"; return; }
     this.tip.innerHTML = html;
     this.tip.style.display = "block";
@@ -888,18 +901,95 @@ export class BoardView {
     items.push(["B.Cu", "Bottom copper", COL["B.Cu"]]);
     items.push(["zones", "Pours and areas", [150, 150, 170]], ["vias", "Vias", COL.via], ["silk", "Silkscreen", COL.silkF], ["labels", "References", [200, 200, 200]], ["netnames", "Net names", [230, 230, 230]],
       ["unrouted", "Unrouted", [255, 190, 90]], ["findings", "Check findings", [240, 101, 96]], ["notes", "Claude's notes", [255, 140, 70]],
-      ["flags", "Resolved flags", [67, 194, 131]], ["courtyard", "Courtyards", [180, 90, 200]], ["fab", "Fab layer", [140, 150, 170]]);
+      ["flags", "Resolved flags", [67, 194, 131]], ["courtyard", "Courtyards", [180, 90, 200]], ["fab", "Fab layer", [140, 150, 170]],
+      ["space", "Routing space", [120, 190, 255]]);
     for (const [k, label, c] of items) {
       if (this.vis[k] === undefined) this.vis[k] = true;                 // an inner layer, on until it is turned off
       const el = h("div.lrow" + (this.vis[k] ? ".on" : ""), { onclick: () => {
         this.vis[k] = !this.vis[k]; el.classList.toggle("on", this.vis[k]); clear(eye).appendChild(icon(this.vis[k] ? "eye" : "eye-off", 13));
         if (k === "flags") this.flagLayer.render();
+        if (k === "space") { if (this.vis.space && !this.space) this.loadSpace(); this.renderLayers(); }
         this.dirty();
       } }, h("i.sw", { style: { background: rgba(c) } }), h("span", label));
       const eye = h("span.eye", icon(this.vis[k] ? "eye" : "eye-off", 13));
       el.appendChild(eye);
       this.layerBox.appendChild(el);
     }
+    if (this.vis.space) this.layerBox.appendChild(this.spaceLegend());
+  }
+
+  // ------------------------------------------------------------------ routing space: where tracks fit, and why not
+  async loadSpace() {
+    if (this.spaceLoading) return;
+    this.spaceLoading = true;
+    try { this.space = await api(`/api/projects/${encodeURIComponent(this.pid)}/board/space`); } catch (e) { this.space = { error: e.message }; }
+    this.spaceLoading = false;
+    if (this.panel === "layers") this.renderLayers();
+    this.dirty();
+  }
+
+  spaceLegend() {
+    const S = this.space;
+    const box = h("div.sp-box");
+    if (!S) { box.appendChild(h("div.pl-empty", "Measuring the routing space…")); return box; }
+    if (S.error) { box.appendChild(h("div.pl-empty", S.error)); return box; }
+    box.appendChild(h("div.sp-legend", [["ok", "room"], ["tight", "tight"], ["full", "full"], ["over", "over"]].map(([k, t]) =>
+      h("span.sp-li", h("i.sp-k." + k), t))));
+    box.appendChild(h("div.sp-sub", `${S.links} connection${S.links === 1 ? "" : "s"} to route; ${S.track}/${S.clearance} mm ${S.class} tracks. Hover the board: what keeps a track out.`));
+    for (const hot of S.hot || []) box.appendChild(h("div.sp-hot", { onclick: () => this.flyTo(padBox(hot.box, 3), 380, 0.7), "data-tip": "Show it" },
+      icon("triangle-alert", 12), h("span", hot.text)));
+    if (S.links && !(S.hot || []).length) box.appendChild(h("div.sp-sub", "Nowhere asked for more tracks than fit."));
+    return box;
+  }
+
+  drawSpace(c, px) {
+    const S = this.space;
+    if (!S || S.error || !S.ratio) return;
+    const k = S.cell;
+    for (let j = 0; j < S.ny; j++) {
+      const row = S.ratio[j], cap = S.capacity[j];
+      for (let i = 0; i < S.nx; i++) {
+        const r = row[i];
+        if (cap[i] < 0 || r < 0.5) continue;
+        c.fillStyle = r >= 1.2 ? "rgba(240,90,80,.42)" : r >= 0.9 ? "rgba(245,150,60,.34)" : "rgba(235,200,80,.22)";
+        c.fillRect(S.x0 + i * k, S.y0 + j * k, k, k);
+      }
+    }
+    c.setLineDash([4 * px, 3 * px]); c.lineWidth = 1.4 * px; c.strokeStyle = "rgba(255,120,100,.95)";
+    for (const hot of S.hot || []) { const b = hot.box; c.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]); }
+    c.setLineDash([]);
+  }
+
+  // what keeps a track off this point (the active layer: the one shown alone, else the side looked at)
+  whyAt(px, py, x, y) {
+    const layer = this.solo || (this.side === "F" ? "F.Cu" : "B.Cu");
+    const key = `${layer}:${x.toFixed(1)}:${y.toFixed(1)}`;
+    const show = (r) => {
+      if (!this.vis.space || this.whyKey !== key) return;
+      const S = this.space;
+      let html = `<b>${esc(layer)}</b> · ${r.free ? "a track fits" : "no track"}<br>`;
+      html += (r.reasons || []).filter((q) => q.kind !== "info" || r.free).slice(0, 4).map((q) => `<span class="k">${esc(q.text)}</span>`).join("<br>") || `<span class="k">${esc(r.text)}</span>`;
+      if (S && S.ratio) {
+        const i = Math.floor((x - S.x0) / S.cell), j = Math.floor((y - S.y0) / S.cell);
+        if (j >= 0 && j < S.ny && i >= 0 && i < S.nx && S.capacity[j][i] >= 0 && S.demand[j][i] > 0.05)
+          html += `<br><span class="k">here: about ${S.demand[j][i].toFixed(1)} tracks wanted, room for ${S.capacity[j][i].toFixed(1)}</span>`;
+      }
+      this.tip.innerHTML = html;
+      this.tip.style.display = "block";
+      this.tip.style.left = Math.min(px + 16, this.w - 280) + "px";
+      this.tip.style.top = Math.min(py + 14, this.h - 100) + "px";
+    };
+    this.whyKey = key;
+    if (this.whyCache.has(key)) { show(this.whyCache.get(key)); return; }
+    clearTimeout(this.whyT);
+    this.whyT = setTimeout(async () => {
+      try {
+        const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/board/why?x=${x.toFixed(2)}&y=${y.toFixed(2)}&layer=${encodeURIComponent(layer)}`);
+        if (this.whyCache.size > 400) this.whyCache.clear();
+        this.whyCache.set(key, r);
+        show(r);
+      } catch { /* the board is changing */ }
+    }, 140);
   }
 
   // ------------------------------------------------------------------ placement: the score, the stages, why each part is here
@@ -977,7 +1067,11 @@ export class BoardView {
   async loadRouting(force) {
     if (this.routingLoading || (!force && this.routing)) return this.routing;
     this.routingLoading = true;
-    try { this.routing = await api(`/api/projects/${encodeURIComponent(this.pid)}/routing`); } catch (e) { this.routing = { error: e.message }; }
+    const P = `/api/projects/${encodeURIComponent(this.pid)}`;
+    try {
+      const [r, e, g] = await Promise.all([api(`${P}/routing`), api(`${P}/escape`).catch(() => null), api(`${P}/regions`).catch(() => null)]);
+      this.routing = { ...r, escape: e, regions: g ? g.regions : [], regionKinds: g ? g.kinds : {} };
+    } catch (e) { this.routing = { error: e.message }; }
     this.routingLoading = false;
     if (this.panel === "routing") this.renderLayers();
     return this.routing;
@@ -994,6 +1088,7 @@ export class BoardView {
         (R.presets || []).map((p) => h("option", { value: p.id, selected: p.id === R.preset }, p.label))),
       h("button.tbtn", { "data-tip": "Read again", onclick: () => { this.routing = null; this.loadRouting(true); } }, icon("refresh-cw", 12))));
     if (cur) box.appendChild(h("div.rt-why", cur.why));
+    this.densePanel(box, R.escape);
     const GROUPS = [["hand", "By hand", "pencil", "The router leaves these for you; each keeps the rules under it"],
       ["guided", "With rules", "route", "Routed first, keeping their rules"], ["auto", "Auto", "zap", "The router takes these as it finds them"]];
     this.rtOpen = this.rtOpen || {};
@@ -1009,6 +1104,104 @@ export class BoardView {
       for (const n of rows.slice(0, 120)) box.appendChild(this.routingRow(n));
       if (rows.length > 120) box.appendChild(h("div.pl-empty", `and ${rows.length - 120} more`));
     }
+    this.regionsPanel(box, R.regions || []);
+  }
+
+  // dense parts: how each gets its pins out, the fan-out, and HDI (off unless the user turns it on)
+  densePanel(box, E) {
+    if (!E) return;
+    const parts = (E.parts || []).filter((p) => p.kind === "array" || !p.ok);
+    const H = E.hdi || {};
+    if (!parts.length && !H.on) return;
+    box.appendChild(h("div.pl-h", icon("waypoints", 12), "Fan-out"));
+    for (const p of parts) {
+      const state = !p.method ? ["bad", "Needs HDI"] : p.need > p.have ? ["warn", `Needs ${p.need} signal layers`] : ["ok", p.method === "top" ? "Escapes on top" : "Fits"];
+      const done = p.vias_under > 0;
+      box.appendChild(h("div.dn-part", { "data-ref": p.ref },
+        h("div.rt-line", h("b.grow", `${p.ref}`), h("span.dn-tag." + state[0], state[1])),
+        h("div.dn-lines", (p.lines || []).slice(1).map((l) => h("div", l[0].toUpperCase() + l.slice(1)))),
+        p.method && p.method !== "top" ? h("div.pl-add",
+          done ? h("span.dn-done", icon("circle-check", 12), `${p.vias_under} vias under it`) : null,
+          h("button.btn.sm" + (done ? "" : ".primary"), { onclick: (e) => this.fanOut(p.ref, p.method, e.currentTarget) },
+            done ? "Fan out the rest" : `Fan out (${p.method})`)) : null));
+    }
+    box.appendChild(h("div.dn-hdi",
+      h("div.rt-line", icon("layers", 12), h("span.grow", E.hdi_text || "HDI off"),
+        H.on ? h("button.btn.sm", { onclick: () => this.setHdi({ on: false }) }, "Turn off")
+          : h("button.btn.sm", { onclick: () => this.turnOnHdi() }, "Turn on…")),
+      H.on ? h("div.dn-opts", [["via_in_pad", "Vias in pads"], ["microvias", "Microvias"], ["blind", "Blind vias"]].map(([k, t]) =>
+        h("label.dn-opt", h("input", { type: "checkbox", checked: !!H[k], onchange: (e) => this.setHdi({ [k]: e.target.checked }) }), t))) : null));
+  }
+
+  async turnOnHdi() {
+    const ok = await confirmDialog({ title: "Turn on HDI?", ok: "Turn on",
+      text: "Vias in the pads (filled and capped) and laser microvias let dense parts get their pins out. The fab builds the board as HDI: it costs noticeably more, takes longer, and fewer fabs make it." });
+    if (ok) this.setHdi({ on: true });
+  }
+
+  async setHdi(body) {
+    try { const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/hdi`, { body }); toast(r.text, "ok", 3000); }
+    catch (e) { toast(e.message, "error"); }
+    this.routing = null; this.loadRouting(true);
+  }
+
+  async fanOut(ref, method, b) {
+    if (b) b.disabled = true;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/escape`, { body: { ref, method } });
+      const s = r.summary || {};
+      toast(s.note && !s.vias ? s.note : `${ref}: ${s.vias || 0} vias${s.stubs ? `, ${s.stubs} stubs` : ""}${s.note ? ". " + s.note : ""}`, s.vias ? "ok" : "info", 5000);
+    } catch (e) { toast(e.message, "error"); }
+    if (b) b.disabled = false;
+    this.routing = null; this.loadRouting(true);
+  }
+
+  // regions: an area with its own rules (keep-out, no vias, finer tracks, more spacing)
+  regionsPanel(box, regs) {
+    box.appendChild(h("div.pl-h", icon("square-dashed", 12), h("span.grow", `Regions (${regs.length})`),
+      h("button.tbtn", { "data-tip": "Draw a region on the board", onclick: () => this.setTool("region") }, icon("plus", 12))));
+    if (!regs.length) box.appendChild(h("div.pl-empty", "Draw an area with its own rules: keep tracks out, no vias, finer tracks, more spacing."));
+    for (const r of regs) box.appendChild(h("div.pl-c" + (r.on_board === false ? ".bad" : ""), { "data-region": r.name },
+      icon("square-dashed", 12), h("span.grow.rg-name", { onclick: () => r.box && this.flyTo(padBox(r.box, 3), 380, 0.7) }, r.text),
+      h("span.pl-by", r.by === "claude" ? "Claude" : "you"),
+      h("button.tbtn", { "data-tip": "Remove it", onclick: () => this.removeRegion(r.name) }, icon("x", 11))));
+  }
+
+  regionDone(a, b) {
+    const x0 = Math.min(a[0], b[0]), y0 = Math.min(a[1], b[1]), x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+    this.setTool("select");
+    if (x1 - x0 < 0.5 || y1 - y0 < 0.5) return;
+    const kinds = (this.routing && this.routing.regionKinds) || { keepout: "No tracks or vias", novias: "No vias", neck: "Finer tracks", spacing: "More spacing" };
+    const name = h("input", { value: "", placeholder: "Antenna" });
+    const kind = h("select", Object.entries(kinds).map(([k, t]) => h("option", { value: k }, t)));
+    const track = h("input", { value: "0.1", style: { width: "80px" } }), clr = h("input", { value: "0.1", style: { width: "80px" } });
+    const layers = h("select", h("option", { value: "" }, "Every copper layer"), (this.copper || []).map((l) => h("option", { value: l }, l)));
+    const vals = h("div.field.rg-vals", h("label", "Track and clearance (mm)"), h("div.row", track, clr));
+    const sync = () => {
+      vals.style.display = kind.value === "neck" || kind.value === "spacing" ? "" : "none";
+      track.style.display = kind.value === "neck" ? "" : "none";
+      if (kind.value === "spacing" && clr.value === "0.1") clr.value = "0.6";
+      if (kind.value === "neck" && clr.value === "0.6") clr.value = "0.1";
+    };
+    kind.addEventListener("change", sync); sync();
+    let m;
+    const save = async () => {
+      const body = { name: name.value.trim(), kind: kind.value, polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map((q) => q.map((v) => +v.toFixed(3))),
+        layers: layers.value ? [layers.value] : null, track: +track.value, clearance: +clr.value };
+      try { await api(`/api/projects/${encodeURIComponent(this.pid)}/regions`, { body }); m.close(); toast(`Region ${body.name} set`, "ok", 2500); }
+      catch (e) { toast(e.message, "error"); return; }
+      this.routing = null; this.loadRouting(true);
+    };
+    m = modal({ title: "A region with its own rules", cls: "narrow", sub: `${(x1 - x0).toFixed(1)} × ${(y1 - y0).toFixed(1)} mm`,
+      body: [h("div.field", h("label", "Name"), name), h("div.field", h("label", "Rule"), kind), vals, h("div.field", h("label", "Layers"), layers)],
+      actions: [h("button.btn", { onclick: () => m.close() }, "Cancel"), h("button.btn.primary", { onclick: save }, "Set the region")] });
+    setTimeout(() => name.focus(), 40);
+  }
+
+  async removeRegion(name) {
+    try { await api(`/api/projects/${encodeURIComponent(this.pid)}/regions`, { body: { remove: name } }); }
+    catch (e) { toast(e.message, "error"); }
+    this.routing = null; this.loadRouting(true);
   }
 
   routingRow(n) {
@@ -1027,13 +1220,17 @@ export class BoardView {
         facts ? h("span.rt-facts", facts) : null, pick),
       n.mode !== "auto" ? h("div.rt-reason", n.why[0].toUpperCase() + n.why.slice(1)) : null,
       n.mode !== "auto" && (n.rules || []).length ? h("div.rt-rules", n.rules.map((r) => h("span.rt-rule", r))) : null,
+      n.layers && n.layers.length ? h("div.rt-layers", icon("layers", 11), h("span", "On " + n.layers.join(", ")),
+        h("button.tbtn", { "data-tip": "Any layer", onclick: () => this.setRouting({ net: n.net, layers: null }) }, icon("x", 10)))
+        : n.suggest && n.mode !== "auto" ? h("div.rt-layers.sug", icon("layers", 11), h("span", `Suggested: ${n.suggest.layers.join(", ")}, ${n.suggest.why}`),
+          h("button.btn.xs", { onclick: () => this.setRouting({ net: n.net, layers: n.suggest.layers }) }, "Use")) : null,
       n.note || n.detail ? h("div.rt-note", n.note || n.detail) : null);
   }
 
   async setRouting(body) {
     try {
       await api(`/api/projects/${encodeURIComponent(this.pid)}/routing`, { body });
-      toast(body.preset ? "Router preset saved: the next route uses it" : `${body.net}: ${body.mode === "hand" ? "left for you" : body.mode === "guided" ? "routed with its rules" : body.mode === "auto" ? "left to the router" : "back to its rule"}`, "ok", 2600);
+      toast(body.preset ? "Router preset saved: the next route uses it" : "layers" in body ? `${body.net}: ${body.layers ? "on " + body.layers.join(", ") : "any layer"}` : `${body.net}: ${body.mode === "hand" ? "left for you" : body.mode === "guided" ? "routed with its rules" : body.mode === "auto" ? "left to the router" : "back to its rule"}`, "ok", 2600);
     } catch (e) { toast(e.message, "error"); }
     this.routing = null; this.loadRouting(true);
   }
@@ -1507,6 +1704,13 @@ export class BoardView {
         c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.stroke();
       }
       c.setLineDash([]);
+    }
+    if (this.vis.space) this.drawSpace(c, px);
+    if (this.regionRect) {
+      const { a, b } = this.regionRect;
+      c.fillStyle = "rgba(120,190,255,.12)"; c.strokeStyle = "rgba(120,190,255,.95)"; c.lineWidth = 1.5 * px; c.setLineDash([5 * px, 3 * px]);
+      c.fillRect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+      c.strokeRect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])); c.setLineDash([]);
     }
     // highlight: dim everything, then draw the highlighted copper bright
     if (this.hl && (this.hl.refs.size || this.hl.nets.size)) {

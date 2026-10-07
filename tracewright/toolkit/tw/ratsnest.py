@@ -94,7 +94,7 @@ def ratsnest(b):
         box = (min(a[0], c[0]) - r, min(a[1], c[1]) - r, max(a[0], c[0]) + r, max(a[1], c[1]) + r)
         add(t.net, ("track", {t.layer}, a, c, r, box))
     for v in b.vias:
-        ls = set(copper) if not v.layers or v.kind in ("through", "") else _copper_layers(v.layers, copper) or set(copper)
+        ls = set(v.span(copper))
         r = v.d / 2
         add(v.net, ("via", ls, (v.x, v.y), r, (v.x - r, v.y - r, v.x + r, v.y + r)))
     for z in b.zones:

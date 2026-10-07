@@ -55,7 +55,7 @@ class NetGraph:
             for p, q in zip(cuts, cuts[1:]):
                 self._edge(key(t.layer, p), key(t.layer, q), t.w, ("track", t.layer, p, q, t.w))
         for v in vias:
-            layers = b.copper if v.kind == "through" else v.layers
+            layers = v.span(b.copper)
             ks = [key(l, (v.x, v.y)) for l in layers]
             for k in ks[1:]:
                 self._edge(ks[0], k, WIDE, ("via", v.x, v.y))

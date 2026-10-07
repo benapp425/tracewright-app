@@ -153,7 +153,9 @@ def tool_list(rt, app):
 
     @reg("board", "Query the board. what: summary | placement (the placement score and its parts, the constraints kept or "
          "broken, the stages, parts with no reason) | routing (the routing plan: each net auto, guided or hand, why, its "
-         "rules, the router preset and how each net went last time) | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
+         "rules, the router preset and how each net went last time) | escape (each BGA and fine-pitch part: tracks "
+         "between its pads, whether a via fits between its balls, rings per layer, signal layers needed, whether it "
+         "needs HDI) | footprints (ref, value, footprint, x, y, rot, side) | footprint (one "
          "ref: pads with nets and positions) | nets (net -> pads) | net (one net: pads, tracks, vias, length) | "
          "outline | unrouted (from the last DRC) | zones. Coordinates in mm (KiCad axes, y down). When KiCad has the "
          "board open, positions include its unsaved edits.",
@@ -191,6 +193,17 @@ def tool_list(rt, app):
             if missing:
                 lines.append(f"no reason recorded for {len(missing)} parts: {', '.join(missing[:30])}")
             return _text("\n".join(lines))
+        if w == "escape":                             # how the dense parts get their pins out
+            from tw import escape as esc, hdi as hdimod
+            plans = await run(esc.plan, tw, b)
+            if not plans:
+                return _text("no ball-grid or fine-pitch parts on the board")
+            out = [hdimod.describe(tw.cfg)]
+            for pl in plans:
+                out += pl["lines"]
+                if pl.get("method") and pl["kind"] == "array" and pl["method"] != "top":
+                    out.append(f"  fan it out: fanout ref={pl['ref']} (method {pl['method']})")
+            return _text("\n".join(out))
         if w == "routing":                            # who routes each net, as the user sees it in Board > Routing
             from tw import routeplan
             if not tw.has_sch():
@@ -470,11 +483,12 @@ def tool_list(rt, app):
         hub.emit("board.changed", version=-1, source="tracewright")
         return _text(_json(res), error=not res.get("ok"))
 
-    @reg("stackup", "The board's copper layers, 2 to 10: which are signal layers (and the direction each is routed in) "
+    @reg("stackup", "The board's copper layers, 2 to 12: which are signal layers (and the direction each is routed in) "
          "and which are planes (and their nets), on the fab's standard build. Decide it from the design: 2 layers for "
          "simple, slow boards; 4 (signal, GND, supply, signal) once there is anything fast (USB, Ethernet, fast SPI, "
          "MIPI), a fine-pitch QFN/BGA to fan out, or EMC to meet; 6 or more for several fast interfaces, a BGA with "
-         "many rows or many supplies. Every signal layer next to a plane (its return path and impedance); two signal "
+         "many rows or many supplies (board what=escape says how many signal layers each BGA needs). With HDI on "
+         "(the user's choice), microvias land on the layer under each outer one: make it a signal layer. Every signal layer next to a plane (its return path and impedance); two signal "
          "layers side by side routed crosswise (x and y); a ground plane under every fast layer. The router routes on "
          "the signal layers only, each in its direction; planes are poured over the whole board. action: show (what the "
          "board has, the plan, the agreed limit, the builds) | plan (layers, preset?, roles?: per layer F.Cu first, "
@@ -510,6 +524,8 @@ def tool_list(rt, app):
                 lines.append("no board yet")
             lines.append("agreed limit: " + (f"{limit} copper layers" if limit else "none set"))
             lines.append("plan: " + (stackup.describe(plan) if plan else "none (2 signal layers; inner layers, if any, are planes)"))
+            from tw import hdi as hdimod
+            lines.append(hdimod.describe(p.cfg) + ("" if hdimod.on(p.cfg) else " (the user turns it on; offer it when a part cannot escape without it: board what=escape)"))
             if plan and plan.get("why"):
                 lines.append("why: " + plan["why"])
             if plan and b is not None and len(b.copper) != plan["layers"]:
@@ -517,7 +533,8 @@ def tool_list(rt, app):
             lines.append("builds: " + "; ".join(f"{k} ({v['title']})" for k, v in stackup.PRESETS.items()))
             n = plan["layers"] if plan else (limit or (len(b.copper) if b is not None else 4))
             if n in stackup.COUNTS:
-                lines.append(f"a starting point for {n}:\n" + stackup.describe(stackup.default_plan(n, nets)))
+                h = hdimod.get(p.cfg)
+                lines.append(f"a starting point for {n}:\n" + stackup.describe(stackup.default_plan(n, nets, hdi=h["on"] and h["microvias"])))
             return _text("\n".join(lines))
         if a == "plan":
             why = (args.get("why") or "").strip()
@@ -525,7 +542,8 @@ def tool_list(rt, app):
                 return _text("why: one or two plain sentences for the user (what needs these layers)", error=True)
             want = {k: args[k] for k in ("layers", "preset", "roles", "planes", "directions") if args.get(k) is not None}
             want["why"] = why
-            new, probs = stackup.validate(want, nets or None, limit)
+            from tw import hdi as hdimod
+            new, probs = stackup.validate(want, nets or None, limit, hdimod.get(p.cfg))
             errs = [t for s_, t in probs if s_ == "error"]
             if errs:
                 return _text("not saved: " + "; ".join(errs), error=True)
@@ -540,7 +558,8 @@ def tool_list(rt, app):
             return _text("no plan yet: action plan first", error=True)
         if b is None:
             return _text("no board yet: sync_board first (it is made with the plan's layer count)", error=True)
-        plan, probs = stackup.validate(plan, nets or None, limit)
+        from tw import hdi as hdimod
+        plan, probs = stackup.validate(plan, nets or None, limit, hdimod.get(p.cfg))
         errs = [t for s_, t in probs if s_ == "error"]
         if errs:
             return _text("the plan does not hold: " + "; ".join(errs), error=True)
@@ -551,6 +570,100 @@ def tool_list(rt, app):
         if not res.get("ok"):
             return _text(res.get("error") or "the stack-up did not apply", error=True)
         return _text("applied: " + "; ".join(res.get("did", [])))
+
+    @reg("fanout", "Fan out a ball-grid part before routing: a via for every ball that needs one -- signal balls past the "
+         "rings the top layer takes out, every power and ground ball (to its plane). method: dog-bone (a short stub to a "
+         "via between four balls, the default when one fits), via-in-pad or microvia (HDI: only when the user has turned "
+         "it on). Adds the neck-down area and plane patches under the part so DRC and the pours hold. Read board "
+         "what=escape first; route afterwards (the router starts from the vias).",
+         {"type": "object", "properties": {"ref": {"type": "string"}, "method": {"type": "string", "enum": ["dog-bone", "via-in-pad", "microvia"]}},
+          "required": ["ref"]})
+    async def fanout_tool(args):
+        from tw import escape as esc
+        tw = proj()
+        if not tw.has_pcb():
+            return _text("no board yet", error=True)
+        try:
+            ops, summ = await run(esc.fanout, tw, args["ref"], args.get("method"))
+        except ValueError as e:
+            return _text(str(e), error=True)
+        if not ops:
+            return _text(f"{args['ref']}: {summ.get('note', 'nothing to fan out')}")
+        rt.mark_self(60)
+        res = await run(pcb.apply, tw, ops)
+        rt.mark_self(4)
+        hub.emit("board.changed", version=-1, source="tracewright")
+        if not res.get("ok"):
+            return _text("the fan-out did not apply: " + "; ".join(r.get("error", "") for r in res.get("results", []) if not r.get("ok")), error=True)
+        return _text(f"{summ['ref']}: {summ['vias']} vias ({summ['method']})" + (f", {summ['stubs']} stubs" if summ.get("stubs") else "")
+                     + ". Next: route; run_checks drc and hdi.vias.")
+
+    @reg("region", "Rules for one area of the board, kept by KiCad's DRC and the router: kind keepout (no tracks or "
+         "vias: an antenna's clearance, under a crystal), novias (tracks pass, no vias), neck (finer tracks and spacing: "
+         "under a dense connector; track and clearance in mm), spacing (more clearance between nets, no pour: high "
+         "voltage; clearance in mm). polygon: [[x, y], ...] board mm; layers: copper layers (default all). action: list | "
+         "add | remove (name). The user's regions are theirs: do not remove or redraw them unasked.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "add", "remove"]}, "name": {"type": "string"},
+                                           "kind": {"type": "string", "enum": ["keepout", "novias", "neck", "spacing"]},
+                                           "polygon": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                                           "layers": {"type": "array", "items": {"type": "string"}},
+                                           "track": {"type": "number"}, "clearance": {"type": "number"}},
+          "required": ["action"]})
+    async def region_tool(args):
+        from tw import regions
+        tw = proj()
+        if not tw.has_pcb():
+            return _text("no board yet", error=True)
+        a = args.get("action")
+        b = await run(rt.board)
+        if a == "list":
+            rs = regions.listing(tw, b)
+            return _text("\n".join(f"{r['text']} (by {r.get('by', 'user')})" + ("" if r.get("on_board") else " -- not on the board")
+                                   for r in rs) or "no regions")
+        try:
+            if a == "remove":
+                mine = next((r for r in tw.cfg.get("regions") or [] if r["name"] == args.get("name")), None)
+                if mine and mine.get("by") == "user":
+                    return _text(f"{mine['name']} is the user's region: ask them before removing it", error=True)
+                ops = regions.remove(tw, args.get("name"))
+            else:
+                ops = regions.add(tw, args.get("name"), args.get("polygon"), args.get("kind"), args.get("layers"),
+                                  args.get("track"), args.get("clearance"), by="claude", copper=b.copper)
+        except KeyError:
+            return _text(f"no region {args.get('name')}", error=True)
+        except ValueError as e:
+            return _text(str(e), error=True)
+        rt.mark_self(30)
+        res = await run(pcb.apply, tw, ops + [{"op": "fill"}])
+        rt.mark_self(4)
+        hub.emit("board.changed", version=-1, source="tracewright")
+        hub.emit("routing.changed")
+        if not res.get("ok"):
+            return _text("the region did not apply: " + "; ".join(r.get("error", "") for r in res.get("results", []) if not r.get("ok")), error=True)
+        return _text(("removed " + args["name"]) if a == "remove" else "set: " + regions.describe(
+            next(r for r in tw.cfg.get("regions") or [] if r["name"] == regions._name_ok(args.get("name")))))
+
+    @reg("routing_plan", "Change the routing plan the user sees in Board > Routing (board what=routing reads it). action "
+         "mode: a net's mode -- auto (the router), guided (routed first with its rules), hand (left for the copper tool) "
+         "or null (back to its rule); action layers: the layers the net is routed on (its pads keep a short escape on "
+         "their own layer), [] for any. Respect the user's choices (marked set by you): change them only when asked.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["mode", "layers"]}, "net": {"type": "string"},
+                                           "mode": {"type": ["string", "null"]}, "layers": {"type": "array", "items": {"type": "string"}}},
+          "required": ["action", "net"]})
+    async def routing_plan_tool(args):
+        from tw import routeplan
+        p.reload()
+        try:
+            if args["action"] == "mode":
+                routeplan.set_mode(p, args["net"], args.get("mode"))
+            else:
+                b = await run(rt.board) if p.tw.has_pcb() else None
+                routeplan.set_layers(p, args["net"], args.get("layers") or None, b.copper if b else None)
+        except ValueError as e:
+            return _text(str(e), error=True)
+        hub.emit("routing.changed")
+        return _text(f"{args['net']}: " + (f"mode {args.get('mode') or 'by its rule'}" if args["action"] == "mode"
+                                          else "on " + (", ".join(args.get("layers") or []) or "any layer")))
 
     @reg("route", "Route nets with the grid router (human style: 0/45/90, few vias, supplies first; streamed live to the "
          "app and into KiCad when the board is open). nets: names (default: every unrouted net); clear: tear up those "
@@ -604,7 +717,8 @@ def tool_list(rt, app):
                 # what the file path does after routing: neck-down areas + their DRC rule, pour islands
                 if g.necks:
                     from tw.pcb import rules
-                    rules.ensure_rules(tw, dict([rules.neck_rule(driver.NECK_CL)]))
+                    rules.ensure_rules(tw, dict([rules.neck_rule(g.neck_cl)]), replace=True)
+                    driver.neck_board_rules(tw, g.neck_w, g.neck_cl)
                     areas = [o for o in g.ops([], []) if o.get("op") == "rule_area"]
                     if areas:
                         await run(pcb.apply, tw, areas)

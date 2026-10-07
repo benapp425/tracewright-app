@@ -1,5 +1,5 @@
 // The calculators: the numbers a board needs, worked out with this board's own stack-up -- trace width
-// for a current (IPC-2221), via current, impedance (IPC-2141 microstrip and stripline, single and
+// for a current (IPC-2221), via current, tracks between pads and vias (fan-out), impedance (IPC-2141 microstrip and stripline, single and
 // differential), dividers with real resistor values, LED resistors, RC filters, crystal load
 // capacitors, regulator heat and battery life. Values accept SI prefixes (4k7, 100n, 2.2u, 3M3).
 import { h, clear, api, btn } from "./util.js";
@@ -51,6 +51,20 @@ export const CALCS = [
       const R = RHO * (parseSI(v.len) / 1000) / (Amm2 / 1e6);
       const n = Math.ceil(parseSI(v.need) / I);
       return [["Per via", `${I.toFixed(2)} A`, `at +${dT} °C`, true], ["Vias for " + v.need + " A", String(n), "in parallel, spread along the path"], ["Resistance", fmtSI(R, "Ω"), "per via"]];
+    } },
+  { id: "fit", title: "Tracks between pads", icon: "waypoints", note: "n tracks fit in a gap when n·w + (n + 1)·s ≤ gap. A via between four balls needs half their diagonal for its radius, the clearance and the ball's.",
+    inputs: () => [["pitch", "Pitch (centre to centre)", "mm", "0.8"], ["pad", "Pad or ball land", "mm", "0.4"], ["w", "Track width", "mm", "0.1"], ["s", "Clearance", "mm", "0.1"], ["via", "Via pad", "mm", "0.45"]],
+    run: (v) => {
+      const P = parseSI(v.pitch), pad = parseSI(v.pad), w = parseSI(v.w), s = parseSI(v.s), via = parseSI(v.via);
+      const fit = (gap) => Math.max(0, Math.floor((gap - s) / (w + s) + 1e-9));
+      const nPad = fit(P - pad), nVia = fit(P - via);
+      const half = P * Math.SQRT2 / 2, need = via / 2 + s + pad / 2, dog = half >= need - 1e-9 && P >= via + s - 1e-9;
+      const next = (gap, n) => (gap - (n + 2) * s) / (n + 1);              // the width at which one more track fits
+      const more = next(P - pad, nPad);
+      return [["Between pads", String(nPad), `in a ${(P - pad).toFixed(3)} mm gap`, true], ["Between vias", String(nVia), `in a ${(P - via).toFixed(3)} mm gap`],
+        ["Via between four balls", dog ? "fits" : "does not fit", `needs ${need.toFixed(3)} mm from each ball, has ${half.toFixed(3)}`],
+        ["Rings out per layer", `${1 + nPad} on top, ${1 + nVia} under vias`, "the outer ring, and one more per track between"],
+        more > 0.05 ? ["For one more track", `${more.toFixed(3)} mm wide`, "at the same clearance"] : null].filter(Boolean);
     } },
   { id: "z", title: "Impedance", icon: "activity", note: "IPC-2141 approximation, within about 5–10 %. Confirm with the fab for controlled impedance.",
     inputs: (c) => [["type", "Line", "", "microstrip", ["microstrip", "stripline"]], ["mode", "Pair", "", "differential", ["single", "differential"]],

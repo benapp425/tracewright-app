@@ -186,6 +186,18 @@ class Track:
 class Via:
     __slots__ = ("x", "y", "d", "drill", "layers", "net", "kind", "uuid", "locked")
 
+    def span(self, copper):
+        """Every copper layer the via joins: all of them for a through via, else those from one end of its pair to
+        the other (a blind via F.Cu-In2.Cu joins In1.Cu too)."""
+        copper = list(copper)
+        if self.kind in ("through", "") or not self.layers:
+            return copper
+        ends = [l for l in self.layers if l in copper]
+        if len(ends) < 2:
+            return ends or copper
+        i, j = sorted(copper.index(l) for l in ends[:2])
+        return copper[i:j + 1]
+
 
 class Zone:
     def __init__(self):
@@ -299,7 +311,7 @@ class Board:
                 ls = find(c, "layers")
                 v.layers = [str(x) for x in ls[1:]] if ls else ["F.Cu", "B.Cu"]
                 v.net = _net(c, netcodes)
-                v.kind = "blind" if "blind" in c else ("micro" if "micro" in c else "through")
+                v.kind = next((k for k in ("blind", "buried", "micro") if k in c), "through")
                 v.uuid = str(value(c, "uuid", "") or value(c, "tstamp", ""))
                 v.locked = flag(c, "locked")
                 if v.net:

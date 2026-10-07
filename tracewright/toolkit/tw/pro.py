@@ -57,3 +57,24 @@ def _match(pat, net):
         except re.error:
             return False
     return fnmatch.fnmatchcase(net, pat) or fnmatch.fnmatchcase(net.rsplit("/", 1)[-1], pat)
+
+
+def set_board_rules(path, values, lower_only=False):
+    """Write board constraints (design_settings.rules) into the .kicad_pro the way KiCad keeps it. lower_only: only where
+    the new value is below the one there (a neck-down must not loosen a stricter board). Returns what changed."""
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    rules = d.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})
+    changed = {}
+    for k, v in values.items():
+        cur = rules.get(k)
+        if lower_only and cur is not None and float(cur) <= float(v) + 1e-9:
+            continue
+        if cur != v:
+            rules[k] = v
+            changed[k] = (cur, v)
+    if changed:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+            f.write("\n")
+    return changed

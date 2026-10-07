@@ -1400,6 +1400,59 @@ async def routing_panel_modes_and_reasons(t):
         await t.page.js(f"{BV} && {BV}.setPanel('layers'); 1")
 
 
+@test
+async def routing_space_regions_and_hdi(t):
+    """The board's routing space: the overlay and its legend, and hovering an empty spot says whether a track fits there
+    and why not. A region drawn on the board (a keep-out) is listed with its rule and removed again. HDI is offered in
+    the Routing tab with what it costs, and turned off again."""
+    root = t.s.demo["root"]
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.ws && {BV}.data)", 30)
+        await t.page.js(f"localStorage.setItem('tw.layers.collapsed', '0'); {BV}.setPanel('layers'); 1")
+        await t.page.js("[...document.querySelectorAll('.lrow')].find((r) => r.textContent.includes('Routing space')).click(); 1")
+        await t.page.wait("document.querySelector('.sp-legend') && document.querySelector('.sp-sub')", 30)
+        sub = await t.page.js("document.querySelector('.sp-sub').textContent")
+        check("connections to route" in sub or "connection to route" in sub, sub)
+        # hover a spot on the board: inside U2's pin 1 (no track of another net) and an open spot
+        await t.page.js(f"(() => {{ const b = {BV}, f = b.byRef.U2, p = f.pads.find((q) => String(q.n) === '1'); "
+                        f"const [x, y] = [p.x, p.y]; const [px, py] = b.toScreen(x, y); b.whyAt(px, py, x, y); return 1; }})()")
+        await t.page.wait(f"{BV}.tip.style.display === 'block' && {BV}.tip.textContent.includes('no track')", 15)
+        tip = await t.page.js(f"{BV}.tip.textContent")
+        check("U2 pin 1" in tip, tip)
+        await t.shot("routing-space")
+        await t.page.js(f"[...document.querySelectorAll('.lrow')].find((r) => r.textContent.includes('Routing space')).click(); 1")
+        # a region: drawn, set, listed, removed
+        await t.page.js(f"{BV}.setPanel('routing'); 1")
+        await t.page.wait("[...document.querySelectorAll('.pl-h')].some((x) => x.textContent.includes('Regions (0)'))", 20)
+        await t.page.js(f"{BV}.regionDone([140, 101], [149, 108]); 1")
+        await t.page.wait("document.querySelector('.modal input')", 10)
+        await t.page.js("(() => { const i = document.querySelector('.modal input'); i.value = 'Antenna'; "
+                        "[...document.querySelectorAll('.modal button')].find((b) => b.textContent === 'Set the region').click(); return 1; })()")
+        await t.page.wait("[...document.querySelectorAll('.pl-c[data-region]')].some((r) => r.textContent.includes('Antenna: no tracks or vias'))", 40)
+        await t.shot("routing-regions")
+        await t.page.js("document.querySelector('.pl-c[data-region=\"Antenna\"] button').click(); 1")
+        await t.page.wait("[...document.querySelectorAll('.pl-h')].some((x) => x.textContent.includes('Regions (0)'))", 40)
+        # HDI: offered with its cost, on, then off
+        await t.page.js(f"{BV}.turnOnHdi(); 1")
+        await t.page.wait("document.querySelector('.modal') && document.querySelector('.modal').textContent.includes('costs noticeably more')", 10)
+        await t.page.js("[...document.querySelectorAll('.modal button')].find((b) => b.textContent === 'Turn on').click(); 1")
+        await t.page.wait("document.querySelector('.dn-hdi') && document.querySelector('.dn-hdi').textContent.includes('HDI on')", 20)
+        check(await t.page.js("document.querySelectorAll('.dn-opt input').length") == 3, "the HDI options")
+        await t.page.js("[...document.querySelectorAll('.dn-hdi button')].find((b) => b.textContent === 'Turn off').click(); 1")
+        await t.page.wait("!document.querySelector('.dn-hdi')", 20)
+    finally:
+        cfgp = os.path.join(root, "tracewright.json")
+        try:
+            cfg = json.load(open(cfgp))
+            cfg.pop("hdi", None)
+            cfg.pop("regions", None)
+            json.dump(cfg, open(cfgp, "w"), indent=2)
+        except (OSError, ValueError):
+            pass
+        await t.page.js(f"{BV} && {BV}.setPanel('layers'); 1")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

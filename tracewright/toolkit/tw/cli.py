@@ -372,6 +372,35 @@ def cmd_stackup(a):
     return 0 if res.get("ok") else 1
 
 
+def cmd_escape(a):
+    """The dense parts' escape plans (tracks between balls, vias, rings per layer, layers needed, HDI)."""
+    from tw import escape, hdi
+    p = env.project()
+    print(hdi.describe(p.cfg))
+    plans = escape.plan(p, refs=[a.ref] if a.ref else None)
+    for pl in plans:
+        print("\n".join(pl["lines"]))
+    if not plans:
+        print("no ball-grid or fine-pitch parts on the board")
+    return 0
+
+
+def cmd_space(a):
+    """Where tracks fit: the crowded regions (connections against the room), or at one point what keeps a track out."""
+    from tw import space
+    p = env.project()
+    if a.x is not None and a.y is not None:
+        print(space.why(p, a.x, a.y, a.layer, a.net)["text"])
+        return 0
+    c = space.congestion(p, a.net_class or "Default")
+    print(f"{c['links']} connections to route; {c['track']}/{c['clearance']} mm {c['class']} tracks; {c['cell']} mm blocks")
+    for hot in c["hot"]:
+        print(f"  crowded at ({hot['box'][0]:.1f}, {hot['box'][1]:.1f})-({hot['box'][2]:.1f}, {hot['box'][3]:.1f}): {hot['text']}")
+    if c["links"] and not c["hot"]:
+        print("  nowhere asked for more tracks than fit")
+    return 0
+
+
 def cmd_nets(a):
     """The net model: list it, declare a net's facts, or size net classes from them."""
     from tw import netmodel
@@ -510,7 +539,15 @@ def main(argv=None):
     sm.add_argument("probes", nargs="*")
     su = sub.add_parser("stackup", help="the copper layers: show (the plan, or a starting point) | apply (the saved plan onto the board)")
     su.add_argument("action", nargs="?", default="show", choices=["show", "apply"])
-    su.add_argument("--layers", type=int, choices=[2, 4, 6, 8, 10])
+    su.add_argument("--layers", type=int, choices=[2, 4, 6, 8, 10, 12])
+    es = sub.add_parser("escape", help="how each BGA and fine-pitch part gets its pins out: tracks between balls, vias, layers needed, HDI")
+    es.add_argument("ref", nargs="?")
+    sp = sub.add_parser("space", help="where tracks fit: the crowded regions; with --x --y, what keeps a track off that point")
+    sp.add_argument("--x", type=float)
+    sp.add_argument("--y", type=float)
+    sp.add_argument("--layer", default="F.Cu")
+    sp.add_argument("--net")
+    sp.add_argument("--class", dest="net_class")
     st = sub.add_parser("style")
     st.add_argument("style", nargs="?", choices=["flat", "hierarchical"])
     st.add_argument("--dry-run", action="store_true")

@@ -3806,6 +3806,222 @@ def routing_plan_says_who_routes_each_net():
     asyncio.run(go())
 
 
+def _bga_board(name, fp_name, layers, sig_rings, hdi_on=False):
+    """The demo board grown to fit a ball-grid part placed beside it: the outline 95 x 45 mm, the stack-up for `layers`
+    (the HDI layout when HDI is on), the part U9 at (172, 122) with its outer rings on signals SIG_<ball> and the rest on
+    GND and +3V3."""
+    import re
+    from tw import stackup, hdi
+    from tw.pcb import client
+    from tw.board import Board
+    p = fixture_copy(name)
+    if hdi_on:
+        p.cfg["hdi"] = hdi.validate({"on": True})
+        p.save_cfg()
+    assert client.apply(p, [{"op": "outline", "rect": [100, 100, 195, 145]}], live=False)["ok"]
+    plan, _ = stackup.validate({"layers": layers}, {x: 1 for x in Board.load(p.pcb).nets}, None, hdi.get(p.cfg))
+    p.cfg["stackup"] = plan
+    p.save_cfg()
+    assert stackup.apply(p, plan, live=False)["ok"]
+    lib = os.path.join(env.share_dir("footprints"), "Package_BGA.pretty")
+    txt = open(os.path.join(lib, fp_name + ".kicad_mod")).read()
+    pads = re.findall(r'\(pad "([A-Z]+\d+)" smd \w+\s*\(at ([-\d.]+) ([-\d.]+)', txt)
+    xs, ys = sorted({float(x) for _, x, _ in pads}), sorted({float(y) for _, _, y in pads})
+    nets = {}
+    for ball, x, y in pads:
+        r, c = ys.index(float(y)), xs.index(float(x))
+        ring = min(r, c, len(ys) - 1 - r, len(xs) - 1 - c)
+        nets[ball] = f"SIG_{ball}" if ring < sig_rings and (r + c) % 5 else ("GND" if (r + c) % 2 == 0 else "+3V3")
+    res = client.apply(p, [{"op": "footprint", "dir": lib, "name": fp_name, "ref": "U9", "x": 172, "y": 122, "nets": nets}], live=False)
+    assert res["ok"], res
+    return p
+
+
+@test(needs=("kicad", "kpy"))
+def twelve_layers_hdi_and_bga_fanout():
+    """Up to 12 layers, each signal layer beside a plane; HDI off unless the user turns it on (its own stack-up layout,
+    DRC rules and fab notes); a BGA's escape plan (tracks between balls, a via between four, rings per layer, layers
+    needed) and its fan-out -- dog-bones on a 0.8 mm part, microvias stacked to the ground plane on a 0.5 mm one -- clean
+    in KiCad's DRC; the checks say when vias and the build disagree."""
+    from tw import stackup, hdi, escape, kicad
+    from tw.pcb import client
+    from tw.board import Board
+    from tw.checks import runner
+    plan = stackup.default_plan(12, {"GND": 40, "+3V3": 20})
+    plan, probs = stackup.validate(plan, ["GND", "+3V3"])
+    assert not [t for s_, t in probs if s_ == "error"] and plan["layers"] == 12, probs
+    assert stackup.routing_layers(plan) == ["F.Cu", "In2.Cu", "In4.Cu", "In7.Cu", "In9.Cu", "B.Cu"], stackup.routing_layers(plan)
+    assert not [t for s_, t in probs if "no plane next to it" in t], probs
+    assert stackup.validate({"layers": 14})[1][0][0] == "error"
+    assert stackup.default_plan(6, None, hdi=True)["roles"][:2] == ["signal", "signal"]
+    _, probs = stackup.validate({"layers": 6, "hdi_layout": False}, ["GND"], None, {"on": True, "microvias": True})
+    assert any("microvias land on In1.Cu" in t for _, t in probs), probs
+    assert hdi.get({})["on"] is False and hdi.describe({}).startswith("HDI off")
+    try:
+        hdi.validate({"micro_d": 0.1, "micro_drill": 0.15})
+        raise AssertionError("a microvia with no ring was taken")
+    except ValueError:
+        pass
+    assert not hdi.dru_rules({}) and "A.Via_Type == 'Micro'" in hdi.dru_rules({"hdi": {"on": True}})["tw microvias"]
+    assert escape.tracks_between(0.4, 0.1, 0.1) == 1 and escape.tracks_between(0.25, 0.1, 0.1) == 0
+    assert escape.via_fits(0.8, 0.4, 0.45, 0.1) and not escape.via_fits(0.5, 0.25, 0.45, 0.1)
+
+    # a 0.8 mm BGA on four layers: dog-bones, DRC clean (only the test's one-ball signals dangle)
+    p = _bga_board("bga08", "BGA-169_11.0x11.0mm_Layout13x13_P0.8mm_Ball0.5mm_Pad0.4mm_NSMD", 4, 5)
+    pl = escape.plan(p)
+    u9 = next(x for x in pl if x["ref"] == "U9")
+    assert u9["kind"] == "array" and u9["pitch"] == 0.8 and u9["via_fits"] and u9["method"] == "dog-bone", u9
+    assert u9["tracks_between_balls"] == 1 and u9["top_rings"] == 2 and u9["have"] == 2 and u9["need"] > 2, u9
+    assert any("signal layers needed" in l for l in u9["lines"]), u9["lines"]
+    ops, summ = escape.fanout(p, "U9")
+    assert summ["method"] == "dog-bone" and summ["vias"] == summ["stubs"] > 0, summ
+    assert any(o["op"] == "rule_area" and o["name"] == "TW neck U9" for o in ops) and any(o["op"] == "zone" and o["name"].startswith("TW patch") for o in ops), [o["op"] for o in ops]
+    assert client.apply(p, ops, live=False)["ok"]
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+    bad = [v["description"] for v in d["violations"] if v["type"] not in ("via_dangling",)]
+    assert not bad, bad[:4]
+    res = runner.run_all(p, only=["hdi.fanout", "hdi.vias"], offline=True, write=False)
+    by = {c["id"]: c for c in res["checks"]}
+    assert any("needs about" in f["message"] for f in by["hdi.fanout"]["findings"]), by["hdi.fanout"]
+    assert not [f for f in by["hdi.vias"]["findings"] if f["severity"] in ("error", "warning")], by["hdi.vias"]["findings"]
+
+    # a 0.5 mm BGA: no via fits between its balls; with HDI off it says so, on it takes microvias in the pads
+    p = _bga_board("bga05", "BGA-256_11.0x11.0mm_Layout20x20_P0.5mm_Ball0.3mm_Pad0.25mm_NSMD", 6, 4)
+    u9 = next(x for x in escape.plan(p) if x["ref"] == "U9")
+    assert u9["method"] is None and "microvias" in u9["hdi"], u9
+    try:
+        escape.fanout(p, "U9")
+        raise AssertionError("fanned out with HDI off")
+    except ValueError as e:
+        assert "HDI" in str(e), e
+    p = _bga_board("bga05h", "BGA-256_11.0x11.0mm_Layout20x20_P0.5mm_Ball0.3mm_Pad0.25mm_NSMD", 6, 4, hdi_on=True)
+    assert stackup.get(p.cfg)["roles"] == ["signal", "signal", "plane", "plane", "signal", "signal"], stackup.get(p.cfg)
+    ops, summ = escape.fanout(p, "U9")
+    assert summ["method"] == "microvia" and summ["vias"] > 100, summ
+    vias = [v for o in ops if o["op"] == "vias" for v in o["items"]]
+    gnd = [v for v in vias if v["net"] == "GND"]
+    assert gnd and all(v["kind"] == "micro" for v in vias) and {tuple(v["layers"]) for v in gnd} == {("F.Cu", "In1.Cu"), ("In1.Cu", "In2.Cu")}, gnd[:2]
+    assert "power or ground ball" in summ.get("note", ""), summ          # +3V3 is three layers down: said, not faked
+    assert client.apply(p, ops, live=False)["ok"]
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+    bad = [v["description"] for v in d["violations"] if v["type"] in ("annular_width", "via_diameter", "drill_out_of_range", "clearance", "hole_clearance")]
+    assert not bad, bad[:4]
+    res = runner.run_all(p, only=["hdi.vias"], offline=True, write=False)
+    f = res["checks"][0]["findings"]
+    assert [x for x in f if "deep with a 0.1 mm hole" in x["message"]] and not [x for x in f if x["severity"] == "error"], f
+    p.cfg["hdi"]["on"] = False
+    p.save_cfg()
+    res = runner.run_all(p, only=["hdi.vias"], offline=True, write=False)
+    assert any(x["severity"] == "error" and "HDI is off" in x["message"] for x in res["checks"][0]["findings"]), res["checks"][0]["findings"]
+
+
+@test(needs=("kicad", "kpy"))
+def routing_space_regions_and_layer_plan():
+    """Where tracks fit and why not: the crowded spots of an unrouted board in words; at a point, the plane layer, the
+    pad in the way, or room for a track. Regions with their own rules: no vias under a part and a keep-out are kept by the
+    router, more spacing keeps the pours out, DRC clean. A net planned onto an inner layer is routed there (its pads keep a
+    short escape). The app's endpoints for all of it."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tw import space, regions, routeplan, stackup, kicad, geom
+    from tw.pcb import client
+    from tw.route import driver
+    from tw.board import Board
+    p = fixture_copy("space")
+    assert client.apply(p, [{"op": "delete", "all": True, "kinds": ["track", "via"]}], live=False)["ok"]
+    c = space.congestion(p, cell=0.5)
+    assert c["links"] > 20 and c["hot"] and "connection" in c["hot"][0]["text"] and c["hot"][0]["parts"], c["hot"][:2]
+    assert len(c["ratio"]) == c["ny"] and len(c["ratio"][0]) == c["nx"]
+    b = Board.load(p.pcb)
+    assert space.why(p, 50, 50, "F.Cu", board=b)["text"] == "Outside the board."
+    pd = next(x for x in b.footprints["U2"].pads if str(x.num) == "1")
+    w = space.why(p, pd.x, pd.y, "F.Cu", board=b)
+    assert not w["free"] and any(r["kind"] == "pad" and "U2 pin 1" in r["text"] for r in w["reasons"]), w
+    w = space.why(p, 103.0, 103.0, "F.Cu", board=b)
+    assert w["free"] or w["reasons"], w
+
+    # regions, then a route that keeps them
+    p = fixture_copy("regions")
+    b = Board.load(p.pcb)
+    bb = b.footprints["U2"].bbox()
+    ops = regions.add(p, "Under U2", [[bb[0] - 1, bb[1] - 1], [bb[2] + 1, bb[1] - 1], [bb[2] + 1, bb[3] + 1], [bb[0] - 1, bb[3] + 1]], "novias")
+    ops += regions.add(p, "Antenna", [[140, 101], [149, 101], [149, 108], [140, 108]], "keepout")
+    ops += regions.add(p, "HV", [[100.5, 125], [112, 125], [112, 134], [100.5, 134]], "spacing", clearance=0.6)
+    assert client.apply(p, ops, live=False)["ok"]
+    try:
+        regions.add(p, "bad", [[0, 0], [1, 0]], "keepout")
+        raise AssertionError("a region with no area was taken")
+    except ValueError:
+        pass
+    r = driver.route(p, clear=True, live=False, log=lambda m: None)["summary"]
+    assert r["routed"] == r["nets"] and not r["failed"], r
+    b = Board.load(p.pcb)
+    zone = {z.name: z for z in b.zones if z.is_rule_area}
+    assert not [v for v in b.vias if geom.inside((v.x, v.y), zone["TW region Under U2"].outline[0])]
+    assert not [t for t in b.tracks if geom.inside(t.a, zone["TW region Antenna"].outline[0]) or geom.inside(t.b, zone["TW region Antenna"].outline[0])]
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+    assert not [v for v in d["violations"] if v["type"] not in ("via_dangling",)], [v["description"] for v in d["violations"]][:4]
+    assert [x["text"] for x in regions.listing(p, b)] == ["Under U2: no vias", "Antenna: no tracks or vias", "HV: 0.6 mm between nets, no pour"]
+    assert client.apply(p, regions.remove(p, "Antenna"), live=False)["ok"]
+    assert "TW region Antenna" not in {z.name for z in Board.load(p.pcb).zones}
+
+    # a layer plan: I2C_SDA on In2.Cu of six layers
+    p = fixture_copy("layerplan")
+    plan, _ = stackup.validate({"layers": 6}, {x: 1 for x in Board.load(p.pcb).nets})
+    p.cfg["stackup"] = plan
+    p.save_cfg()
+    assert stackup.apply(p, plan, live=False)["ok"]
+    routeplan.set_layers(p, "I2C_SDA", ["In2.Cu"], Board.load(p.pcb).copper)
+    sug = routeplan.classify(p)
+    usb = next(m for n, m in sug.items() if n.endswith("USB_D_P"))
+    assert usb["suggest"]["layers"] == ["F.Cu", "In2.Cu", "B.Cu"] and "ground plane" in usb["suggest"]["why"], usb
+    r = driver.route(p, clear=True, live=False, log=lambda m: None)["summary"]
+    assert not r["failed"] and not r["off_layer_plan"], r
+    b = Board.load(p.pcb)
+    sda = [t for t in b.tracks if t.net.endswith("/I2C_SDA")]
+    pads = [(x.x, x.y) for x in b.pads() if x.net.endswith("/I2C_SDA")]
+    on = sum(t.length() for t in sda if t.layer == "In2.Cu")
+    off = [t for t in sda if t.layer != "In2.Cu"]
+    assert on > 5 and all(min(geom.dist(e, q) for e in (t.a, t.b) for q in pads) < 1.6 for t in off), (on, [(t.layer, t.a, t.b) for t in off])
+    try:
+        routeplan.set_layers(p, "I2C_SDA", ["In9.Cu"], b.copper)
+        raise AssertionError("a layer the board does not have was taken")
+    except ValueError:
+        pass
+
+    # the app
+    pid = ProjectStore().import_copy(FIXTURE, "Dense demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c_:
+            rt = app.rt(pid)
+            sp = await (await c_.get(f"/api/projects/{pid}/board/space")).json()
+            assert sp["nx"] > 10 and "hot" in sp and sp["links"] == 0, {k: sp[k] for k in ("nx", "links")}
+            w = await (await c_.get(f"/api/projects/{pid}/board/why?x=50&y=50&layer=F.Cu")).json()
+            assert w["text"] == "Outside the board.", w
+            e = await (await c_.get(f"/api/projects/{pid}/escape")).json()
+            assert e["hdi"]["on"] is False and e["parts"] is not None, e
+            r = await c_.post(f"/api/projects/{pid}/hdi", json={"on": True})
+            assert r.status == 200 and any("turned it on" in u for u in rt.user_changes), rt.user_changes
+            assert (await c_.post(f"/api/projects/{pid}/hdi", json={"micro_d": 0.05, "micro_drill": 0.1})).status == 400
+            assert "tw microvias" in open(os.path.splitext(rt.p.tw.pcb)[0] + ".kicad_dru").read()
+            r = await c_.post(f"/api/projects/{pid}/regions", json={"name": "Keep clear", "kind": "keepout",
+                                                                     "polygon": [[140, 101], [149, 101], [149, 108], [140, 108]]})
+            assert r.status == 200, await r.text()
+            g = await (await c_.get(f"/api/projects/{pid}/regions")).json()
+            assert g["regions"][0]["text"] == "Keep clear: no tracks or vias" and g["regions"][0]["box"], g
+            assert (await c_.post(f"/api/projects/{pid}/regions", json={"remove": "Keep clear"})).status == 200
+            assert (await c_.post(f"/api/projects/{pid}/routing", json={"net": "I2C_SDA", "layers": ["B.Cu"]})).status == 200
+            js = await (await c_.get(f"/api/projects/{pid}/routing")).json()
+            assert next(n for n in js["nets"] if n["net"] == "I2C_SDA")["layers"] == ["B.Cu"], js["nets"][:3]
+            assert (await c_.post(f"/api/projects/{pid}/routing", json={"net": "I2C_SDA", "layers": ["In7.Cu"]})).status == 400
+            rt.stop()
+    asyncio.run(go())
+
+
 @test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on
