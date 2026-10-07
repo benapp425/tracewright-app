@@ -396,7 +396,13 @@ class ProjectStore:
                "checks": {}, "stages": {"brief": {"status": "active", "note": "", "updated": now()}},
                "run_mode": options.get("run_mode") if options.get("run_mode") in RUN_MODES else "autonomous",
                # sheets joined strictly by sheet pins unless the user picks global labels (the guided start asks)
-               "schematic": {"style": options.get("schematic_style") if options.get("schematic_style") in ("hierarchical", "flat") else "hierarchical"}}
+               "schematic": {"style": options.get("schematic_style") if options.get("schematic_style") in ("hierarchical", "flat")
+                             else ("flat" if config.settings().get("default_schematic_style") == "flat" else "hierarchical")}}
+        pre = config.settings().get("default_route_preset", "balanced")
+        if pre and pre != "balanced":
+            cfg["route"] = {"preset": pre}
+        if config.settings().get("default_tp_side") == "F":
+            cfg["make"] = {"tp_side": "F"}
         if options.get("workflow") == "guided":
             cfg["start"] = {"mode": "guided", "phase": "intake", "since": now()}
         scaffold.new_project(root, cfg, brief)

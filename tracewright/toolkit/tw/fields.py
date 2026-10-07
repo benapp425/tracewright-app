@@ -250,7 +250,7 @@ def _smooth(a, m, r):
     return np.where(m & (n > 0), s / np.maximum(n, 1), 0.0)
 
 
-def ir_drop(ctx, net, amps=None, loads=None, source=None, cell=None, max_cells=1_500_000):
+def ir_drop(ctx, net, amps=None, loads=None, source=None, cell=None, max_cells=350_000):
     """Voltage drop through the net's copper from its source to its loads, and the current density on the way."""
     from .checks.power import _terminals, _source, rail_voltages
     from .checks.power_layout import _rail_current
@@ -390,7 +390,7 @@ def ir_drop(ctx, net, amps=None, loads=None, source=None, cell=None, max_cells=1
         rhs[cells] -= a_ / len(cells)
         load_cells[ref] = (cells, a_)
     keep = live
-    V, iters = _cg(n, ei, ej, g, np.where(keep, 0.0, 1.0), np.where(keep, rhs, 0.0), fixed | ~keep)
+    V, iters = _cg(n, ei, ej, g, np.where(keep, 0.0, 1.0), np.where(keep, rhs, 0.0), fixed | ~keep, tol=1e-6)
     drop_mv = -V * 1000.0
     try:
         rv = rail_voltages(ctx) if nl is not None else {}

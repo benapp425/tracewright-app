@@ -79,6 +79,8 @@ function registerGlobal() {
     run: () => (calcs = calcs || new Calculators()).open(state.current && state.current.pid ? state.current : null) });
   command("help", { title: "About Tracewright", icon: "info", group: "Help", run: () => aboutDialog() });
   command("tour", { title: "Take the tour", icon: "map-pin", group: "Help", run: () => startTour(true) });
+  command("guide", { title: "How Tracewright is laid out", icon: "book-open", group: "Help", run: () => guide() });
+  command("doctor", { title: "Check the setup", icon: "list-checks", group: "Help", run: () => setupDialog() });
   command("whats-new", { title: "Release notes", icon: "sparkles", group: "Help", run: () => whatsNew(true) });
   command("sign-out", { title: "Sign out", icon: "log-out", group: "Account", when: () => !!(state.auth && state.auth.user), run: () => signOut() });
   command("account", { title: "Your account", icon: "user", group: "Account", when: () => !!(state.auth && state.auth.user), run: () => go("settings/account") });
@@ -119,6 +121,38 @@ export function aboutDialog() {
     actions: [h("button.btn.primary", { onclick: () => m.close() }, "Done")] });
 }
 
+const GUIDE = [
+  ["layout-grid", "Overview", "Where the design stands: its stages, what Claude did last, what needs you."],
+  ["circuit-board", "Design", "The board, the schematic and the 3D model. On the board: Layers, Copper (a net at a time), Placement (why each part is where it is) and Routing (who routes each net, the router preset, fan-out, HDI, regions); the routing space shows where tracks fit."],
+  ["list", "Parts", "The BOM and its stock, the order for the fab, and Make: the BOM's health, test points, fab and assembly drawings, a panel, the enclosure fit, and your blocks."],
+  ["list-checks", "Checks", "What the checks found, the sign-off against the requirements, and the design rules."],
+  ["activity", "Simulate", "The board as laid out: voltage drop, return currents, heat, a net's edge and impedance, a rail's impedance, and circuits from the schematic in ngspice."],
+  ["folder", "Project", "The documents, the files and the history (every change, with undo)."],
+];
+
+export function guide() {
+  modal({ title: "How Tracewright is laid out", icon: "book-open", cls: "guide", body: [
+    h("p.small.muted", "Claude works in the chat on the left; the design is on the right, in six places. Tell Claude what to do in plain words, or change things yourself: what you change, Claude sees."),
+    ...GUIDE.map(([ic, t, d]) => h("div.guide-row", h("div.gi", icon(ic, 16)), h("div", h("b", t), h("div.small", d)))),
+    h("div.guide-tips", h("b", "Good to know"), h("ul",
+      h("li", "Open the design in KiCad any time (Open in KiCad, top right): edits there come back here."),
+      h("li", "Every change is in the history: undo it there, or ask Claude to."),
+      h("li", "Claude never orders, pays or publishes for you."),
+      h("li", "If Claude says you are signed out: run claude in a terminal, then /login."))),
+  ], actions: [h("button.btn", { onclick: () => startTour(true) }, "Take the tour"), h("button.btn.primary", { onclick: (e) => e.target.closest(".modal-bg").remove() }, "Done")] });
+}
+
+export async function setupDialog() {
+  const body = h("div.col", h("div.small.muted", "Checking…"));
+  modal({ title: "The setup", icon: "list-checks", cls: "narrow", body: [body] });
+  try {
+    const d = await api("/api/doctor");
+    clear(body);
+    for (const c of d.checks) body.appendChild(h("div.srow", h("div.sic" + (c.ok ? ".ok" : c.required ? ".bad" : ".warn"), icon(c.ok ? "circle-check" : c.required ? "circle-x" : "triangle-alert", 13)),
+      h("div.grow", h("div", { style: { fontWeight: 500 } }, c.title), h("div.small.muted", c.ok ? c.detail : c.fix))));
+  } catch (e) { clear(body).appendChild(h("div.small.muted", e.message)); }
+}
+
 function shortcutsHelp(intro) {
   const groups = [
     ["General", [["mod+k", "Command palette"], ["mod+,", "Settings"], ["mod+n", "New project"], ["mod+o", "Import project"], ["mod+shift+p", "Projects"], ["mod+/", "Keyboard shortcuts"]]],
@@ -155,7 +189,9 @@ export function topbar(left = [], right = []) {
 function helpMenu(anchor) {
   menu(anchor, [
     { head: BRAND.name + (state.info ? " " + state.info.version : "") },
+    { label: "How Tracewright is laid out", icon: "book-open", run: () => guide() },
     { label: "Keyboard shortcuts", icon: "keyboard", kbd: "mod+/", run: () => shortcutsHelp() },
+    { label: "Check the setup", icon: "list-checks", run: () => setupDialog() },
     { label: "Take the tour", icon: "map-pin", run: () => startTour(true) },
     { label: "Release notes", icon: "sparkles", run: () => whatsNew(true) },
     "-",

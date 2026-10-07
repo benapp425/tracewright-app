@@ -159,6 +159,8 @@ export class ProjectsPage {
 
   setupCard(info) {
     const rows = [];
+    for (const c of (info.doctor || []).filter((x) => x.required && !x.ok && !["kicad", "claude", "packages"].includes(x.id)))
+      rows.push([c.title + ": " + c.detail, c.fix, "Settings", () => go("settings/about")]);
     if (!info.kicad.cli) rows.push(["KiCad not found", "Install KiCad 9 or 10, or set its location in Settings.", "Settings", () => go("settings/kicad")]);
     if (!info.claude_auth) rows.push(["Claude not connected", info.server_mode ? "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY on the server."
       : "Sign in to Claude Code, or add an API key in Settings.", "Settings", () => go("settings/claude")]);

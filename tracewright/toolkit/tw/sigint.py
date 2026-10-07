@@ -38,8 +38,15 @@ def _rows(b):
     has no stack-up)."""
     rows = [(l["name"], l["type"], float(l.get("thickness") or 0), float(l.get("epsilon_r") or 0)) for l in b.stackup
             if l.get("type") in ("copper", "core", "prepreg")]
-    if not any(r[1] == "copper" for r in rows):
-        rows = [("F.Cu", "copper", 0.035, 0), ("core", "core", 1.51, 4.5), ("B.Cu", "copper", 0.035, 0)]
+    if {r[0] for r in rows if r[1] == "copper"} != set(b.copper):     # no build in the file: an even one for its layers
+        cu = list(b.copper) or ["F.Cu", "B.Cu"]
+        tcu = [0.035 if l in ("F.Cu", "B.Cu") else 0.0152 for l in cu]
+        d = max(0.1, ((b.thickness or 1.6) - sum(tcu)) / max(1, len(cu) - 1))
+        rows = []
+        for k, (l, t) in enumerate(zip(cu, tcu)):
+            rows.append((l, "copper", t, 0))
+            if k < len(cu) - 1:
+                rows.append((f"dielectric {k + 1}", "core", d, 4.4))
     return rows
 
 
@@ -717,6 +724,8 @@ def _plane_cap(ctx, net):
                 if not g_area:
                     continue
                 h, er = _between(b, l, nb)
+                if not h:
+                    continue
                 a = min(area, g_area)
                 c = EPS0 * er * (a * 1e-6) / (h * 1e-3)
                 if best is None or c > best["c"]:

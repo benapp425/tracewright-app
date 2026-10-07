@@ -1558,6 +1558,48 @@ async def make_view_gets_the_board_built(t):
             shutil.rmtree(os.path.join(root, "build", sub), ignore_errors=True)
 
 
+CONTRAST_JS = """(sel) => { const lum = (c) => { const m = c.match(/[\\d.]+/g).map(Number); const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(m[0]) + 0.7152 * f(m[1]) + 0.0722 * f(m[2]); };
+  const bg = (el) => { while (el) { const c = getComputedStyle(el).backgroundColor; const a = (c.match(/[\\d.]+/g) || []).map(Number); if (a.length === 3 || (a.length === 4 && a[3] > 0.5)) return c; el = el.parentElement; } return 'rgb(255,255,255)'; };
+  const out = []; for (const el of document.querySelectorAll(sel)) { if (!el.offsetParent || !el.textContent.trim()) continue;
+    const a = lum(getComputedStyle(el).color), b = lum(bg(el)); const r = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); out.push([el.textContent.trim().slice(0, 30), +r.toFixed(2)]); }
+  return out; }"""
+
+
+@test
+async def new_views_read_in_the_light_theme(t):
+    """Simulate, Make and the board's Routing tab in the light theme: every piece of text stands out from what is
+    behind it (WCAG contrast 4.5:1 for body text)."""
+    await t.page.js("localStorage.setItem('tw.theme', 'light'); location.reload(); 1")
+    await asyncio.sleep(1.0)
+    try:
+        await t.open_project()
+        await t.page.wait("document.documentElement.dataset.theme === 'light' || document.body.classList.contains('light') || "
+                          "getComputedStyle(document.body).backgroundColor.match(/\\d+/g).map(Number).reduce((a, b) => a + b, 0) > 600", 15)
+        await t.place("simulate")
+        await t.page.wait("document.querySelector('.sm-run')", 20)
+        await t.page.js("document.querySelector('.sm-run').click(); 1")
+        await t.page.wait("document.querySelector('.sm-lines')", 60)
+        low = [x for x in await t.page.js(f"({CONTRAST_JS})('.sm-lines div, .sm-tabs button, .sm-note, .sm-table td, .sm-f span')") if x[1] < 4.5]
+        n = len(await t.page.js(f"({CONTRAST_JS})('.sm-lines div, .sm-tabs button')"))
+        check(n >= 5 and not low, f"Simulate, low contrast: {low[:5]} (of {n})")
+        await t.shot("light-simulate")
+        await t.place("parts", "make")
+        await t.page.wait("document.querySelector('.mk-score b')", 60)
+        low = [x for x in await t.page.js(f"({CONTRAST_JS})('.mk-h h3, .mk-sub, .mk-lines div, .sm-table td, .pl-empty')") if x[1] < 4.5]
+        check(not low, f"Make, low contrast: {low[:5]}")
+        await t.shot("light-make")
+        await t.place("design", "board")
+        await t.page.wait(f"!!({BV} && {BV}.data)", 30)
+        await t.page.js(f"localStorage.setItem('tw.layers.collapsed', '0'); {BV}.setPanel('routing'); 1")
+        await t.page.wait("document.querySelectorAll('.rt-net').length > 3", 20)
+        low = [x for x in await t.page.js(f"({CONTRAST_JS})('.rt-name, .rt-reason, .rt-why, .pl-h')") if x[1] < 4.5]
+        check(not low, f"Routing, low contrast: {low[:5]}")
+        await t.shot("light-routing")
+    finally:
+        await t.page.js(f"localStorage.setItem('tw.theme', 'dark'); {BV} && {BV}.setPanel('layers'); 1")
+
+
 # ------------------------------------------------------------------ running
 async def run(args):
     out = os.path.abspath(args.out)

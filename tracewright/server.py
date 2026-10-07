@@ -538,9 +538,23 @@ def make_app():
                       "freerouting": os.environ.get("TW_FREEROUTING"), "java": shutil.which("java"),
                       "live_api": twlive.HAVE_KIPY and not app.server_mode, "platform": sys.platform,
                       "problems": await asyncio.to_thread(config.native_problems),
+                      "doctor": await asyncio.to_thread(_doctor, app.settings),
                       "server_mode": app.server_mode, "auth": app.require_auth, "claude_auth": _claude_auth(app.settings),
                       "check_count": overview.check_count(), "plan_usage": usage.last(),
                       "repo": REPO_URL})
+
+    def _doctor(settings):
+        from . import doctor
+        try:
+            return doctor.checks(settings)
+        except Exception:
+            return []
+
+    @routes.get("/api/doctor")
+    async def doctor_checks(request):
+        """The setup, checked (doctor.py): what is missing and how to fix it."""
+        from . import doctor
+        return jresp({"checks": await asyncio.to_thread(doctor.checks, app.settings)})
 
     @routes.get("/api/usage")
     async def plan_usage(request):

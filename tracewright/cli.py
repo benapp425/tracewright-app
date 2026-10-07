@@ -13,43 +13,14 @@ import argparse, json, os, sys, shutil, subprocess
 
 
 def doctor():
-    from tw import env
-    from . import config, history
+    from . import config, doctor as doc
     ok = True
-    k = env.kicad()
-    rows = []
-    rows.append(("KiCad", bool(k["cli"]), f"{k['version']} ({k['cli']})" if k["cli"] else
-                 "not found -- install KiCad 9 or 10 (kicad.org), or set kicad_cli in Settings"))
-    rows.append(("KiCad Python (pcbnew)", bool(k["python"]), k["python"] or "not found -- board editing needs it"))
-    rows.append(("KiCad symbol/footprint libraries", bool(k["share"]), k["share"] or "not found"))
-    try:
-        import kipy  # noqa: F401
-        from tw import live
-        on = live.api_enabled()
-        rows.append(("KiCad live link (kicad-python)", True,
-                     "installed; KiCad's API is on" if on else
-                     "installed; KiCad's API is off -- turn it on in Settings or in KiCad: Preferences > Plugins"))
-    except ImportError:
-        rows.append(("KiCad live link (kicad-python)", False, "pip install kicad-python"))
-    try:
-        import claude_agent_sdk
-        rows.append(("Claude Agent SDK", True, claude_agent_sdk.__version__))
-    except ImportError:
-        rows.append(("Claude Agent SDK", False, "pip install claude-agent-sdk"))
-    s = config.settings()
-    auth = "API key in Settings" if s.get("anthropic_api_key") else (
-        "Claude Code login (claude)" if shutil.which("claude") else "none: add an API key in Settings or install Claude Code")
-    rows.append(("Claude sign-in", bool(s.get("anthropic_api_key") or shutil.which("claude")), auth))
-    rows.append(("git (project history)", history.available(), shutil.which("git") or "not found"))
-    rows.append(("Java (Freerouting)", bool(shutil.which("java")), shutil.which("java") or "optional"))
-    fr = os.environ.get("TW_FREEROUTING")
-    rows.append(("Freerouting", bool(fr), fr or "optional: put freerouting-2.x.jar in " + os.path.join(config.data_dir(), "vendor")))
-    bad = config.native_problems()
-    rows.append(("Compiled packages", not bad, "; ".join(bad) or "ok (Pillow, numpy, kicad-python)"))
-    for name, good, detail in rows:
-        print(f"  {'ok ' if good else '-- '} {name:<34} {detail}")
-        if not good and name in ("KiCad", "Claude Agent SDK", "KiCad Python (pcbnew)", "Compiled packages"):
-            ok = False
+    for c in doc.checks():
+        print(f"  {'ok ' if c['ok'] else '-- '} {c['title']:<40} {c['detail']}")
+        if not c["ok"]:
+            print(f"       {c['fix']}")
+            if c["required"]:
+                ok = False
     print(f"\n  data folder: {config.data_dir()}\n  projects:    {config.workspace()}")
     return 0 if ok else 1
 

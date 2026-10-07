@@ -78,6 +78,9 @@ DEFAULTS = {
     "lookup_model": "off",                 # the librarian subagent's model for look-ups: sonnet | haiku | off (its first use asks)
     "second_opinion": "off",               # a reviewer reads each run that changed the design: off | sonnet | opus | haiku
     "placement_stop_stages": False,        # Claude stops after each placement stage (fixed, main, support, rest) for the user's OK
+    "default_schematic_style": "hierarchical",   # new projects: hierarchical sheets joined by sheet pins, or flat
+    "default_route_preset": "balanced",    # new projects: how the router weighs vias against length and corners
+    "default_tp_side": "B",                # new projects: the side test points go on
 }
 
 _lock = threading.Lock()

@@ -4200,6 +4200,38 @@ def getting_the_board_built():
 
 
 @test()
+def setup_check_and_new_project_defaults():
+    """The setup check says what the app needs and how to fix what is missing (every row has a title and a detail; a
+    missing one a fix), the info the projects page reads carries it, and a new project starts with the Design defaults
+    from Settings: flat sheets, the dense router preset, test points on top."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import doctor, config
+    rows = doctor.checks()
+    ids = {r["id"] for r in rows}
+    assert {"kicad", "pcbnew", "libraries", "ngspice", "claude", "packages", "workspace", "git"} <= ids, ids
+    assert all(r["title"] and r["detail"] for r in rows) and all(r["fix"] for r in rows if not r["ok"]), rows
+    assert next(r for r in rows if r["id"] == "kicad")["required"] is True
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            info = await (await c.get("/api/info")).json()
+            assert {r["id"] for r in info["doctor"]} == ids, info["doctor"]
+            d = await (await c.get("/api/doctor")).json()
+            assert len(d["checks"]) == len(rows)
+            app.settings.update({"default_schematic_style": "flat", "default_route_preset": "dense", "default_tp_side": "F"})
+            p = ProjectStore().create("Defaults demo", "a tiny board", {})
+            assert p.cfg["schematic"]["style"] == "flat" and p.cfg["route"]["preset"] == "dense" and p.cfg["make"]["tp_side"] == "F", p.cfg
+            app.settings.update({"default_schematic_style": "hierarchical", "default_route_preset": "balanced", "default_tp_side": "B"})
+            p2 = ProjectStore().create("Defaults demo 2", "", {})
+            assert p2.cfg["schematic"]["style"] == "hierarchical" and "route" not in p2.cfg and "make" not in p2.cfg, p2.cfg
+    asyncio.run(go())
+
+
+@test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on
     one edge never overlap, blocks sit inside the board clear of the holes, the connectors and each other (a bottom-side

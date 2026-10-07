@@ -9,7 +9,7 @@ import { native, isNative } from "./native.js";
 
 const MODELS = [["claude-opus-5-5", "Claude Opus 5.5 (recommended)"], ["claude-fable-5-1", "Claude Fable 5.1"], ["claude-sonnet-5", "Claude Sonnet 5 (faster)"],
   ["claude-haiku-4-5-20251001", "Claude Haiku 4.5 (fastest)"], ["default", "Claude Code default"]];
-const SECTIONS = [["account", "Account", "user"], ["general", "General", "sliders-horizontal"], ["claude", "Claude", "sparkles"], ["github", "GitHub", "git-branch"],
+const SECTIONS = [["account", "Account", "user"], ["general", "General", "sliders-horizontal"], ["claude", "Claude", "sparkles"], ["design", "Design", "circuit-board"], ["github", "GitHub", "git-branch"],
   ["kicad", "KiCad and tools", "circuit-board"], ["server", "Server", "cloud"], ["about", "About", "info"]];
 const SECRET = ["anthropic_api_key", "github_token", "server_password"];
 
@@ -181,9 +181,20 @@ export class SettingsPage {
       this.row("Projects folder", null, h("div.row", ws, isNative ? btn("folder", null, { "data-tip": "Choose…", onclick: async () => {
         const p = await native.pick({ kind: "folder", title: "Choose the projects folder" }); if (p) { ws.value = p; this.mark("workspace"); }
       } }, "sm") : null)),
-      this.row("Default fab", "For new projects", this.sel("fab_house", [["jlcpcb", "JLCPCB"], ["pcbway", "PCBWay"], ["oshpark", "OSH Park"]])),
       this.row("Placement speed", "Seconds between parts during live placement", this.inp("live_pace_s", { type: "number", step: "0.05", min: "0", max: "2", style: { width: "90px" } })),
       isNative ? null : this.row("Open browser on start", null, this.sw("open_browser"))]);
+  }
+
+  design() {
+    this.group("New projects", "What a new design starts with. Each project can change its own.", [
+      this.row("Schematic sheets", "Hierarchical: sheets joined by sheet pins. Flat: joined by global labels.",
+        this.sel("default_schematic_style", [["hierarchical", "Hierarchical"], ["flat", "Flat"]])),
+      this.row("Router preset", "How the router weighs vias against length and corners",
+        this.sel("default_route_preset", [["balanced", "Balanced"], ["dense", "Dense"], ["clean", "Few vias"], ["short", "Shortest"]])),
+      this.row("Test points on", "The side a fixture probes", this.sel("default_tp_side", [["B", "The bottom"], ["F", "The top"]])),
+      this.row("Default fab", null, this.sel("fab_house", [["jlcpcb", "JLCPCB"], ["pcbway", "PCBWay"], ["oshpark", "OSH Park"]]))]);
+    this.group("Placement", "Claude places a board in stages: connectors and what the floorplan fixed, the main chips, their support parts, the rest.", [
+      this.row("Stop after each stage", "For your OK before the next one", this.sw("placement_stop_stages"))]);
   }
 
   claude() {
@@ -213,8 +224,6 @@ export class SettingsPage {
       this.row("Looser design rules", "A clearance, track width or via made smaller", this.sw("approve_rules")),
       this.row("Changes to the agreed limits", "Kept as agreed until you approve", this.sw("approve_limits")),
       this.row("Anything after sign-off", "Every change once you have signed the design off", this.sw("approve_signed"))]);
-    this.group("Placement", "Claude places a board in stages: connectors and what the floorplan fixed, the main chips, their support parts, the rest.", [
-      this.row("Stop after each stage", "Claude says what it placed and why, and waits for your OK before the next stage", this.sw("placement_stop_stages"))]);
     const auth = { api_key: "API key", subscription_token: "Claude plan token", claude_code: "Claude Code" }[info.claude_auth] || "Not connected";
     this.group("Connection", null, [
       this.status("Claude", !!info.claude_auth, auth),
@@ -259,6 +268,12 @@ export class SettingsPage {
 
   about() {
     const info = this.info;
+    const setup = h("div.col", h("div.small.muted", "Checking…"));
+    api("/api/doctor").then((d) => {
+      clear(setup);
+      for (const c of d.checks) setup.appendChild(h("div.srow2.dr-row", h("div.sl", h("div.st.row", h("span.dot" + (c.ok ? ".ok" : c.required ? ".err" : "")), c.title),
+        !c.ok && c.fix ? h("div.sd", c.fix) : null), h("div.sc", h("span.sv" + (/^[\/~]/.test(c.detail) ? ".mono" : ""), c.detail))));
+    }).catch((e) => { clear(setup).appendChild(h("div.small.muted", e.message)); });
     const upd = h("span.sv", "Checking…");
     api("/api/update").then((u) => {
       clear(upd);
@@ -267,6 +282,7 @@ export class SettingsPage {
       else if (u.available) upd.append(h("b", `${u.latest} available `), h("a", { onclick: () => native.openURL(u.url) }, "Download"));
       else upd.textContent = "Up to date";
     }).catch(() => { upd.textContent = ""; });
+    this.group("Setup", "What the app needs from this Mac, and what makes it better.", [setup]);
     this.group("Tracewright", null, [
       this.status("Version", null, info.version, upd),
       this.row("Release notes", null, btn("sparkles", "View", { onclick: () => import("./app.js").then((m) => m.whatsNew(true)) }, "sm")),
