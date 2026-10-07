@@ -54,6 +54,15 @@ class NetGraph:
                 cuts.sort(key=lambda p: geom.dist(p, t.a))
             for p, q in zip(cuts, cuts[1:]):
                 self._edge(key(t.layer, p), key(t.layer, q), t.w, ("track", t.layer, p, q, t.w))
+        # track ends that sit inside each other's copper without meeting exactly (a neck stepping onto a wider
+        # track a few hundredths off): KiCad counts them joined, so does this
+        tends = [(t.layer, e, t.w) for t in tracks for e in (t.a, t.b)]
+        for i, (la, pa, wa) in enumerate(tends):
+            for lb, pb, wb in tends[i + 1:]:
+                if la == lb:
+                    d = geom.dist(pa, pb)
+                    if 1e-3 < d <= max(wa, wb) / 2:
+                        self._edge(key(la, pa), key(lb, pb), min(wa, wb), ("track", la, pa, pb, min(wa, wb)))
         for v in vias:
             layers = v.span(b.copper)
             ks = [key(l, (v.x, v.y)) for l in layers]

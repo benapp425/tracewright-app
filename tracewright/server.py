@@ -1681,6 +1681,110 @@ def make_app():
         rt.hub.emit("datasheets")
         return jresp({"saved": f})
 
+    @routes.get("/api/projects/{pid}/simulate")
+    async def simulate_get(request):
+        """What the Simulate tab can run: the supply rails (voltage, declared current), the signal nets (fast ones
+        first, with their kind), the parts known to get warm, and the last result of each kind (build/sim)."""
+        rt = app.rt(request.match_info["pid"])
+        p = rt.p.reload()
+
+        def work():
+            out = {"rails": [], "signals": [], "heat": [], "board": p.tw.has_pcb(), "schematic": p.tw.has_sch(), "last": {}}
+            if not (p.tw.has_pcb() and p.tw.has_sch()):
+                return out
+            from tw.checks.context import Context
+            from tw.checks.power import rail_voltages
+            from tw.checks.power_layout import _rail_current
+            from tw.checks.signal import fast_nets
+            from tw import fields
+            ctx = Context(p.tw, offline=True)
+            b = ctx.board
+            volts = rail_voltages(ctx)
+            grounds = set(ctx.ground_nets())
+            for r in sorted(ctx.power_nets()):
+                full = next((n for n in b.nets if n.rsplit("/", 1)[-1] == r), None)
+                if full is None:
+                    continue
+                out["rails"].append({"net": r, "volts": volts.get(r), "amps": _rail_current(ctx, full)})
+            fast = fast_nets(ctx, b)
+            routed = {t.net for t in b.tracks}
+            sig = []
+            for n in sorted(routed):
+                s_ = n.rsplit("/", 1)[-1]
+                if not n or s_ in grounds or s_ in ctx.power_nets() or n.startswith("unconnected-"):
+                    continue
+                sig.append({"net": s_, "kind": fast.get(n, "")})
+            out["signals"] = sorted(sig, key=lambda x: (not x["kind"], x["net"]))
+            out["heat"] = fields.heat_sources(ctx)
+            d = os.path.join(p.tw.build, "sim")
+            for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+                if f.endswith(".json"):
+                    try:
+                        out["last"][f[:-5]] = json.load(open(os.path.join(d, f)))
+                    except (OSError, ValueError):
+                        pass
+            return out
+        return jresp(await asyncio.to_thread(work))
+
+    @routes.post("/api/projects/{pid}/simulate/{kind}")
+    async def simulate_run(request):
+        """Run one: drop {net, amps?, loads?, source?} | heat {sources?, ambient?, air?} | return {net} |
+        signal {net, rise_ns?, rs?, series?, receiver?} | pdn {net, ripple?, step?} | circuit {name, refs, sources,
+        loads, extra, analysis, probes}. The summary (lines and numbers) is kept in build/sim/<kind>.json for Claude."""
+        kind = request.match_info["kind"]
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json()
+        p = rt.p.reload()
+        if kind not in ("drop", "heat", "return", "signal", "pdn", "circuit"):
+            return err("no such simulation", 404)
+        if not p.tw.has_pcb() and kind != "circuit":
+            return err("there is no board yet", 404)
+
+        def work():
+            from tw.checks.context import Context
+            from tw import fields, sigint, blocksim
+            if kind == "circuit":
+                info = blocksim.run(p.tw, str(body.get("name") or "block"), [str(r) for r in body.get("refs") or []],
+                                    body.get("sources") or [], body.get("loads") or [], body.get("extra") or [],
+                                    body.get("analysis") or None, body.get("probes") or [], body.get("title") or "")
+                return info, {"lines": info.get("lines") or [], "notes": info.get("notes"), "name": info.get("name")}
+            ctx = Context(p.tw, offline=True)
+            if kind == "drop":
+                r = fields.ir_drop(ctx, str(body.get("net") or ""), body.get("amps"), body.get("loads") or None, body.get("source") or None)
+            elif kind == "heat":
+                auto = {s["ref"]: s for s in fields.heat_sources(ctx)}
+                for s_ in body.get("sources") or []:
+                    if s_.get("ref"):
+                        auto[str(s_["ref"])] = {"ref": str(s_["ref"]), "watts": float(s_.get("watts") or 0), "why": s_.get("why") or "set by you"}
+                r = fields.heat(ctx, [s_ for s_ in auto.values() if s_["watts"] > 0], body.get("ambient"), body.get("air") or "still")
+            elif kind == "return":
+                r = sigint.return_paths(ctx, str(body.get("net") or ""))
+            elif kind == "signal":
+                net = str(body.get("net") or "")
+                r = sigint.reflections(ctx, net, body.get("rise_ns"), float(body.get("rs") or 25), body.get("series") or None,
+                                       body.get("receiver") or None)
+                r["crosstalk"] = sigint.crosstalk(ctx, net, r["rise_ns"])
+                r["lines"] = r["lines"] + r["crosstalk"]["lines"][:3]
+            else:
+                r = sigint.pdn(ctx, str(body.get("net") or ""), float(body.get("ripple") or 0.05), body.get("step"))
+            keep = {k: v for k, v in r.items() if k in ("net", "lines", "loads", "hot", "parts", "sources", "max_c", "result",
+                                                        "fix", "peaks", "target", "caps", "gaps", "vias", "max_density", "assumed")}
+            return r, keep
+        try:
+            res, keep = await asyncio.to_thread(work)
+        except ValueError as e:
+            return err(str(e), 422)
+        d = os.path.join(p.tw.build, "sim")
+        os.makedirs(d, exist_ok=True)
+        keep["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        keep["kind"] = kind
+        with open(os.path.join(d, f"{kind}.json"), "w") as f:
+            json.dump(keep, f, indent=1, default=str)
+        if kind == "circuit":
+            rt.hub.emit("sims.changed")
+        rt.user_changes.append(f"simulate ({kind}, by the user): " + "; ".join((keep.get("lines") or [])[:2]))
+        return jresp(res)
+
     @routes.get("/api/projects/{pid}/sims")
     async def sims_list(request):
         """The simulations kept in docs/sim (Claude's simulate tool): each one's probes, results, pass criterion and

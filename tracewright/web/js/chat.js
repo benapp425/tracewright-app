@@ -29,7 +29,7 @@ const stamp = () => new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").r
 
 export const ICON = { status: "info", design: "list", board: "circuit-board", show: "target", annotate: "map-pin", place: "move", route: "route", copper: "layers",
   sync_board: "refresh-cw", silk: "pencil", run_checks: "list-checks", render: "image", parts: "microchip", stage: "list-todo", lessons: "book-open",
-  snapshot: "bookmark", kicad: "plug", outputs: "package", review: "flag", agenda: "list-todo", stackup: "layers", fanout: "waypoints", region: "square-dashed", routing_plan: "route", simulate: "activity",
+  snapshot: "bookmark", kicad: "plug", outputs: "package", review: "flag", agenda: "list-todo", stackup: "layers", fanout: "waypoints", region: "square-dashed", routing_plan: "route", board_sim: "activity", simulate: "activity",
   evidence: "badge-check", waive: "shield-check", library: "bookmark", nets: "waypoints", canvas: "layout-grid",
   Bash: "terminal", Read: "file-text", Grep: "search", Glob: "search", Edit: "pencil", Write: "pencil", MultiEdit: "pencil", NotebookEdit: "pencil",
   WebFetch: "external-link", WebSearch: "search", TodoWrite: "list-todo", Skill: "sparkles", Task: "bot", Agent: "bot", TaskOutput: "terminal", TaskStop: "circle-stop" };
@@ -93,6 +93,9 @@ export function stepText(name, inp) {
     case "region": return [inp.action === "add" ? `Set the region ${inp.name || ""}` : inp.action === "remove" ? `Removed the region ${inp.name || ""}` : "Read the regions"];
     case "routing_plan": return [inp.action === "layers" ? `Put ${inp.net} on ${arr(inp.layers).join(", ") || "any layer"}` : `Set ${inp.net} to ${inp.mode || "its rule"}`];
     case "fanout": return [`Fanned out ${inp.ref || "a part"}${inp.method ? " (" + inp.method + ")" : ""}`];
+    case "board_sim": return [{ drop: `Simulated the voltage drop on ${inp.net || "a rail"}`, heat: "Simulated the board's heat",
+      return: `Traced ${inp.net || "a net"}'s return current`, signal: `Simulated ${inp.net || "a signal"}'s edge`, pdn: `Simulated ${inp.net || "a rail"}'s impedance`,
+      circuit: `Simulated ${arr(inp.refs).slice(0, 5).join(", ") || "a circuit block"}` }[inp.kind] || "Ran a board simulation"];
     case "simulate": return [`Simulated ${inp.label || inp.name || "a circuit"}`, arr(inp.probes).join(", ")];
     case "evidence": return [inp.action === "add" ? `Recorded evidence for ${inp.requirement || "a requirement"}` : inp.action === "remove" ? "Removed evidence" : "Read the requirements' evidence", inp.action === "add" ? inp.label : ""];
     case "waive": return [inp.action === "propose" ? `Proposed a waiver: ${inp.title || inp.key || ""}` : inp.action === "withdraw" ? "Withdrew a waiver" : "Read the waivers"];

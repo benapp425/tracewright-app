@@ -25,8 +25,13 @@ A Tracewright PCB project. KiCad project: `{{kicad_project}}`.
   divider or sense amplifier's output, an RC delay, an LED's current, a supply's start-up), show it with the
   `simulate` tool (KiCad's ngspice): it keeps the netlist and plot in docs/sim and records the result as the
   requirement's evidence. The regulators' heat (power.thermal) goes with the temperature requirements by itself.
+- The laid-out board can be simulated (`board_sim`, the user's Simulate tab): a rail's voltage drop and current
+  density through its copper, the board's heat from the parts that get warm, where a fast net's return current runs
+  and the gaps it detours round, a net's impedance and edge at the far end (and the series resistor that tames it),
+  a rail's impedance against its target, and a block of the schematic in ngspice. Run them before calling a layout
+  done on anything with heavy currents, fast edges or a dense supply; say what you assumed (currents, edges).
 - Schematic notes: one plain line on the sheet beside the part it explains; the reasoning goes in the design notes
   (`why=` in the schematic script, or the `notes` tool), which the app shows beside the part. Sheets are joined
   hierarchically (sheet pins) unless the project says flat (tracewright.json schematic.style).
-- The copper layers (2 to 10) are a plan you make with the `stackup` tool -- signal layers and their routing
+- The copper layers (2 to 12) are a plan you make with the `stackup` tool -- signal layers and their routing
   directions, planes and their nets, the fab's build -- before the board is made; the router follows it.

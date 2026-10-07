@@ -997,6 +997,62 @@ def tool_list(rt, app):
         hub.emit("signoff")
         return _text(f"recorded for {req}: {e['kind']} [{e['status']}] {e['label']}")
 
+    @reg("board_sim", "Simulate the board as laid out (the user sees the same in the Simulate tab). kind: drop (a "
+         "supply net's voltage drop and current density from its source to its loads through the real copper; amps, "
+         "loads {ref: amps}, source REF.PIN) | heat (the board's temperature from the parts that get warm; sources "
+         "[{ref, watts}], ambient, air still|fan) | return (where a net's return current runs in the plane under it, "
+         "the gaps it must detour round and the loop that opens, its layer changes) | signal (a net's impedance along "
+         "its route, its edge at the far end in ngspice and the series resistor that tames it, its neighbours' "
+         "crosstalk; rise_ns, rs, series) | pdn (a rail's impedance against its target from its capacitors; ripple, "
+         "step) | circuit (a block of the schematic in ngspice: refs, sources [{net, kind dc|step|pulse|sine, v, freq}], "
+         "loads [{net, r|i}], extra [{kind C|R|L, net, to, value}], analysis {kind tran|ac|op, ...}, probes [nets], name).",
+         {"type": "object", "properties": {"kind": {"type": "string", "enum": ["drop", "heat", "return", "signal", "pdn", "circuit"]},
+                                           "net": {"type": "string"}, "amps": {"type": "number"}, "loads": {"type": "object"},
+                                           "source": {"type": "string"}, "sources": {"type": "array", "items": {"type": "object"}},
+                                           "ambient": {"type": "number"}, "air": {"type": "string"},
+                                           "rise_ns": {"type": "number"}, "rs": {"type": "number"}, "series": {"type": "number"},
+                                           "ripple": {"type": "number"}, "step": {"type": "number"},
+                                           "refs": {"type": "array", "items": {"type": "string"}},
+                                           "extra": {"type": "array", "items": {"type": "object"}},
+                                           "analysis": {"type": "object"}, "probes": {"type": "array", "items": {"type": "string"}},
+                                           "name": {"type": "string"}},
+          "required": ["kind"]})
+    async def board_sim(args):
+        from tw.checks.context import Context
+        from tw import fields, sigint, blocksim
+        tw = proj()
+        k = args["kind"]
+        if k != "circuit" and not tw.has_pcb():
+            return _text("no board yet", error=True)
+
+        def work():
+            if k == "circuit":
+                info = blocksim.run(tw, args.get("name") or "block", args.get("refs") or [], args.get("sources") or [],
+                                    args.get("loads") or [], args.get("extra") or [], args.get("analysis"), args.get("probes") or [])
+                return (info.get("lines") or []) + (info.get("notes") or []) + ([info["error"]] if info.get("error") else [])
+            ctx = Context(tw, offline=True)
+            if k == "drop":
+                r = fields.ir_drop(ctx, args.get("net") or "", args.get("amps"), args.get("loads"), args.get("source"))
+                return r["lines"] + [f"  {x['ref']}: {x['drop_mv']} mV at {x['amps']} A" for x in r["loads"]]
+            if k == "heat":
+                src = args.get("sources")
+                return fields.heat(ctx, src if src else None, args.get("ambient"), args.get("air") or "still")["lines"]
+            if k == "return":
+                return sigint.return_paths(ctx, args.get("net") or "")["lines"]
+            if k == "signal":
+                r = sigint.reflections(ctx, args.get("net") or "", args.get("rise_ns"), args.get("rs") or 25.0, args.get("series"))
+                imp = [f"  {p_['layer']} {p_['length']:.1f} mm: {p_['z0']:.0f} Ω ({p_['how']})" for p_ in r["route"]["pieces"]
+                       if p_["kind"] == "track" and p_.get("z0")][:8]
+                return r["lines"] + ["impedance along the route:"] + imp + sigint.crosstalk(ctx, args.get("net") or "", r["rise_ns"])["lines"][:4]
+            return sigint.pdn(ctx, args.get("net") or "", args.get("ripple") or 0.05, args.get("step"))["lines"]
+        try:
+            lines = await run(work)
+        except ValueError as e:
+            return _text(str(e), error=True)
+        if k == "circuit":
+            hub.emit("sims.changed")
+        return _text("\n".join(lines))
+
     @reg("simulate", "Simulate a circuit with KiCad's ngspice to show a requirement holds: a filter's corner, a divider's "
          "or a sense amplifier's output, an RC delay, an LED's current, a regulator's start-up into its load. netlist: a "
          "SPICE netlist with its analysis (.op, .tran, .ac, .dc); probes: vectors to read (v(out), i(v1)); name: short, for "

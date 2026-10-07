@@ -6,7 +6,7 @@ router, the check self-test (a planted fault per check), projects and history, t
 in-place schematic edits, and a smoke test of the web API. Tests that need KiCad are skipped when
 it is not installed.
 """
-import os, re, sys, json, shutil, tempfile, time, traceback, asyncio, collections
+import os, re, sys, json, shutil, tempfile, time, traceback, asyncio, collections, math
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -4018,6 +4018,109 @@ def routing_space_regions_and_layer_plan():
             js = await (await c_.get(f"/api/projects/{pid}/routing")).json()
             assert next(n for n in js["nets"] if n["net"] == "I2C_SDA")["layers"] == ["B.Cu"], js["nets"][:3]
             assert (await c_.post(f"/api/projects/{pid}/routing", json={"net": "I2C_SDA", "layers": ["In7.Cu"]})).status == 400
+            rt.stop()
+    asyncio.run(go())
+
+
+SYNTH_TRACK = """(kicad_pcb (version 20240108) (generator "tw-test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "VCC")
+  (footprint "T:PAD" (layer "F.Cu") (at 2 5)
+    (property "Reference" "J1" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 1 "VCC")))
+  (footprint "T:PAD" (layer "F.Cu") (at 28 5)
+    (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu") (net 1 "VCC")))
+  (segment (start 2 5) (end 28 5) (width 0.5) (layer "F.Cu") (net 1))
+  (gr_rect (start 0 0) (end 30 10) (layer "Edge.Cuts") (width 0.1))
+)
+"""
+
+
+@test(needs=("kicad",))
+def simulation_of_the_board_as_laid_out():
+    """The Simulate tab's physics, each against what it must give: the voltage drop along one straight track as Ohm's
+    law has it, the demo's +3V3 drop and a hot spot only when the track is overloaded; the heat a part gives off all
+    leaving through the board's faces; a return current round a gap; reflections (a fast edge rings, a series resistor
+    tames it, an I2C edge does not); crosstalk; a rail's impedance against its target; a block of the schematic in
+    ngspice against the RC charge. The endpoints and Claude's tool give the same."""
+    import types
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    from tracewright import agent_tools
+    from tw import fields, sigint, blocksim, sim
+    from tw.board import Board
+    from tw.checks.context import Context
+    d = os.path.join(TMP, "synth")
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "s.kicad_pcb"), "w").write(SYNTH_TRACK)
+    b = Board.load(os.path.join(d, "s.kicad_pcb"))
+    ctx = types.SimpleNamespace(board=b, netlist=None, cfg={}, setting=lambda k, dflt=None: dflt, available=lambda x: True,
+                                ground_nets=lambda: set(), power_nets=lambda: {"VCC"})
+    r = fields.ir_drop(ctx, "VCC", amps=1.0, loads={"U1": 1.0}, source="J1.1")
+    ohm = 1.72e-5 * 24 / (0.5 * 0.035) * 1000                    # the 24 mm between the pads, mV at 1 A
+    assert ohm <= r["loads"][0]["drop_mv"] <= ohm * 1.06, (r["loads"], ohm)
+    assert abs(r["max_density"] - 2.0) < 0.15, r["max_density"]  # 1 A in 0.5 mm
+
+    p = fixture_copy("simulate")
+    ctx = Context(p, offline=True)
+    r = fields.ir_drop(ctx, "+3V3", amps=0.5)
+    assert {x["ref"] for x in r["loads"]} == {"J2", "U2"} and 10 < max(x["drop_mv"] for x in r["loads"]) < 60 and not r["hot"], r["lines"]
+    assert any("assumed" in l for l in r["lines"]) is False and r["source"] == "U1.2", r["lines"]
+    r = fields.ir_drop(ctx, "+3V3", amps=1.5)
+    assert r["hot"] and "widen it" in r["hot"][0]["text"], r["hot"]
+    h = fields.heat(ctx, [{"ref": "U1", "watts": 0.5, "why": "test"}])
+    F = h["frame"]
+    rise = sum((v - h["ambient"]) for row in h["grid"] for v in row if v is not None)
+    out = rise * 2 * fields.AIR["still"] * (F["cell"] * 1e-3) ** 2
+    assert abs(out - 0.5) < 0.01 and h["parts"][0]["ref"] == "U1" and h["max_c"] > h["ambient"] + 5, (out, h["parts"][:2])
+    rp = sigint.return_paths(ctx, "USB_D_P")
+    assert any("over GND on B.Cu" in l for l in rp["lines"]) and any(g.get("detour") and g["loop"] > 0 for g in rp["gaps"]), rp["lines"]
+    assert sigint.edge(ctx, "I2C_SDA")[0] == 100.0 and sigint.edge(ctx, "USB_D_P")[0] == 4.0
+    slow = sigint.reflections(ctx, "I2C_SDA")
+    assert slow["result"]["overshoot_pct"] < 2 and slow["svg"].startswith("<svg"), slow["result"]
+    fast = sigint.reflections(ctx, "USB_D_P", rise_ns=0.3)
+    assert fast["route"]["receiver"] == "R6.2" and fast["result"]["overshoot_pct"] > 20, fast["result"]
+    assert fast["fix"] and fast["fix"]["result"]["overshoot_pct"] < 5 and "series" in fast["lines"][-1], fast["lines"]
+    xt = sigint.crosstalk(ctx, "USB_D_P")
+    assert "CC1" in [n["net"] for n in xt["neighbours"]], xt["lines"]
+    pd = sigint.pdn(ctx, "+3V3")
+    assert {c["ref"] for c in pd["caps"]} == {"C2", "C3", "C4"} and pd["ok"] and pd["svg"].startswith("<svg"), pd["lines"]
+    pd = sigint.pdn(ctx, "+3V3", step=20)
+    assert not pd["ok"] and any("above the target" in l for l in pd["lines"]), pd["lines"]
+    cm = sigint.cap_model("100n", "Capacitor_SMD:C_0402_1005Metric")
+    assert abs(cm[0] - 100e-9) < 1e-15 and cm[1] == 0.02 and abs(cm[2] - 0.45e-9) < 1e-15, cm
+    info = blocksim.run(p, "sda-rise", ["R8", "U2"], sources=[{"net": "+3V3", "kind": "step", "v": 3.3}],
+                        extra=[{"kind": "C", "net": "I2C_SDA", "value": "100p"}], analysis={"kind": "tran", "stop": 3e-6}, probes=["I2C_SDA"])
+    assert info["status"] != "error" and any("U2 left out" in n for n in info["notes"]), info
+    res = sim.run(open(os.path.join(p.root, "docs", "sim", "sda-rise.cir")).read(), ["v(i2c_sda)"])
+    assert abs(sim.at(res, "v(i2c_sda)", 4.7e-7) - 3.3 * (1 - math.exp(-1))) < 0.02
+
+    pid = ProjectStore().import_copy(FIXTURE, "Simulate demo").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            js = await (await c.get(f"/api/projects/{pid}/simulate")).json()
+            assert "+3V3" in [x["net"] for x in js["rails"]] and js["signals"][0]["kind"], js
+            r = await c.post(f"/api/projects/{pid}/simulate/drop", json={"net": "+3V3", "amps": 0.5})
+            body = await r.json()
+            assert r.status == 200 and body["layers"]["F.Cu"] and body["frame"]["nx"] > 10, body.get("lines")
+            assert json.load(open(os.path.join(rt.p.tw.build, "sim", "drop.json")))["lines"][0].startswith("+3V3")
+            assert (await c.post(f"/api/projects/{pid}/simulate/pdn", json={"net": "+3V3"})).status == 200
+            assert (await c.post(f"/api/projects/{pid}/simulate/bogus", json={})).status == 404
+            assert (await c.post(f"/api/projects/{pid}/simulate/drop", json={"net": "NOPE"})).status == 422
+            T = {t.name: t.handler for t in agent_tools.tool_list(rt, app)}
+            out = (await T["board_sim"]({"kind": "signal", "net": "USB_D_P", "rise_ns": 0.3}))["content"][0]["text"]
+            assert "overshoot" in out and "impedance along the route" in out and "series" in out, out
+            out = (await T["board_sim"]({"kind": "heat", "sources": [{"ref": "U1", "watts": 0.5, "why": "test"}]}))["content"][0]["text"]
+            assert "hottest spot" in out, out
             rt.stop()
     asyncio.run(go())
 

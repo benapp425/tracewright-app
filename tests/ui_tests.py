@@ -153,10 +153,10 @@ async def home_says_when_projects_are_in_icloud_only(t):
 
 
 @test
-async def five_places_and_the_address_follows(t):
+async def six_places_and_the_address_follows(t):
     await t.open_project()
     places = await t.page.js("[...document.querySelectorAll('.tabs .tab[data-place]')].map((e) => e.dataset.place)")
-    check(places == ["overview", "design", "parts", "checks", "project"], f"places: {places}")
+    check(places == ["overview", "design", "parts", "checks", "simulate", "project"], f"places: {places}")
     for place, views in (("design", ["board", "schematic", "3d"]), ("parts", ["bom", "outputs"]),
                          ("checks", ["checks", "signoff", "rules"]), ("project", ["docs", "files", "history"])):
         await t.place(place)
@@ -1451,6 +1451,72 @@ async def routing_space_regions_and_hdi(t):
         except (OSError, ValueError):
             pass
         await t.page.js(f"{BV} && {BV}.setPanel('layers'); 1")
+
+
+@test
+async def simulate_the_board_as_laid_out(t):
+    """The Simulate place: a rail's voltage drop over the copper with its legend and loads, a net's return current, the
+    board's heat from a part given its power, a net's edge and impedance (a waveform and the route's pieces), a rail's
+    impedance against its target, and a block of the schematic run in ngspice -- each from its Run button."""
+    root = t.s.demo["root"]
+    sim_dir = os.path.join(root, "docs", "sim")
+    before = set(os.listdir(sim_dir)) if os.path.isdir(sim_dir) else set()
+    run = "document.querySelector('.sm-run').click(); 1"
+    try:
+        await t.open_project()
+        await t.place("simulate")
+        await t.page.wait("document.querySelector('.sm-tabs button[data-sim=drop]')", 20)
+        await t.page.js("document.querySelector('.sm-tabs button[data-sim=drop]').click(); 1")
+        await t.page.wait("document.querySelector('.sm-run')", 20)
+        await t.page.js(run)
+        await t.page.wait("document.querySelector('.sm-lines') && document.querySelector('.sm-legend .sm-bar')", 60)
+        lines = await t.page.js("document.querySelector('.sm-lines').innerText")
+        check("largest drop" in lines.lower() and " mV " in lines, lines)
+        check(await t.page.js("document.querySelectorAll('.sm-table tr').length") >= 2, "the loads table")
+        await t.shot("simulate-drop")
+        # return paths
+        await t.page.js("document.querySelector('.sm-tabs button[data-sim=return]').click(); 1")
+        await t.page.wait("document.querySelector('.sm-run')", 10)
+        await t.page.js("(() => { const s = document.querySelector('.sm-ctl select'); s.value = [...s.options].find((o) => o.value === 'USB_D_P').value; s.dispatchEvent(new Event('change')); return 1; })()")
+        await t.page.js(run)
+        await t.page.wait("document.querySelector('.sm-lines') && document.querySelector('.sm-lines').innerText.includes(' over GND')", 60)
+        await t.shot("simulate-return")
+        # heat: U1 at half a watt
+        await t.page.js("document.querySelector('.sm-tabs button[data-sim=heat]').click(); 1")
+        await t.page.wait("document.querySelector('.sm-src button')", 10)
+        await t.page.js("[...document.querySelectorAll('.sm-src button')].pop().click(); 1")
+        await t.page.js("(() => { const r = [...document.querySelectorAll('.sm-srow')].pop(), i = r.querySelectorAll('input'); "
+                        "i[0].value = 'U1'; i[0].dispatchEvent(new Event('input')); i[1].value = '0.5'; i[1].dispatchEvent(new Event('input')); return 1; })()")
+        await t.page.js(run)
+        await t.page.wait("document.querySelector('.sm-lines') && document.querySelector('.sm-lines').innerText.includes('U1: 0.5 W')", 60)
+        check(await t.page.js("!!document.querySelector('.sm-legend .sm-bar')"), "the temperature legend")
+        await t.shot("simulate-heat")
+        # signals: USB_D_P's edge
+        await t.page.js("document.querySelector('.sm-tabs button[data-sim=signal]').click(); 1")
+        await t.page.wait("document.querySelector('.sm-run')", 10)
+        await t.page.js("(() => { const s = document.querySelector('.sm-ctl select'); s.value = 'USB_D_P'; s.dispatchEvent(new Event('change')); return 1; })()")
+        await t.page.js(run)
+        await t.page.wait("document.querySelector('.sm-svg svg') && document.querySelector('.sm-lines').innerText.includes('overshoot')", 90)
+        check(await t.page.js("document.querySelectorAll('.sm-table tr').length") >= 2, "the impedance table")
+        await t.shot("simulate-signal")
+        # power delivery
+        await t.page.js("document.querySelector('.sm-tabs button[data-sim=pdn]').click(); 1")
+        await t.page.wait("document.querySelector('.sm-run')", 10)
+        await t.page.js(run)
+        await t.page.wait("document.querySelector('.sm-svg svg') && document.querySelector('.sm-lines').innerText.includes('target')", 60)
+        await t.shot("simulate-pdn")
+        # a block of the schematic: R8 pulling I2C_SDA up into 100 pF
+        await t.page.js("document.querySelector('.sm-tabs button[data-sim=circuit]').click(); 1")
+        await t.page.wait("document.querySelector('.sm-run')", 10)
+        await t.page.js("(() => { const f = [...document.querySelectorAll('.sm-ctl input')]; const set = (k, v) => { f[k].value = v; f[k].dispatchEvent(new Event('input')); }; "
+                        "set(0, 'R8'); set(1, '+3V3'); set(2, '3.3'); set(3, 'I2C_SDA 100p'); set(4, 'I2C_SDA'); set(5, '3u'); return 1; })()")
+        await t.page.js(run)
+        await t.page.wait("[...document.querySelectorAll('.sim-card')].some((c) => c.innerText.includes('R8'))", 90)
+        await t.shot("simulate-circuit")
+    finally:
+        if os.path.isdir(sim_dir):
+            for f in set(os.listdir(sim_dir)) - before:
+                os.remove(os.path.join(sim_dir, f))
 
 
 # ------------------------------------------------------------------ running

@@ -2424,3 +2424,36 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .dn-opt { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-2); cursor: pointer; }
 .rg-name { cursor: pointer; } .rg-name:hover { text-decoration: underline; }
 .rg-vals .row { display: flex; gap: 8px; }
+/* Simulate */
+.simview { display: flex; flex-direction: column; overflow: auto; }
+.sm-tabs { display: flex; gap: 4px; padding: 10px 14px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.sm-tabs button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--text-3); font-size: 12.5px;
+  font-weight: 600; padding: 7px 10px 9px; border-bottom: 2px solid transparent; cursor: pointer; }
+.sm-tabs button:hover { color: var(--text); } .sm-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.sm-body { padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 10px; max-width: 1100px; }
+.sm-ctl { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.sm-f { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-3); }
+.sm-f input, .sm-f select { height: 28px; font-size: 12.5px; }
+.sm-run { height: 28px; } .sm-run.busy { opacity: .6; pointer-events: none; }
+.sm-note { font-size: 12px; color: var(--text-3); line-height: 1.45; } .sm-note.warn { color: var(--warn); }
+.sm-lines { font-size: 13px; line-height: 1.55; color: var(--text); padding: 8px 12px; border-radius: 8px; background: var(--surface-2); }
+.sm-map { position: relative; height: 380px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: #101216; }
+.sm-canvas { display: block; }
+.sm-tip { position: absolute; pointer-events: none; background: rgba(20,22,26,.95); color: #e8eaee; font-size: 11.5px; padding: 4px 8px;
+  border-radius: 6px; border: 1px solid rgba(255,255,255,.12); max-width: 320px; }
+.sm-legend { position: absolute; left: 10px; bottom: 8px; display: flex; align-items: center; gap: 8px; font-size: 11px; color: #c8ccd4;
+  background: rgba(16,18,22,.8); padding: 4px 8px; border-radius: 6px; flex-wrap: wrap; }
+.sm-bar { display: inline-block; width: 120px; height: 8px; border-radius: 3px; }
+.sm-key { display: inline-flex; align-items: center; gap: 4px; } .sm-key i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.sm-chips { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.sm-chips button { border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text-2); font-size: 11.5px; border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+.sm-chips button.on { background: var(--accent-soft); color: var(--text); border-color: var(--accent-line); }
+.sm-table { border-collapse: collapse; font-size: 12px; width: 100%; max-width: 760px; }
+.sm-table th { text-align: left; font-weight: 600; color: var(--text-3); padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.sm-table td { padding: 4px 8px; border-bottom: 1px solid var(--line); color: var(--text-2); font-variant-numeric: tabular-nums; }
+.sm-how { color: var(--text-3); font-size: 11.5px; }
+.sm-svg svg { width: 100%; max-width: 760px; height: auto; border-radius: 8px; }
+.sm-src { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+.sm-srow { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+.sm-srow input { height: 26px; font-size: 12px; } .sm-why { color: var(--text-3); font-size: 11.5px; }
+.sm-runs { display: flex; flex-direction: column; gap: 10px; }
