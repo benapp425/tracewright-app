@@ -1,6 +1,8 @@
 # Python
 __pycache__/
 *.py[cod]
+# the router's C core, compiled on each machine at first use
+libastar*.so
 *.egg-info/
 /.venv/
 /venv/

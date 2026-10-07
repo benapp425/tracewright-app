@@ -38,7 +38,7 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # the engine's source, for the first-launch install
 # (COPYFILE_DISABLE: no AppleDouble ._ copies of the files' extended attributes in the archive)
-( cd "$ROOT" && COPYFILE_DISABLE=1 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' --exclude='._*' -cf - \
+( cd "$ROOT" && COPYFILE_DISABLE=1 tar --exclude='__pycache__' --exclude='*.pyc' --exclude='libastar*.so' --exclude='.DS_Store' --exclude='._*' -cf - \
     tracewright pyproject.toml install.sh README.md LICENSE CHANGELOG.md THIRD_PARTY.md macos/Info.plist ) | ( cd "$APP/Contents/Resources/engine" && tar -xf - )
 
 xattr -cr "$APP"

@@ -38,8 +38,12 @@ def check(force=False):
             d = json.load(r)
     except Exception as e:
         return {"current": __version__, "configured": True, "error": f"{type(e).__name__}"}
+    notes = d.get("body") or ""
+    if len(notes) > 12000:  # long notes end at a line, not mid-word
+        cut = notes.rfind("\n", 0, 12000)
+        notes = notes[:cut if cut > 0 else 12000]
     res = {"configured": True, "latest": (d.get("tag_name") or "").lstrip("v"), "url": d.get("html_url"),
-           "published": d.get("published_at"), "notes": (d.get("body") or "")[:4000]}
+           "published": d.get("published_at"), "notes": notes}
     with open(_cache(), "w") as f:
         json.dump({"t": time.time(), "r": res}, f)
     return {**res, "current": __version__, "available": newer(res["latest"], __version__)}

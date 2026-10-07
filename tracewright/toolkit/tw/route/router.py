@@ -36,28 +36,46 @@ DIRS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]   
 _LIB = None
 
 
+def _build(src, so):
+    """Compile astar.c to `so` for this machine (on a Mac, for the CPU this Python runs as, Rosetta included)."""
+    import subprocess, shutil, platform, sys
+    cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if not cc:
+        return
+    os.makedirs(os.path.dirname(so), exist_ok=True)
+    arch = ["-arch", platform.machine()] if sys.platform == "darwin" else []
+    try:
+        subprocess.run([cc, "-O3", "-shared", "-fPIC", *arch, "-o", so, src], check=False, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _load(so):
+    try:
+        return ctypes.CDLL(so) if os.path.exists(so) else None
+    except OSError:          # built for another machine (another system or CPU)
+        return None
+
+
 def _lib():
-    """The C search core (astar.c), compiled on first use (None if no C compiler: pure Python)."""
+    """The C search core (astar.c), compiled on first use (None if it cannot be built or loaded: pure Python)."""
     global _LIB
     if _LIB is None:
+        import platform, sys
         here = os.path.dirname(os.path.abspath(__file__))
         src = os.path.join(here, "astar.c")
-        so = os.path.join(here, "libastar.so")
-        if not os.access(here, os.W_OK):
-            cache = os.path.join(os.path.expanduser("~"), ".cache", "tracewright")
-            os.makedirs(cache, exist_ok=True)
-            so = os.path.join(cache, "libastar.so")
-        if not os.path.exists(so) or os.path.getmtime(so) < os.path.getmtime(src):
-            import subprocess, shutil
-            cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
-            if not cc:
-                _LIB = False
-                return None
-            subprocess.run([cc, "-O3", "-shared", "-fPIC", "-o", so, src], check=False)
-            if not os.path.exists(so):
-                _LIB = False
-                return None
-        L = ctypes.CDLL(so)
+        cache = os.path.join(os.path.expanduser("~"), ".cache", "tracewright")
+        L = None
+        for so in (os.path.join(here, "libastar.so") if os.access(here, os.W_OK) else os.path.join(cache, "libastar.so"),
+                   os.path.join(cache, f"libastar-{sys.platform}-{platform.machine()}.so")):
+            if not os.path.exists(so) or os.path.getmtime(so) < os.path.getmtime(src):
+                _build(src, so)
+            L = _load(so)
+            if L is not None:
+                break
+        if L is None:
+            _LIB = False
+            return None
         P8, P32 = (np.ctypeslib.ndpointer(t, flags="C_CONTIGUOUS") for t in (np.uint8, np.int32))
         L.astar.restype = ctypes.c_long
         PF = np.ctypeslib.ndpointer(np.float32, flags="C_CONTIGUOUS")
