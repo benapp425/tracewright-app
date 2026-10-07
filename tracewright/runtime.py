@@ -322,8 +322,15 @@ class ProjectRuntime:
                     await self._on_change(changed)
             except asyncio.CancelledError:
                 return
+            except ValueError as e:                       # a file that does not parse (cut short, edited by hand): say it once
+                msg = f"A design file could not be read: {e}"
+                if msg != getattr(self, "_unreadable", None):
+                    self._unreadable = msg
+                    self.hub.emit("notice", level="error", text=msg[:300])
             except Exception:
                 traceback.print_exc()
+            else:
+                self._unreadable = None
 
     async def _on_change(self, changed):
         tw = self.p.tw

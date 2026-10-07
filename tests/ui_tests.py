@@ -94,7 +94,46 @@ class Ctx:
         await asyncio.sleep(0.4)
 
     async def shot(self, name):
-        return await self.page.shot(os.path.join(self.out, name + ".png"))
+        path = os.path.join(self.out, name + ".png")
+        if SCREENS["mode"] and name in STABLE:              # the same view every run: the board fitted, nothing moving
+            await self.page.js("(() => { const c = document.querySelector('.viewer canvas'); if (c && c.__view) { c.__view.anim = {}; c.__view.fit(false); c.__view.draw(); } "
+                               "document.querySelectorAll('.toast, .vtip').forEach((e) => e.remove()); return 1; })()")
+            await asyncio.sleep(0.4)
+        r = await self.page.shot(path)
+        if SCREENS["mode"] and name in STABLE:
+            compare_screen(name, path)
+        return r
+
+
+# Screenshot comparison (opt-in: --screens compare | update): the views that draw the same thing every run, against
+# tests/screens/<name>.png on this machine's fonts. A mean difference over DIFF_LIMIT (0-255, grey, at 480 px wide)
+# fails the run and leaves <name>-diff.png beside the shot.
+SCREENS = {"mode": None, "failed": []}
+STABLE = ("routing-panel", "routing-space", "simulate-drop", "simulate-heat", "light-routing")
+SCREEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screens")
+DIFF_LIMIT = 6.0
+
+
+def compare_screen(name, path):
+    from PIL import Image, ImageChops
+    ref = os.path.join(SCREEN_DIR, name + ".png")
+    if SCREENS["mode"] == "update" or not os.path.exists(ref):
+        os.makedirs(SCREEN_DIR, exist_ok=True)
+        Image.open(path).convert("RGB").save(ref)
+        return
+    a = Image.open(path).convert("L")
+    b = Image.open(ref).convert("L")
+    w = 480
+    a = a.resize((w, int(a.height * w / a.width)))
+    b = b.resize((w, int(b.height * w / b.width)))
+    if a.size != b.size:
+        SCREENS["failed"].append(f"{name}: {a.size} against {b.size}")
+        return
+    d = ImageChops.difference(a, b)
+    mean = sum(i * n for i, n in enumerate(d.histogram())) / (w * a.height)
+    if mean > DIFF_LIMIT:
+        d.point(lambda v: min(255, v * 4)).save(path[:-4] + "-diff.png")
+        SCREENS["failed"].append(f"{name}: differs by {mean:.1f} (limit {DIFF_LIMIT:g})")
 
 
 def check(ok, what):
@@ -1577,6 +1616,8 @@ async def new_views_read_in_the_light_theme(t):
         await t.page.wait("document.documentElement.dataset.theme === 'light' || document.body.classList.contains('light') || "
                           "getComputedStyle(document.body).backgroundColor.match(/\\d+/g).map(Number).reduce((a, b) => a + b, 0) > 600", 15)
         await t.place("simulate")
+        await t.page.wait("document.querySelector('.sm-tabs button[data-sim=drop]')", 20)
+        await t.page.js("document.querySelector('.sm-tabs button[data-sim=drop]').click(); 1")
         await t.page.wait("document.querySelector('.sm-run')", 20)
         await t.page.js("document.querySelector('.sm-run').click(); 1")
         await t.page.wait("document.querySelector('.sm-lines')", 60)
@@ -1597,7 +1638,8 @@ async def new_views_read_in_the_light_theme(t):
         check(not low, f"Routing, low contrast: {low[:5]}")
         await t.shot("light-routing")
     finally:
-        await t.page.js(f"localStorage.setItem('tw.theme', 'dark'); {BV} && {BV}.setPanel('layers'); 1")
+        await t.page.js("localStorage.setItem('tw.theme', 'dark'); const c = document.querySelector('.viewer canvas'); "
+                        "c && c.__view && c.__view.setPanel('layers'); 1")
 
 
 # ------------------------------------------------------------------ running
@@ -1636,14 +1678,18 @@ async def run(args):
     finally:
         server.stop()
     print(f"{len(chosen) - len(failed)} passed, {len(failed)} failed" + (f": {', '.join(failed)}" if failed else "") + f"  (screenshots: {out})")
-    return 1 if failed else 0
+    if SCREENS["failed"]:
+        print("screens that changed:\n  " + "\n  ".join(SCREENS["failed"]))
+    return 1 if failed or SCREENS["failed"] else 0
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("-k", help="only tests whose name contains one of these (comma separated)")
     ap.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "tracewright-ui"))
+    ap.add_argument("--screens", choices=["compare", "update"], help="compare the stable views with tests/screens (or update them)")
     a = ap.parse_args()
+    SCREENS["mode"] = a.screens
     if not find_chrome():
         print("no Chrome found: set TW_CHROME to run the browser tests")
         sys.exit(0)

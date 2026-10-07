@@ -4231,6 +4231,196 @@ def setup_check_and_new_project_defaults():
     asyncio.run(go())
 
 
+def _drop_outline(pcb):
+    """The board file without its Edge.Cuts drawings."""
+    from tw import sexp
+    txt = open(pcb, encoding="utf-8").read()
+    t = sexp.parse(txt, spans=True)
+    cut = []
+    for n in t[1:]:
+        if isinstance(n, list) and n and str(n[0]).startswith("gr_"):
+            lay = sexp.find(n, "layer")
+            if lay is not None and str(lay[1]) == "Edge.Cuts":
+                cut.append((n, ""))
+    open(pcb, "w", encoding="utf-8").write(sexp.splice(txt, cut))
+
+
+def _corpus():
+    """Odd boards, each made from the demo: (name, project)."""
+    import math
+    from tw.pcb import client
+    out = []
+    p = fixture_copy("corpus-round")
+    circle = [[125 + 30 * math.cos(a * math.pi / 24), 117.5 + 30 * math.sin(a * math.pi / 24)] for a in range(48)]
+    assert client.apply(p, [{"op": "outline", "polygon": circle}], live=False)["ok"]
+    out.append(("round", p))
+    p = fixture_copy("corpus-offboard")
+    assert client.apply(p, [{"op": "move", "ref": "U2", "x": 260, "y": 40}], live=False)["ok"]
+    out.append(("part off the board", p))
+    p = fixture_copy("corpus-unrouted")
+    assert client.apply(p, [{"op": "delete", "all": True, "kinds": ["track", "via"]}], live=False)["ok"]
+    out.append(("unrouted", p))
+    p = fixture_copy("corpus-nooutline")
+    _drop_outline(p.pcb)
+    out.append(("no outline", p))
+    p = fixture_copy("corpus-names")
+    txt = open(p.pcb, encoding="utf-8").read().replace("I2C_SDA", "µC SDA#1").replace("/Power/CC1", "/Pow er/CC 1")
+    open(p.pcb, "w", encoding="utf-8").write(txt)
+    out.append(("odd net names", p))
+    return out
+
+
+@test(needs=("kicad", "kpy"))
+def edge_case_corpus_crashes_nothing():
+    """Odd boards -- round, a part off the board, nothing routed, no outline, net names with spaces and symbols -- through
+    every check and every analysis: no check crashes, and each analysis answers or says plainly why it cannot."""
+    from tw.checks import runner, NotApplicable
+    from tw.checks.context import Context
+    from tw import routeplan, space, escape, testpoints, fields, panel, enclosure, drawings, sigint
+    from tw.board import Board
+    bad = []
+    for name, p in _corpus():
+        res = runner.run_all(p, offline=True, write=False)
+        crashed = [(c["id"], (c.get("error") or c.get("message") or "")[:120]) for c in res["checks"] if c["status"] == "error"]
+        if crashed:
+            bad.append((name, "checks crashed", crashed[:4]))
+        ctx = Context(p, offline=True)
+        b = Board.load(p.pcb)
+        sig = next((n for n in sorted({t.net for t in b.tracks}) if n and "GND" not in n and "+" not in n), None)
+        power = sorted(ctx.power_nets())
+        tasks = [("classify", lambda: routeplan.classify(p)), ("congestion", lambda: space.congestion(p)),
+                 ("why", lambda: space.why(p, 125, 117, "F.Cu", None, b)), ("escape", lambda: escape.plan(p, b)),
+                 ("testpoints", lambda: testpoints.plan(ctx)), ("drop", lambda: fields.ir_drop(ctx, power[0])),
+                 ("heat", lambda: fields.heat(ctx, [{"ref": "U1", "watts": 0.3, "why": "test"}])),
+                 ("panel", lambda: panel.shape(b)), ("enclosure", lambda: enclosure.fit(ctx, {"w": 60, "l": 45, "h": 20})),
+                 ("fab drawing", lambda: drawings.fab_drawing(p)), ("return", lambda: sigint.return_paths(ctx, sig) if sig else None),
+                 ("pdn", lambda: sigint.pdn(ctx, power[0]))]
+        for what, fn in tasks:
+            try:
+                fn()
+            except (ValueError, NotApplicable) as e:
+                if not str(e) or len(str(e)) > 300 or "Traceback" in str(e):
+                    bad.append((name, what, f"an unclear refusal: {str(e)[:120]}"))
+            except Exception as e:
+                bad.append((name, what, f"{type(e).__name__}: {str(e)[:160]}"))
+    assert not bad, "\n".join(map(str, bad))
+
+
+@test(needs=("kicad",))
+def failure_modes_answer_plainly():
+    """When something underneath fails -- a board file cut short or garbled, ngspice missing, a project folder gone --
+    each endpoint answers with a JSON error a person can read, and the app keeps running."""
+    from aiohttp.test_utils import TestServer, TestClient
+    from tracewright.server import make_app
+    from tracewright.projects import ProjectStore
+    store = ProjectStore()
+    pid = store.import_copy(FIXTURE, "Failure demo").id
+    pid2 = store.import_copy(FIXTURE, "Failure demo 2").id
+
+    async def go():
+        webapp = make_app()
+        app = webapp["app"]
+        async with TestClient(TestServer(webapp)) as c:
+            rt = app.rt(pid)
+            # ngspice missing
+            os.environ["TW_NGSPICE"] = "/nonexistent/libngspice.dylib"
+            try:
+                r = await c.post(f"/api/projects/{pid}/simulate/signal", json={"net": "USB_D_P"})
+                body = await r.json()
+                assert r.status in (422, 500) and "ngspice" in body["error"].lower(), (r.status, body)
+            finally:
+                os.environ.pop("TW_NGSPICE", None)
+            # a board cut in half, then garbled
+            pcb = rt.p.tw.pcb
+            whole = open(pcb, encoding="utf-8").read()
+            for broken in (whole[:len(whole) // 2], "(kicad_pcb (version 2024) (oops"):
+                open(pcb, "w", encoding="utf-8").write(broken)
+                for method, path, body in (("get", "board", None), ("get", "routing", None), ("get", "board/space", None),
+                                           ("get", "escape", None), ("get", "make", None), ("post", "simulate/drop", {"net": "+3V3"})):
+                    r = await (c.get(f"/api/projects/{pid}/{path}") if method == "get" else c.post(f"/api/projects/{pid}/{path}", json=body))
+                    assert r.headers.get("content-type", "").startswith("application/json"), (path, r.status, await r.text())
+                    js = await r.json()
+                    if r.status >= 400:
+                        assert js.get("error") and "Traceback" not in js["error"], (path, js)
+            open(pcb, "w", encoding="utf-8").write(whole)
+            assert (await c.get(f"/api/projects/{pid}/board")).status == 200
+            # the project folder gone
+            shutil.rmtree(app.rt(pid2).p.root)
+            r = await c.get(f"/api/projects/{pid2}/simulate")
+            assert r.status >= 400 or (await r.json()).get("board") is False, r.status
+            assert (await (await c.get("/api/health")).json())["ok"] is True
+            rt.stop()
+    asyncio.run(go())
+
+
+BUDGETS = {"classify": 5, "congestion": 6, "why": 1, "escape": 3, "testpoints": 5, "drop": 6, "heat": 5, "reflections": 6,
+           "pdn": 2, "return": 4, "fab drawing": 20, "panel": 30, "route": 40}
+
+
+@test(needs=("kicad", "kpy"))
+def time_and_quality_budgets():
+    """Each analysis on the demo board within its time (a few times what it takes on a laptop, for slower machines), and
+    the routed board within its quality: every net routed, DRC clean, few vias, no wild detours."""
+    from tw import routeplan, space, escape, testpoints, fields, sigint, drawings, panel, kicad
+    from tw.route import driver
+    from tw.checks.context import Context
+    from tw.board import Board
+    p = fixture_copy("budgets")
+    ctx = Context(p, offline=True)
+    b = Board.load(p.pcb)
+    took, over = {}, []
+    runs = [("classify", lambda: routeplan.classify(p)), ("congestion", lambda: space.congestion(p)),
+            ("why", lambda: space.why(p, 125, 117, "F.Cu", None, b)), ("escape", lambda: escape.plan(p, b)),
+            ("testpoints", lambda: testpoints.plan(ctx)), ("drop", lambda: fields.ir_drop(ctx, "+3V3")),
+            ("heat", lambda: fields.heat(ctx, [{"ref": "U1", "watts": 0.5, "why": "test"}])),
+            ("reflections", lambda: sigint.reflections(ctx, "USB_D_P", rise_ns=0.3)), ("pdn", lambda: sigint.pdn(ctx, "+3V3")),
+            ("return", lambda: sigint.return_paths(ctx, "USB_D_P")), ("fab drawing", lambda: drawings.fab_drawing(p)),
+            ("panel", lambda: panel.make(p, 2, 2))]
+    for name, fn in runs:
+        t0 = time.time()
+        fn()
+        took[name] = round(time.time() - t0, 2)
+    t0 = time.time()
+    s_ = driver.route(p, clear=True, live=False, log=lambda m: None)["summary"]
+    took["route"] = round(time.time() - t0, 2)
+    over = [f"{k} {v} s (budget {BUDGETS[k]} s)" for k, v in took.items() if v > BUDGETS[k]]
+    print("    " + ", ".join(f"{k} {v}s" for k, v in took.items()))
+    assert not over, over
+    assert s_["routed"] == s_["nets"] and not s_["failed"] and s_["vias"] <= 45, s_
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+    assert not d["violations"] and not d["unconnected_items"], [v["description"] for v in d["violations"]][:4]
+
+
+@test()
+def screenshot_comparison_spots_a_change():
+    """The browser tests' screenshot comparison (--screens): the same picture passes, one with a part of it changed
+    fails and leaves a picture of the difference."""
+    from PIL import Image, ImageDraw
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import ui_tests
+    d = os.path.join(TMP, "screens")
+    os.makedirs(d, exist_ok=True)
+    old = ui_tests.SCREEN_DIR, dict(ui_tests.SCREENS)
+    ui_tests.SCREEN_DIR = os.path.join(d, "ref")
+    try:
+        img = Image.new("RGB", (960, 600), (30, 32, 36))
+        ImageDraw.Draw(img).rectangle([100, 100, 400, 300], fill=(200, 120, 60))
+        a = os.path.join(d, "view.png")
+        img.save(a)
+        ui_tests.SCREENS.update(mode="compare", failed=[])
+        ui_tests.compare_screen("view", a)                         # no reference yet: this becomes it
+        ui_tests.compare_screen("view", a)
+        assert not ui_tests.SCREENS["failed"], ui_tests.SCREENS["failed"]
+        ImageDraw.Draw(img).rectangle([300, 200, 900, 580], fill=(240, 240, 240))
+        img.save(a)
+        ui_tests.compare_screen("view", a)
+        assert ui_tests.SCREENS["failed"] and os.path.exists(os.path.join(d, "view-diff.png")), ui_tests.SCREENS["failed"]
+    finally:
+        ui_tests.SCREEN_DIR = old[0]
+        ui_tests.SCREENS.clear()
+        ui_tests.SCREENS.update(old[1])
+
+
 @test()
 def floorplan_comes_out_solved():
     """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on
