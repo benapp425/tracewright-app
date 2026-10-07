@@ -460,15 +460,20 @@ def tool_list(rt, app):
                                                                       "; no courtyard overlaps among them") + tail)
 
     @reg("copper", "Board operations (see .claude/tracewright.md): ops [{op: track|tracks|via|vias|delete|zone|rule_area|"
-         "outline|text|fill|lock|value|ref_text, ...}]. Tracks, vias, deletes go live into KiCad when it has the board "
+         "outline|cutout|text|fill|lock|value|ref_text, ...}]. cutout: an internal cut-out or milled slot on the outline "
+         "layer ({op: cutout, polygon: [[x, y], ...]} or {op: cutout, slot: {a: [x, y], b: [x, y], w: mm}}; drawn again "
+         "over the same place it replaces the old one; remove: true takes it away). Tracks, vias, deletes go live into KiCad when it has the board "
          "open; the others save KiCad's copy, edit the file and reload it.",
          {"type": "object", "properties": {"ops": {"type": "array", "items": {"type": "object"}}}, "required": ["ops"]})
     async def copper(args):
         ops = args.get("ops") or []
         res = await _apply(ops, f"{len(ops)} board operations")
         bad = [r for r in res.get("results", []) if not r.get("ok")]
+        took = [r.get("result") for r in res.get("results", []) if r.get("op") == "delete" and r.get("ok")]
         return _text(f"{'done' if res.get('ok') else 'FAILED'} via {res.get('via')}: " +
-                     ("; ".join(f"{r['op']}: {r.get('error')}" for r in bad) if bad else f"{len(ops)} ops applied"),
+                     ("; ".join(f"{r['op']}: {r.get('error')}" for r in bad) if bad else f"{len(ops)} ops applied") +
+                     ("; deleted " + ", ".join(f"{n} item{'s' if n != 1 else ''}" for n in took if isinstance(n, int)) +
+                      " (check that is all you meant)" if any(isinstance(n, int) and n for n in took) else ""),
                      error=not res.get("ok"))
 
     @reg("sync_board", "Update the board from the schematic (KiCad's 'Update PCB from Schematic', headless): new parts "
@@ -1000,7 +1005,7 @@ def tool_list(rt, app):
     @reg("board_sim", "Simulate the board as laid out (the user sees the same in the Simulate tab). kind: drop (a "
          "supply net's voltage drop and current density from its source to its loads through the real copper; amps, "
          "loads {ref: amps}, source REF.PIN) | heat (the board's temperature from the parts that get warm; sources "
-         "[{ref, watts}], ambient, air still|fan) | return (where a net's return current runs in the plane under it, "
+         "[{ref, watts}], ambient, air still|fan, refs: parts whose temperature you want) | return (where a net's return current runs in the plane under it, "
          "the gaps it must detour round and the loop that opens, its layer changes) | signal (a net's impedance along "
          "its route, its edge at the far end in ngspice and the series resistor that tames it, its neighbours' "
          "crosstalk; rise_ns, rs, series) | pdn (a rail's impedance against its target from its capacitors; ripple, "
@@ -1036,7 +1041,11 @@ def tool_list(rt, app):
                 return r["lines"] + [f"  {x['ref']}: {x['drop_mv']} mV at {x['amps']} A" for x in r["loads"]]
             if k == "heat":
                 src = args.get("sources")
-                return fields.heat(ctx, src if src else None, args.get("ambient"), args.get("air") or "still")["lines"]
+                r = fields.heat(ctx, src if src else None, args.get("ambient"), args.get("air") or "still")
+                want = set(args.get("refs") or [])
+                parts = [x for x in r["parts"] if x["ref"] in want] + [x for x in r["parts"][:8] if x["ref"] not in want]
+                return r["lines"] + (["the board under each part (hottest first):"] +
+                                     [f"  {x['ref']}: {x['max_c']} °C" for x in parts] if parts else [])
             if k == "return":
                 return sigint.return_paths(ctx, args.get("net") or "")["lines"]
             if k == "signal":

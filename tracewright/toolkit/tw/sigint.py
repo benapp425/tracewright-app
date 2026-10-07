@@ -207,8 +207,10 @@ def return_paths(ctx, net, step=0.2):
                 cur, start = key, k
     # each gap: the detour through the reference pour, and the loop it opens
     out_gaps = []
-    for g in gaps:
-        if g["length"] < 0.3:
+    stops = [(p_.x, p_.y) for p_ in b.pads() if p_.net == net] + [(v.x, v.y) for v in b.vias if v.net == net]
+    near_stop = lambda q: any(abs(q[0] - x) < 0.8 and abs(q[1] - y) < 0.8 for x, y in stops)
+    for g in gaps:                                 # the pour stands back from the net's own pads and vias: not a gap
+        if g["length"] < 1.0 or (near_stop(g["a"]) and near_stop(g["b"])) or (g["length"] < 1.5 and (near_stop(g["a"]) or near_stop(g["b"]))):
             continue
         ref = g["before"] or g["after"]
         e = {"layer": g["layer"], "at": [round(v, 2) for v in g["a"]], "to": [round(v, 2) for v in g["b"]], "length": g["length"]}

@@ -7,7 +7,7 @@ in the files, and live in an open KiCad through its IPC API.
 """
 import os as _os, sys as _sys
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 REPO_URL = "https://github.com/benapp425/tracewright-app"    # where releases and update checks come from
 APP_NAME = "Tracewright"
 

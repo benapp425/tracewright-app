@@ -21,6 +21,9 @@ Ops (coordinates in board mm, KiCad axes: y down, angles CCW in degrees):
   {"op": "rule_area", "name": "keepout", "layers": ["F.Cu"], "polygon": [...], "no_tracks": true, "no_vias": true,
                       "no_pour": true, "no_footprints": false, "add": false}   (add: keep others of the same name)
   {"op": "outline", "rect": [x0, y0, x1, y1], "radius": 1.0}  |  {"op": "outline", "polygon": [[x, y], ...]}
+  {"op": "cutout", "polygon": [[x, y], ...]} | {"op": "cutout", "slot": {"a": [x, y], "b": [x, y], "w": 1.2}}
+      an internal cut-out or milled slot on Edge.Cuts; one drawn before over the same place is replaced; "remove": true
+      only takes it away
   {"op": "text", "text": "REV A", "x": 1, "y": 2, "layer": "F.SilkS", "size": 1.0, "thickness": 0.15, "rot": 0}
   {"op": "floorplan", "rects": [{"rect": [x0, y0, x1, y1], "label": "MCU"}, ...], "layer": "Dwgs.User"}
       the guided start's plan, drawn as one group named "Floorplan" (drawn again each time)
@@ -370,6 +373,59 @@ def do_rule_area(b, op, changes):
     changes.append({"kind": "rule_area", "name": op.get("name", "keepout"), "uuid": z.m_Uuid.AsString()})
 
 
+def _slot_poly(a, c, w, n=10):
+    """A milled slot (a stadium) from a to c, w wide, as a polygon."""
+    ax, ay = float(a[0]), float(a[1])
+    cx, cy = float(c[0]), float(c[1])
+    ang = math.atan2(cy - ay, cx - ax)
+    r = float(w) / 2
+    pts = []
+    for (x, y), start in (((cx, cy), ang - math.pi / 2), ((ax, ay), ang + math.pi / 2)):
+        for k in range(n + 1):
+            t = start + math.pi * k / n
+            pts.append([x + r * math.cos(t), y + r * math.sin(t)])
+    return pts
+
+
+def do_cutout(b, op, changes):
+    pts = op.get("polygon")
+    if not pts and op.get("slot"):
+        sl = op["slot"]
+        pts = _slot_poly(sl["a"], sl["b"], sl.get("w", 1.0))
+    if not pts or len(pts) < 3:
+        raise ValueError("cutout: a polygon (three corners or more) or a slot {a, b, w}")
+    xs, ys = [float(p[0]) for p in pts], [float(p[1]) for p in pts]
+    box = (min(xs) - 0.3, min(ys) - 0.3, max(xs) + 0.3, max(ys) + 0.3)
+    area = (box[2] - box[0]) * (box[3] - box[1])
+    old = []
+    for d in list(b.GetDrawings()):
+        if d.GetLayer() != pcbnew.Edge_Cuts or d.GetClass() != "PCB_SHAPE":
+            continue
+        bb = d.GetBoundingBox()
+        x0, y0, x1, y1 = TO(bb.GetX()), TO(bb.GetY()), TO(bb.GetRight()), TO(bb.GetBottom())
+        small = (x1 - x0) * (y1 - y0) <= 4 * area + 1.0              # a cut-out, not the board's own outline
+        if small and x0 < box[2] and box[0] < x1 and y0 < box[3] and box[1] < y1:
+            old.append(d)
+    for d in old:
+        b.Remove(d)
+    GRAVE.extend(old)
+    if op.get("remove"):
+        changes.append({"kind": "cutout", "removed": len(old)})
+        return len(old)
+    s = pcbnew.PCB_SHAPE(b)
+    s.SetShape(pcbnew.SHAPE_T_POLY)
+    s.SetLayer(pcbnew.Edge_Cuts)
+    s.SetWidth(MM(float(op.get("width", 0.1))))
+    s.SetPolyPoints([P(x, y) for x, y in zip(xs, ys)])
+    try:
+        s.SetFilled(False)
+    except Exception:
+        pass
+    b.Add(s)
+    changes.append({"kind": "cutout", "replaced": len(old), "uuid": s.m_Uuid.AsString()})
+    return True
+
+
 def do_outline(b, op, changes):
     old = [d for d in list(b.GetDrawings()) if d.GetLayer() == pcbnew.Edge_Cuts]
     for d in old:
@@ -503,6 +559,8 @@ def apply_ops(b, ops, changes, stop_on_error=True):
                 r = True
             elif kind == "footprint":
                 r = add_footprint(b, op, changes)
+            elif kind == "cutout":
+                r = do_cutout(b, op, changes)
             elif kind == "vias":
                 for v in op.get("items", []):
                     add_via(b, v, changes)

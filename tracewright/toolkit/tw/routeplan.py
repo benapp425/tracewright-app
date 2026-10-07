@@ -25,6 +25,7 @@ PRESETS = {
     "short": {"label": "Shortest", "via": 700.0, "bend45": 20, "bend90": 80, "why": "The shortest tracks, more corners and vias."},
 }
 SAYS = {"auto": "the router takes it", "guided": "it is routed first with its rules", "hand": "it is left for hand routing"}
+I2C = re.compile(r"(^|[_/])(SCL|SDA|I2C\w*)([_\d]|$)", re.I)       # a bus clock, but slow: no special care
 SENSE = re.compile(r"(^|[_/])(I?SENSE|ISNS|SNS|CS[PN+-]?|KELVIN)([_\d]|$)", re.I)
 
 
@@ -149,7 +150,7 @@ def classify(project, nl=None, model=None):
         elif any(ref[:1] in ("Y", "X") and ref[1:2].isdigit() for ref in refs):
             mode, order = "guided", 1
             why, rules = "crystal line: short, no vias, kept clear of other signals", ["no vias", "short", "ground guard"]
-        elif kind == "clock":
+        elif kind == "clock" and not I2C.search(name):
             mode, order = "guided", 1
             why, rules = "clock: short, no stubs, one layer", ["no stubs", "few vias"]
         elif _switch_node(net, nodes, parts):
@@ -161,6 +162,11 @@ def classify(project, nl=None, model=None):
         elif kind == "fast":
             mode, order = "guided", 2
             why, rules = "fast signal: over a solid plane, few vias", ["over its plane", "few vias"]
+        elif kind == "power":
+            why = (f"a supply ({amps:g} A): routed first, at its class's width" if amps is not None
+                   else "a supply: routed first, at its class's width")
+        elif I2C.search(name):
+            why = "I2C: slow edges, the router takes it"
         else:
             why = "an ordinary signal"
         if net in over or name in over:

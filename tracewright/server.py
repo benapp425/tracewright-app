@@ -1414,7 +1414,8 @@ def make_app():
                 r = (rep.get("nets") or {}).get(net) or {}
                 status = "unrouted" if net in open_nets else ("routed" if rt.p.tw.has_pcb() else "no board")
                 rows.append({"net": net.rsplit("/", 1)[-1], "full": net, **m, "status": status,
-                             **{k: r[k] for k in ("length_mm", "vias", "layers", "note", "detail") if k in r}})
+                             **{k: r[k] for k in ("length_mm", "vias", "note", "detail") if k in r},
+                             **({"routed_on": r["layers"]} if r.get("layers") else {})})
             order = {"hand": 0, "guided": 1, "auto": 2}
             rows.sort(key=lambda x: (order[x["mode"]], x["net"]))
             return {"nets": rows, "preset": routeplan.preset(rt.p.tw), "report_at": rep.get("at"),

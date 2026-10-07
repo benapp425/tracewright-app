@@ -8,10 +8,12 @@ millimetres from the board's top-left corner, y down).
                            blocks' areas and keep-outs drawn on Dwgs.User (group "Floorplan"), and the
                            connectors, holes and one-part blocks whose references are on the board moved to their
                            places (a block turned on the plan turns its part; a connector's rotation is left as it
-                           is: turn each so it faces off its edge)
+                           is: turn each so it faces off its edge); keep-outs named as a slot or cut-out are cut in
+                           the outline layer (a milled slot with round ends when long and thin)
 
 The check placement.floorplan holds the placed board to it: each connector on its planned edge, each hole
 where it was agreed."""
+import re
 import json, os
 
 ORIGIN = (100.0, 100.0)          # the board's top-left corner in KiCad's coordinates (as the toolkit reference)
@@ -109,6 +111,9 @@ def describe(fp, origin=ORIGIN):
     return out
 
 
+CUT = re.compile(r"\bslots?\b|cut[- ]?outs?|\bmilled\b", re.I)
+
+
 def ops(fp, board=None, origin=None, outline=None):
     """Board operations that put the plan on the board (see the module docstring). outline: None = only when the
     board has none, True = always, False = never."""
@@ -122,6 +127,16 @@ def ops(fp, board=None, origin=None, outline=None):
             [{"rect": k["rect"], "label": "keep out: " + k["label"] if k["label"] else "keep out"} for k in pl["keepouts"]]
     if rects:
         out.append({"op": "floorplan", "rects": rects})
+    for k in pl["keepouts"]:                               # a slot or cut-out in the plan is cut in the board
+        if CUT.search(k.get("label") or ""):
+            x0, y0, x1, y1 = k["rect"]
+            w, h = x1 - x0, y1 - y0
+            if max(w, h) >= 3 * min(w, h):                  # long and thin: a milled slot with round ends
+                r = min(w, h) / 2
+                a, c = ((x0 + r, (y0 + y1) / 2), (x1 - r, (y0 + y1) / 2)) if w >= h else (((x0 + x1) / 2, y0 + r), ((x0 + x1) / 2, y1 - r))
+                out.append({"op": "cutout", "slot": {"a": [round(v, 3) for v in a], "b": [round(v, 3) for v in c], "w": round(min(w, h), 3)}})
+            else:
+                out.append({"op": "cutout", "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]})
     refs = {f.ref for f in board.fp_list} if board is not None else set()
     for c in pl["connectors"] + pl["holes"]:
         if c.get("ref") and c["ref"] in refs:

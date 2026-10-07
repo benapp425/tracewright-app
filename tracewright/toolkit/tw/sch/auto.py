@@ -752,8 +752,8 @@ class Group:
                     items = self._wire_items([p, end], inst.ref) + self._part_items(r) + self._power_items(to, rp)
                     for w in extra:
                         items += self._wire_items(w, ref)
-                    if cap:                                # the capacitor from the same line down to ground
-                        ct = t if not down else _add(t, d, 2 * P)
+                    if cap:                                # the capacitor from the same line down to ground, a step on
+                        ct = _add(t, d, P) if not down else _add(t, d, 2 * P)    # (two T's, never a four-way joint)
                         c = self._two(cap, cap_ref, ct, "down")
                         ops += [("part", c), ("power", gnd, c.pin("2"), 0)] + ([("junction", ct)] if ct != t else [])
                         items += self._part_items(c) + self._power_items(gnd, c.pin("2"))

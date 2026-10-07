@@ -2592,6 +2592,9 @@ def schematic_notes_in_two_layers():
     upin = next((x, y) for n_, _, _, x, y in syms["U101"].pins if str(n_) == "1")
     cpin = min((math.hypot(x - upin[0], y - upin[1]) for _, _, _, x, y in syms["C150"].pins))
     assert cpin < 25, f"the RC's capacitor is {cpin:.0f} mm from the pin it serves"
+    from tw.checks import runner as _runner
+    sty = _runner.run_all(env.Project(root), only=["sch.style"], offline=True, write=False)["checks"][0]["findings"]
+    assert not [f_ for f_ in sty if "four-way" in f_["message"]], [f_["message"] for f_ in sty]     # the RC: two T's
     # running the script again keeps notes by others, rewrites its own
     dn.add(hw, {"ref": "U101"}, "Keep it away from the heater.", by="user")
     d.write(hw)
@@ -4450,6 +4453,31 @@ def floorplan_solver_keeps_what_was_drawn():
     led = next(it for it in out["items"] if it["id"] == "led")
     assert ((led["x"] - 21) ** 2 + (led["y"] - 25) ** 2) ** 0.5 < 8, led
     assert rep["lines"][0].startswith("The floorplan solver moved D1 WS2812B") and "RESET" in rep["lines"][0], rep["lines"]
+
+
+@test(needs=("kicad", "kpy"))
+def cutouts_and_slots_on_the_outline():
+    """A milled slot or cut-out goes on the outline layer in one operation; drawn again over the same place it replaces
+    the old one, and it can be taken away; the floorplan's keep-outs named as a slot become one when the plan is applied."""
+    from tw.pcb import client
+    from tw.board import Board
+    from tw import floorplan
+    p = fixture_copy("cutouts")
+    n0 = len(Board.load(p.pcb).outline)
+    for _ in range(2):
+        r = client.apply(p, [{"op": "cutout", "slot": {"a": [126, 119], "b": [138, 119], "w": 1.2}}], live=False)
+        assert r["ok"], r
+        assert len(Board.load(p.pcb).outline) == n0 + 1, len(Board.load(p.pcb).outline)
+    assert client.apply(p, [{"op": "cutout", "polygon": [[140, 125], [144, 125], [144, 129], [140, 129]]}], live=False)["ok"]
+    assert len(Board.load(p.pcb).outline) == n0 + 2
+    assert client.apply(p, [{"op": "cutout", "slot": {"a": [126, 119], "b": [138, 119], "w": 1.2}, "remove": True}], live=False)["ok"]
+    assert len(Board.load(p.pcb).outline) == n0 + 1
+    fp = {"board": {"w": 40, "h": 30}, "items": [], "holes": [],
+          "keepouts": [{"id": "K1", "label": "Routed slot (thermal break)", "x": 20, "y": 15, "w": 12, "h": 1.2},
+                       {"id": "K2", "label": "Antenna keep-out", "x": 35, "y": 8, "w": 6, "h": 15}]}
+    ops = floorplan.ops(fp, None, origin=(100, 100), outline=False)
+    cuts = [o for o in ops if o["op"] == "cutout"]
+    assert len(cuts) == 1 and cuts[0]["slot"]["w"] == 1.2 and cuts[0]["slot"]["a"] == [114.6, 115.0], cuts
 
 
 @test()

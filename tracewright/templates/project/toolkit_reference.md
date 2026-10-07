@@ -40,10 +40,14 @@ Coordinates are board millimetres, KiCad axes (y down), angles counter-clockwise
  {"op": "via", "net": "GND", "x": 115, "y": 110, "d": 0.6, "drill": 0.3},
  {"op": "zone", "net": "GND", "layers": ["F.Cu", "B.Cu"], "polygon": [[100, 100], [150, 100], [150, 135], [100, 135]]},
  {"op": "rule_area", "name": "Y1 keepout", "layers": ["F.Cu"], "polygon": [...], "no_tracks": true, "no_vias": true, "no_pour": true},
+ {"op": "cutout", "slot": {"a": [126, 119], "b": [138, 119], "w": 1.2}},
  {"op": "delete", "nets": ["SDA"], "kinds": ["track", "via"]},
  {"op": "text", "text": "REV A", "x": 140, "y": 132, "layer": "F.SilkS", "size": 1.0},
  {"op": "fill"}]
 ```
+
+`cutout` cuts a milled slot (`slot`: its two ends and width) or a cut-out (`polygon`) in the outline layer; drawn
+again over the same place it replaces the old one, and `"remove": true` takes it away.
 
 ## Python API (for design/ scripts; `import sys; sys.path.insert(0, "tools")`)
 
