@@ -53,6 +53,8 @@ def placed(fp, origin=ORIGIN):
         out["holes"].append({"id": h["id"], "ref": h.get("ref") or "", "x": ox + h["x"], "y": oy + h["y"], "d": h.get("d", 3.2)})
     for it in fp.get("items") or []:
         w, d = it.get("w", 8), it.get("h", 6)             # w along the edge, d into the board
+        if it.get("edge") and int(it.get("rot") or 0) % 180 == 90:
+            w, d = d, w                                   # turned: its other side lies along the edge
         if it.get("edge"):
             e, at = it["edge"], it.get("at", 0)
             if e == "left":

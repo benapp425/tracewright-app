@@ -3,7 +3,7 @@
 // board, parts, cost), and what happened lately.
 import { h, clear, api, fmtTime, btn } from "./util.js";
 import { icon } from "./icons.js";
-import { runCommand } from "./app.js";
+import { runCommand, state } from "./app.js";
 
 const enc = encodeURIComponent;
 
@@ -47,6 +47,7 @@ export class OverviewPanel {
         p.description ? h("p.ov-desc", p.description) : null,
         h("div.ov-stages", stages.map((s) => h("div.ov-st." + s.status, { "data-tip": s.note || s.description || s.title }, h("i"), h("span", s.title)))),
         h("div.ov-actions",
+          state.info && state.info.server_mode ? null : btn("external-link", "Open in KiCad", { onclick: () => this.ws.openKicad(d.has_pcb ? "board" : d.has_sch ? "schematic" : "project") }, "primary"),
           btn("list-checks", "Run checks", { onclick: () => runCommand("run-checks") }),
           d.has_pcb ? btn("shopping-cart", "Order", { onclick: () => this.ws.show("outputs") }) : null,
           active ? h("span.ov-now", icon("circle-dot", 12), `Now: ${active.title}`) : null))));

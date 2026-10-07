@@ -2981,7 +2981,9 @@ def floorplan_from_the_start_to_the_board():
     stray = next(h for h in fp["holes"] if h["id"] == "stray")
     assert 0 < stray["x"] <= 50 and 0 < stray["y"] <= 35, stray                    # kept on the board
     bad = next(i for i in fp["items"] if i["id"] == "bad")
-    assert bad["kind"] == "other" and bad["x"] == 25, bad
+    from tracewright import fpsolve
+    assert bad["kind"] == "other" and 0 < bad["x"] < 50, bad                         # on the board, clear of the MCU
+    assert not fpsolve._hit(fpsolve.block_rect(bad), fpsolve.block_rect(next(i for i in fp["items"] if i["id"] == "mcu"))), bad
     # the user drags the Qwiic connector to the top edge and the MCU over; Claude then sends its plan again
     cv, line = canvas.move(p.root, {"id": "qwiic", "edge": "top", "at": 30})
     assert "J2 on the top edge, 30 mm along it" in line, line
@@ -3515,6 +3517,62 @@ def simulation_and_regulator_heat_as_evidence():
             assert [x for x in ev("r2") if x["ref"] == "power.thermal"] and not [x for x in ev("r3") if x["ref"] == "power.thermal"]
             rt.stop()
     asyncio.run(go())
+
+
+@test()
+def floorplan_comes_out_solved():
+    """A floorplan is solved as it is saved: a 2x20 header written across a 40 mm board lies along its edge, connectors on
+    one edge never overlap, blocks sit inside the board clear of the holes, the connectors and each other (a bottom-side
+    connector may sit under a top-side block), as near as they can to where they were asked for; what the user placed
+    stays; what cannot fit is named with what would make it fit. A connector turns in place; Solve and its Undo."""
+    from tracewright import canvas, fpsolve
+    root = os.path.join(TMP, "fp-solve")
+    os.makedirs(os.path.join(root, ".tracewright"))
+    fp = {"board": {"w": 40, "h": 65},
+          "holes": [{"id": f"H{i}", "x": x, "y": y, "d": 2.7} for i, (x, y) in enumerate([(3, 3), (37, 3), (3, 62), (37, 62)])],
+          "items": [{"id": "usbc", "label": "USB-C", "ref": "J1", "edge": "top", "at": 20, "w": 8.94, "h": 7.35},
+                    {"id": "swd", "label": "SWD JST-SH", "ref": "J2", "edge": "top", "at": 16, "w": 5.8, "h": 4.3},
+                    {"id": "hdrL", "label": "GPIO 2x20 left", "ref": "J5", "edge": "left", "at": 33, "w": 5.08, "h": 50.8},
+                    {"id": "hdrR", "label": "GPIO 2x20 right", "ref": "J6", "edge": "right", "at": 33, "w": 5.08, "h": 50.8},
+                    {"id": "mcu", "label": "RT1176 BGA-289", "x": 20, "y": 24, "w": 16, "h": 16},
+                    {"id": "phy", "label": "Ethernet PHY", "x": 20, "y": 30, "w": 14, "h": 9},
+                    {"id": "mezz", "label": "DF40 80p (bottom side)", "x": 20, "y": 24, "w": 3.6, "h": 19.6}]}
+    canvas.update(root, "floorplan", fp)
+    got = canvas.load(root)["floorplan"]
+    by = {o["id"]: o for o in got["items"]}
+    W, H = 40, 65
+    assert by["hdrL"]["rot"] == 90 and by["hdrR"]["rot"] == 90, (by["hdrL"], by["hdrR"])
+    rects = {i: fpsolve.conn_rect(o, W, H) if o.get("edge") else fpsolve.block_rect(o) for i, o in by.items()}
+    for i, r in rects.items():
+        assert r[0] >= -1e-6 and r[1] >= -1e-6 and r[2] <= W + 1e-6 and r[3] <= H + 1e-6, (i, r)
+    tops = [i for i in by if fpsolve.side(by[i]) == "top"]
+    for a in tops:
+        for b in tops:
+            if a < b:
+                assert not fpsolve._hit(rects[a], rects[b]), (a, b, rects[a], rects[b])
+    assert fpsolve._hit(rects["mezz"], rects["mcu"]), "a bottom-side connector may sit under the MCU"
+    assert not fpsolve._hit(rects["usbc"], rects["swd"], fpsolve.CONN_GAP - 0.01)
+    assert any("J5 turned to lie along the left edge" in l for l in got["solved"]["lines"]), got["solved"]
+    # what cannot fit, and what would: a 60 mm header on a 40 x 40 board
+    small, rep = fpsolve.solve({"board": {"w": 40, "h": 40}, "holes": [], "keepouts": [],
+                                "items": [{"id": "long", "label": "2x30 header", "edge": "top", "at": 20, "w": 76.2, "h": 5.08}]})
+    assert rep["unfit"] == ["long"] and any("make that side at least 79 mm" in l for l in rep["lines"]), rep
+    # the user's own placement stays, even when it overlaps
+    fp2 = json.loads(json.dumps(got))
+    mcu = next(o for o in fp2["items"] if o["id"] == "mcu")
+    mcu.update(moved=True, x=10, y=50)
+    out, rep = fpsolve.solve(fp2)
+    m2 = next(o for o in out["items"] if o["id"] == "mcu")
+    assert (m2["x"], m2["y"]) == (10, 50) and any("placed by you" in l for l in rep["lines"]), (m2, rep)
+    # a connector turns in place; Solve and its Undo
+    cv, line = canvas.move(root, {"id": "usbc", "rot": 90})
+    u = next(o for o in cv["floorplan"]["items"] if o["id"] == "usbc")
+    assert u["rot"] == 90 and u["moved"] and "turned J1" in line and "solved" not in cv["floorplan"], (u, line)
+    before = json.loads(json.dumps(cv["floorplan"]))
+    cv, rep = canvas.solve_saved(root)
+    assert "solved" in cv["floorplan"]
+    cv = canvas.restore_floorplan(root, before)
+    assert next(o for o in cv["floorplan"]["items"] if o["id"] == "usbc")["rot"] == 90
 
 
 @test()

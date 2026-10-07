@@ -706,6 +706,27 @@ def make_app():
         rt.hub.emit("canvas.update", canvas=canvas.enrich(rt.p.root, cv))
         return jresp({"floorplan": cv.get("floorplan")})
 
+    @routes.post("/api/projects/{pid}/canvas/floorplan/solve")
+    async def floorplan_solve(request):
+        """The floorplan's Solve button: everything inside the board and clear of everything else, what the user
+        placed or locked kept where it is; what cannot fit is named. {floorplan, report}."""
+        from . import canvas
+        rt = app.rt(request.match_info["pid"])
+        body = await request.json() if request.can_read_body else {}
+        if isinstance(body.get("restore"), dict):                 # Undo: the floorplan as it was before the Solve
+            cv = await asyncio.to_thread(canvas.restore_floorplan, rt.p.root, body["restore"])
+            rt.user_changes.append("floorplan: the user undid Solve")
+            rt.hub.emit("canvas.update", canvas=canvas.enrich(rt.p.root, cv))
+            return jresp({"floorplan": cv.get("floorplan"), "report": {"lines": [], "moved": [], "turned": [], "unfit": []}})
+        try:
+            cv, rep = await asyncio.to_thread(canvas.solve_saved, rt.p.root)
+        except ValueError as e:
+            return err(str(e))
+        if rep["lines"]:
+            rt.user_changes.append("floorplan: the user pressed Solve: " + "; ".join(rep["lines"][:6]))
+        rt.hub.emit("canvas.update", canvas=canvas.enrich(rt.p.root, cv))
+        return jresp({"floorplan": cv.get("floorplan"), "report": rep})
+
     @routes.post("/api/projects/{pid}/canvas/floorplan/suggest")
     async def floorplan_suggest(request):
         """Let Claude suggest a layout: {notes: [text]}. The suggestion comes back as ghosts over the floorplan."""

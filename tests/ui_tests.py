@@ -337,7 +337,7 @@ async def fp_click(page, target):
 
 @test
 async def floorplan_turn_lock_nudge_and_keepouts(t):
-    """Select by clicking: R turns a block a quarter (a connector to the next edge), L locks, the arrows nudge;
+    """Select by clicking: R turns a block a quarter (a connector along its edge or across it), L locks, the arrows nudge;
     keep-outs drag like blocks; and the page keeps its place when a drop redraws the cards."""
     root = t.s.demo["root"]
     cfgp = os.path.join(root, "tracewright.json")
@@ -382,11 +382,14 @@ async def floorplan_turn_lock_nudge_and_keepouts(t):
         # the scroll held through every redraw
         now = await t.page.js("document.querySelector('.gdpane').scrollTop")
         check(abs(now - top) < 2, f"the page jumped from {top} to {now}")
-        # a connector turns to the next edge
+        # a connector turns in place: across its edge, and back (dragging takes it to another edge)
         await fp_click(t.page, "usb")
         await t.page.key("r")
         await asyncio.sleep(0.6)
-        check(item("usb")["edge"] == "top", item("usb"))
+        check(item("usb")["edge"] == "left" and item("usb")["rot"] == 90, item("usb"))
+        await t.page.key("r")
+        await asyncio.sleep(0.6)
+        check(item("usb")["rot"] == 0, item("usb"))
         # keep-outs drag like blocks
         await fp_drag(t.page, "K1", (36, 27))
         k = item("K1")
@@ -1202,6 +1205,74 @@ async def expired_sign_in_card(t):
         else:
             with open(idx, "w") as f:
                 f.write(before)
+
+
+@test
+async def floorplan_solve_and_names(t):
+    """A floorplan written badly -- a 2x20 header standing 51 mm into a 40 mm board, blocks on top of each other --
+    is solved by the Solve button: the header lies along its edge, nothing is drawn red, and the connectors' names
+    never overprint each other; Undo puts it back."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg["start"] = {"mode": "guided", "phase": "ready"}
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    bad = {"board": {"w": 40, "h": 65, "radius": 1.5},
+           "holes": [{"id": f"H{i}", "x": x, "y": y, "d": 2.7} for i, (x, y) in enumerate([(3, 3), (37, 3), (3, 62), (37, 62)])],
+           "items": [{"id": "usbc", "label": "USB-C", "ref": "J1", "kind": "connector", "edge": "top", "at": 20, "w": 8.94, "h": 7.35},
+                     {"id": "swd", "label": "SWD JST-SH", "ref": "J2", "kind": "connector", "edge": "top", "at": 13, "w": 5.8, "h": 4.3},
+                     {"id": "uart", "label": "UART JST-SH", "ref": "J3", "kind": "connector", "edge": "top", "at": 27, "w": 5.8, "h": 4.3},
+                     {"id": "hdrL", "label": "GPIO 2x20 left", "ref": "J5", "kind": "connector", "edge": "left", "at": 33, "w": 5.08, "h": 50.8},
+                     {"id": "mcu", "label": "RT1176 BGA-289", "kind": "mcu", "x": 20, "y": 24, "w": 16, "h": 16},
+                     {"id": "phy", "label": "Ethernet PHY", "kind": "io", "x": 20, "y": 28, "w": 14, "h": 9}], "keepouts": []}
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    cvp = os.path.join(root, ".tracewright", "canvas.json")
+    with open(cvp, "w") as f:
+        json.dump({"floorplan": bad}, f)                   # as Claude might once have written it: not solved
+    try:
+        await t.page.goto(t.s.url + f"#/p/{t.pid}")
+        await t.page.wait("document.querySelector('.fp-svg .fp-board') && document.querySelector('.fp-solve')", 20)
+        await asyncio.sleep(0.8)
+        check(await t.page.js("document.querySelectorAll('.fp-item.bad').length") >= 2, "the bad plan should show red")
+        await t.page.js("document.querySelector('.fp-solve').click(); 1")
+        await t.page.wait("document.querySelectorAll('.fp-item.bad').length === 0", 10)
+        fp = t.s.get(f"api/projects/{t.pid}/canvas")["floorplan"]
+        hdr = next(i for i in fp["items"] if i["id"] == "hdrL")
+        check(hdr["rot"] == 90, hdr)
+        await t.page.wait("document.querySelector('.fp-solved') && document.querySelector('.fp-solved').textContent.includes('J5 turned')", 5)
+        clash = await t.page.js("""(() => { const b = [...document.querySelectorAll('.fp-cls text')].map((x) => x.getBBox());
+          for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) {
+            const p = b[i], q = b[j];
+            if (p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height) return [i, j];
+          } return null; })()""")
+        check(clash is None, f"connector names overprint: {clash}")
+        await t.shot("floorplan-solved")
+        # Undo, from the toast
+        await t.page.js("[...document.querySelectorAll('#toasts .t-act')].find((b) => b.textContent === 'Undo').click(); 1")
+        await t.page.wait("document.querySelectorAll('.fp-item.bad').length >= 2", 10)
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(cvp)
+
+
+@test
+async def open_in_kicad_up_front(t):
+    """Open in KiCad is a clear button in the header (its menu: board, schematic, project, the live link) and on the
+    Overview. (Not clicked: it would start KiCad.)"""
+    await t.open_project("overview")
+    await t.page.wait("document.querySelector('.kicadsplit .kicadbtn')", 15)
+    txt = await t.page.js("document.querySelector('.kicadsplit .kicadbtn').innerText")
+    check("Open in KiCad" in txt, txt)
+    await t.page.js("document.querySelector('.kicadsplit .kicadmore').click(); 1")
+    await t.page.wait("document.querySelector('.menu')", 5)
+    items = await t.page.js("[...document.querySelectorAll('.menu .mi, .menu button, .menu div')].map((e) => e.innerText).join(' | ')")
+    check("Board (PCB Editor)" in items and "Schematic (Schematic Editor)" in items, items)
+    await t.page.key("Escape")
+    await t.page.wait("[...document.querySelectorAll('.ov-actions button')].some((b) => b.innerText.includes('Open in KiCad'))", 10)
+    await t.shot("open-in-kicad")
 
 
 # ------------------------------------------------------------------ running

@@ -953,8 +953,9 @@ def tool_list(rt, app):
          "label, kind: power|signal|bus}]} -- the block diagram. connectors: {items: [{name, type, ref, edge: "
          "left|right|top|bottom, pins: [{n, signal}]}], board: {w, h}} -- every connector with its pinout and the "
          "board edge it sits on. floorplan: {board: {w, h, radius}, holes: [{id, ref, x, y, d}], items: [{id, label, "
-         "ref, kind, w, h, note, and either edge: left|right|top|bottom with at (mm along that edge: from the top for "
-         "left/right, from the left for top/bottom) for a connector, or x, y (its centre) for a block}], keepouts: [{label, "
+         "ref, kind, w, h, note, side?: top|bottom, and either edge: left|right|top|bottom with at (mm along that edge: from "
+         "the top for left/right, from the left for top/bottom) and w along the edge, h into the board (rot 90 swaps them) "
+         "for a connector, or x, y (its centre) for a block}], keepouts: [{label, "
          "x, y, w, h}], note} -- the board to scale before the schematic exists: mm from the top-left corner, y down, "
          "sizes the real footprints' (a block: the area its parts will need). The user can drag anything on it; what "
          "they moved keeps their place (moved) -- ask before changing it. parts: {items: [{role, mpn, lcsc, package, "
@@ -982,8 +983,11 @@ def tool_list(rt, app):
         n = len(sec.get("items") or sec.get("blocks") or [])
         kept = [o.get("ref") or o.get("label") or o["id"] for o in (sec.get("items") or []) + (sec.get("holes") or [])
                 if args["section"] == "floorplan" and o.get("moved")]
+        solved = (sec.get("solved") or {}).get("lines") or [] if args["section"] == "floorplan" else []
         return _text(f"canvas {args['section']} updated ({n} item{'s' if n != 1 else ''})" +
-                     (f"; kept where the user put them: {', '.join(kept)}" if kept else ""))
+                     (f"; kept where the user put them: {', '.join(kept)}" if kept else "") +
+                     ("\nSolved so nothing overlaps or sticks out:\n- " + "\n- ".join(solved) +
+                      "\nTell the user about anything that does not fit, and what would." if solved else ""))
 
     @reg("ready_to_start", "Guided start: the intake is done. Call it once the requirements are settled and written to "
          "docs/requirements.md and the canvas is filled in: summary (two sentences: what you will build) and steps (the "

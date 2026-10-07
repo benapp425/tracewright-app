@@ -1938,7 +1938,7 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 /* ------------------------------------------------------------------ guided start */
 /* the chat alone, centered; the canvas slides in beside it once Claude draws; Start opens the workspace */
 .guided:not(.guided-peek) .splitter, .guided:not(.guided-peek) .mainpane > .tabs, .guided:not(.guided-peek) .mainpane > .main-body { display: none; }
-.guided:not(.guided-peek) .topbar .pill, .guided:not(.guided-peek) .topbar .kicadbtn { display: none; }
+.guided:not(.guided-peek) .topbar .pill, .guided:not(.guided-peek) .topbar .kicadsplit { display: none; }
 .guided-peek .gdpane { display: none; }
 .guided:not(.guided-peek) .chatpane { width: 100% !important; max-width: none; border-right: 0; transition: width .45s var(--ease); }
 .guided:not(.guided-peek):not(.canvas-on) .mainpane { display: none; }
@@ -2338,3 +2338,13 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .si-steps code { font-family: var(--mono); font-size: 12px; background: var(--surface-3); padding: 1px 5px; border-radius: 4px; color: var(--text); }
 .si-acts { display: flex; flex-wrap: wrap; gap: 6px; }
 .si-said { font: 11.5px var(--mono); color: var(--text-3); margin: -2px 0 8px; }
+/* Open in KiCad: a split button in the header (workspace.js) */
+.kicadsplit { display: inline-flex; align-items: stretch; }
+.kicadsplit .kicadbtn { border-top-right-radius: 0; border-bottom-right-radius: 0; border-color: var(--accent-line); color: var(--text); font-weight: 500; }
+.kicadsplit .kicadbtn:hover { background: var(--accent-soft); }
+.kicadsplit .kicadmore { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; border-color: var(--accent-line); padding: 0 6px; }
+.kicadsplit .kicadmore:hover { background: var(--accent-soft); }
+/* floorplan: Solve, its caption, leader lines to moved names (floorplan.js) */
+.fp-solve { position: absolute; top: 4px; right: 4px; z-index: 2; }
+.fp-solved { font-size: 11.5px; color: var(--text-3); text-align: center; margin: 2px 12px 6px; line-height: 1.45; }
+.fp-lead { stroke: var(--text-4); stroke-width: 1; stroke-dasharray: 2 2; }

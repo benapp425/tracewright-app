@@ -90,7 +90,10 @@ export class Workspace {
       this.startBtn, this.peekBtn,
       this.checkEl,
       state.info.server_mode ? btn("download", "Download", { onclick: () => this.download() }, "sm")
-        : this.kicadBtn = h("button.btn.sm.kicadbtn", { onclick: (e) => this.kicadMenu(e.currentTarget) }, this.liveEl, h("span", "KiCad"), icon("chevron-down", 12)),
+        : this.kicadBtn = h("div.kicadsplit",
+          h("button.btn.sm.kicadbtn", { onclick: () => this.openKicad(this.p.has_pcb ? "board" : this.p.has_sch ? "schematic" : "project"),
+            "data-kbd": "mod+shift+b" }, this.liveEl, icon("external-link", 13), h("span", "Open in KiCad")),
+          h("button.btn.sm.kicadmore", { onclick: (e) => this.kicadMenu(e.currentTarget), "data-tip": "Board, schematic or project; the live link" }, icon("chevron-down", 12))),
     ]);
     this.root.appendChild(bar);
     const ws = h("div.ws");
@@ -436,7 +439,7 @@ export class Workspace {
     else if (l.process) { text = "KiCad API off"; cls = "warn"; }
     this.liveEl.className = "kdot" + (cls ? " " + cls : "") + (cls === "ok" ? " pulse" : "");
     this.liveText = text;
-    if (this.kicadBtn) this.kicadBtn.dataset.tip = `${text}${l.reason ? ": " + l.reason : l.version ? " · KiCad " + String(l.version).split(" ")[0] : ""}`;
+    if (this.kicadBtn) this.kicadBtn.firstChild.dataset.tip = `${text}${l.reason ? ": " + l.reason : l.version ? " · KiCad " + String(l.version).split(" ")[0] : ""}`;
   }
 
   renderChecks(c, running) {
@@ -491,7 +494,7 @@ export class Workspace {
   }
 
   kicadMenu(anchor) {
-    menu(anchor, [
+    menu(anchor.closest(".kicadsplit") || anchor, [
       { head: this.liveText || "KiCad" },
       { label: "Board (PCB Editor)", icon: "circuit-board", kbd: "mod+shift+b", run: () => this.openKicad("board") },
       { label: "Schematic (Schematic Editor)", icon: "waypoints", kbd: "mod+shift+e", run: () => this.openKicad("schematic") },

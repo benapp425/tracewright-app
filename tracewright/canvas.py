@@ -143,10 +143,14 @@ def clean_floorplan(data):
         it = {"id": iid, "label": _s(o.get("label") or iid, 40), "ref": _s(o.get("ref"), 12),
               "kind": o.get("kind") if o.get("kind") in KINDS else ("connector" if o.get("edge") in EDGES[:4] else "other"),
               "w": w, "h": h, "note": _s(o.get("note"), 80), "moved": bool(o.get("moved")), "locked": bool(o.get("locked"))}
+        if o.get("side") in ("top", "bottom"):
+            it["side"] = o["side"]
         if o.get("edge") in EDGES[:4]:
             it["edge"] = o["edge"]
+            it["rot"] = 90 if _rot(o.get("rot")) % 180 == 90 else 0          # 90: its other side lies along the edge
+            along = h if it["rot"] else w
             span = H if o["edge"] in ("left", "right") else W
-            it["at"] = _num(o.get("at"), min(w / 2, span / 2), max(span - w / 2, span / 2), span / 2)
+            it["at"] = _num(o.get("at"), min(along / 2, span / 2), max(span - along / 2, span / 2), span / 2)
         else:
             it["x"] = _num(o.get("x"), 0, W, W / 2)
             it["y"] = _num(o.get("y"), 0, H, H / 2)
@@ -159,7 +163,10 @@ def clean_floorplan(data):
                              "x": _num(o.get("x"), 0, W, W / 2), "y": _num(o.get("y"), 0, H, H / 2),
                              "w": _num(o.get("w"), 0.5, W, 5.0), "h": _num(o.get("h"), 0.5, H, 5.0), "rot": _rot(o.get("rot")),
                              "moved": bool(o.get("moved")), "locked": bool(o.get("locked"))})
-    return {"board": board, "holes": holes[:12], "items": items[:24], "keepouts": keepouts[:8], "note": _s(data.get("note"), 200)}
+    out = {"board": board, "holes": holes[:12], "items": items[:24], "keepouts": keepouts[:8], "note": _s(data.get("note"), 200)}
+    if isinstance(data.get("solved"), dict):
+        out["solved"] = {"lines": [_s(x, 200) for x in data["solved"].get("lines") or []][:12], "at": data["solved"].get("at")}
+    return out
 
 
 def _rot(v):
@@ -229,6 +236,15 @@ def move(root, what):
                     (" (keep it where it is)" if o["locked"] else "")
             if "rot" in what and "edge" not in o:
                 o["rot"] = _rot(what["rot"])
+            if "rot" in what and "edge" in o and "edge" not in what and "x" not in what:      # a connector turned in place
+                o["rot"] = 90 if _rot(what["rot"]) % 180 == 90 else 0
+                o["moved"] = True
+                fp.pop("solved", None)
+                d["floorplan"] = fp
+                d["updated"] = time.time()
+                _save(root, {k: v for k, v in d.items() if v is not None})
+                how = "along" if (o["h"] if o["rot"] else o["w"]) >= (o["w"] if o["rot"] else o["h"]) else "across"
+                return d, f"floorplan: the user turned {name} to lie {how} the {o['edge']} edge"
             if what.get("edge") in EDGES[:4]:
                 o["edge"] = what["edge"]
                 span = H if o["edge"] in ("left", "right") else W
@@ -243,6 +259,7 @@ def move(root, what):
                 turned = f", turned {o['rot']}°" if o.get("rot") else ""
                 line = f"floorplan: the user moved {name} to x {o['x']:g}, y {o['y']:g} mm{turned}"
             o["moved"] = True
+        fp.pop("solved", None)
         d["floorplan"] = fp
         d["updated"] = time.time()
         _save(root, {k: v for k, v in d.items() if v is not None})
@@ -366,10 +383,43 @@ def update(root, section, data):
         new = clean(section, data)
         if section == "proposal":
             raise ValueError("a suggested layout goes through the propose action")
-        d[section] = _keep_moves(d.get("floorplan"), new) if section == "floorplan" else new
+        if section == "floorplan":
+            from . import fpsolve
+            fp, rep = fpsolve.solve(_keep_moves(d.get("floorplan"), new))
+            fp["solved"] = {"lines": rep["lines"], "at": time.time()}
+            d[section] = fp
+        else:
+            d[section] = new
         d["updated"] = time.time()
         _save(root, {k: v for k, v in d.items() if v is not None})
         return d
+
+
+def restore_floorplan(root, fp):
+    """Undo of a Solve: the floorplan as it was before, put back as it is."""
+    with _lock:
+        d = load(root)
+        d["floorplan"] = clean_floorplan(fp or {})
+        d["floorplan"].pop("solved", None)
+        d["updated"] = time.time()
+        _save(root, {k: v for k, v in d.items() if v is not None})
+        return d
+
+
+def solve_saved(root):
+    """The Solve button: the floorplan as it is now, solved (what the user placed or locked stays). Returns
+    (canvas, report)."""
+    from . import fpsolve
+    with _lock:
+        d = load(root)
+        if not d.get("floorplan"):
+            raise ValueError("there is no floorplan yet")
+        fp, rep = fpsolve.solve(d["floorplan"])
+        fp["solved"] = {"lines": rep["lines"], "at": time.time()}
+        d["floorplan"] = fp
+        d["updated"] = time.time()
+        _save(root, {k: v for k, v in d.items() if v is not None})
+        return d, rep
 
 
 def enrich(root, cv):
