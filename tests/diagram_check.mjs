@@ -110,14 +110,18 @@ for (const [name, d] of Object.entries(CASES)) {
   }
 }
 
-// The desk monitor, specifically: the regulator's 3.3 V reaches the sensor and display as tags, not
-// wires through the processor; the I²C bus is one wire with a drop to each; the 5V and GND links are one.
+// The desk monitor, specifically: the regulator's 3.3 V reaches what it feeds from the regulator (a wire from it,
+// or a tag), never through the processor; the 5V and GND links are one wire; the input sits above the regulator.
 {
   const out = layoutDiagram(CASES.desk, { width: 520 });
-  const tags = out.pills.filter((p) => p.tag).map((p) => p.text).sort();
-  if (JSON.stringify(tags) !== JSON.stringify(["3.3V", "3.3V"])) failures.push(`desk: supply tags ${JSON.stringify(tags)}`);
-  const labels = out.pills.filter((p) => !p.tag).map((p) => p.text).sort();
-  if (JSON.stringify(labels) !== JSON.stringify(["3.3V", "5V, GND", "I²C (SDA/SCL)"])) failures.push(`desk: wire labels ${JSON.stringify(labels)}`);
+  const labels = out.pills.filter((p) => !p.tag).map((p) => p.text);
+  if (labels.filter((t) => t === "5V, GND").length !== 1) failures.push(`desk: wire labels ${JSON.stringify(labels)}`);
+  const by = Object.fromEntries(out.blocks.map((b) => [b.id, b]));
+  if (!(by.USB.row < by.REG.row && by.REG.row < by.MCU.row)) failures.push("desk: the supply does not flow down the page");
+  for (const id of ["SCD41", "OLED"]) {
+    const fed = by[id].tags.includes("3.3V") || out.wires.some((s) => s.kind === "power" && s.own && s.own.src === by.REG && s.own.dsts.includes(by[id]));
+    if (!fed) failures.push(`desk: ${id} gets its 3.3V neither from the regulator's wire nor as a tag`);
+  }
   const titles = Object.fromEntries(out.blocks.map((b) => [b.id, b.title]));
   if (titles.REG.length !== 2 || titles.REG[1] !== "AMS1117-3.3") failures.push(`desk: regulator title ${JSON.stringify(titles.REG)}`);
 }

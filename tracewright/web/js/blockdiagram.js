@@ -1,5 +1,6 @@
 // The guided start's block diagram. Blocks sit in tiers top to bottom (connectors, power, processor,
-// peripherals), a tier wrapping onto more rows when it is wider than the column. Wires are orthogonal:
+// peripherals, or the order that draws cleanest: layoutDiagram scores each), a tier wrapping onto more rows
+// when it is wider than the column. Wires are orthogonal:
 // down from a block, along their own track in the channel between two rows (the tracks ordered to cross
 // as little as possible), and down into the block they reach. A bus is drawn once, with a drop to each
 // block on it; a wire that skips a row runs down the side; a supply that would cross the drawing is a
@@ -7,7 +8,7 @@
 
 const TIER = { connector: 0, power: 1, mcu: 2, memory: 2, rf: 2, sensor: 3, io: 3, display: 3, motor: 3, audio: 3, other: 3 };
 const KINDS = ["power", "bus", "signal"];
-const CG = 22, PAD = 14, TRACK = 9, PILL = 16, LEVEL = PILL + 3, LANE = 10, EDGE = 14, MIN_W = 140, MAX_W = 172;
+const CG = 22, PAD = 14, TRACK = 9, PILL = 16, LEVEL = PILL + 3, LANE = 10, EDGE = 14, MIN_W = 140, MAX_W = 204;
 
 // Text widths without a DOM, close enough for layout tests; the page measures with its own fonts.
 // Fonts: "t" block title, "n" block note, "l" wire label and tag.
@@ -46,7 +47,7 @@ function blockText(b, measure, W) {
   const given = String(b.label || b.id).split(/\n+/).map((s) => s.trim()).filter(Boolean);
   const title = given.length > 1 ? [fit(given[0], TEXT_W, "t", measure), fit(given.slice(1).join(" "), TEXT_W, "t", measure)]
     : wrap(given[0] || b.id, TEXT_W, "t", measure, 2);
-  const note = b.note ? wrap(String(b.note).replace(/\s+/g, " "), TEXT_W, "n", measure, title.length > 1 ? 1 : 2) : [];
+  const note = b.note ? wrap(String(b.note).replace(/\s+/g, " "), TEXT_W, "n", measure, title.length > 1 ? 2 : 3) : [];
   return { title, note, h: Math.max(42, 16 + title.length * 15 + note.length * 13.5) };
 }
 
@@ -88,12 +89,74 @@ function tryPill(band, p) {
   return false;
 }
 
+// The diagram laid out several ways -- the tiers in each order, as many blocks to a row as fit or one fewer -- and the
+// cleanest kept: fewest wires crossing or running on top of each other, fewest side lanes and hidden labels, then the
+// shortest wires and the most compact drawing. The usual order (connectors, power, processor, the rest) wins a tie.
 export function layoutDiagram(d, opts = {}) {
+  const present = [0, 1, 2, 3].filter((t) => (d.blocks || []).some((b) => (TIER[b.kind] ?? 3) === t));
+  if ((d.blocks || []).length <= 3 || opts.order) return layoutOnce(d, opts, opts.order || [0, 1, 2, 3]);
+  const perms = (xs) => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => perms([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
+  // power stays above the processor and the peripherals: supplies flow down the page
+  const readable = (o) => !o.includes(1) || [2, 3].every((t) => !o.includes(t) || o.indexOf(1) < o.indexOf(t));
+  let best = null;
+  for (const order of perms(present).filter(readable)) {
+    for (const less of [0, 1]) {
+      const L = layoutOnce(d, opts, order, less);
+      if (!L.blocks.length) return L;
+      L.score = scoreLayout(L) + (order.join() === present.join() ? 0 : 0.5) + less * 0.25;
+      L.args = [order, less, new Map()];
+      if (!best || L.score < best.score) best = L;
+    }
+  }
+  // then single blocks moved into another tier's row (a connector beside the chip it serves), kept when cleaner
+  const [order, less] = best.args;
+  let over = new Map();
+  for (let pass = 0; pass < 3; pass++) {
+    let improved = false;
+    for (const b of d.blocks || []) {
+      if (b.kind === "power") continue;                  // the supply chain keeps its row
+      const id = String(b.id), own = over.has(id) ? over.get(id) : TIER[b.kind] ?? 3;
+      for (const t of order) {
+        if (t === own || (t === 1 && b.kind !== "connector")) continue;     // only an input joins the power row
+        const trial = new Map(over).set(id, t);
+        const L = layoutOnce(d, opts, order, less, trial);
+        L.score = scoreLayout(L) + (order.join() === present.join() ? 0 : 0.5) + less * 0.25 + trial.size * 0.4;
+        if (L.score < best.score - 0.3) { best = L; over = trial; improved = true; }
+      }
+    }
+    if (!improved) break;
+  }
+  return best;
+}
+
+// How clean a layout is (lower is better): see layoutDiagram.
+export function scoreLayout(L) {
+  const H = L.wires.filter((s) => Math.abs(s.y1 - s.y2) < 0.01), V = L.wires.filter((s) => Math.abs(s.x1 - s.x2) < 0.01);
+  let cross = 0, stacked = 0, length = 0;
+  for (const h of H) for (const v of V) {
+    if (h.own === v.own) continue;
+    const [hx0, hx1] = [Math.min(h.x1, h.x2), Math.max(h.x1, h.x2)], [vy0, vy1] = [Math.min(v.y1, v.y2), Math.max(v.y1, v.y2)];
+    if (v.x1 > hx0 + 0.5 && v.x1 < hx1 - 0.5 && h.y1 > vy0 + 0.5 && h.y1 < vy1 - 0.5) cross++;
+  }
+  const along = (a, b, p, q) => Math.min(Math.max(a.p, a.q), Math.max(b.p, b.q)) - Math.max(Math.min(a.p, a.q), Math.min(b.p, b.q));
+  for (const [list, key, p, q] of [[H, "y1", "x1", "x2"], [V, "x1", "y1", "y2"]]) {
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j];
+      if (a.own !== b.own && Math.abs(a[key] - b[key]) < 2 && along({ p: a[p], q: a[q] }, { p: b[p], q: b[q] }) > 2) stacked++;
+    }
+  }
+  for (const s of L.wires) length += Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1);
+  const lanes = new Set(L.wires.filter((s) => s.own && s.own.lane != null).map((s) => s.own)).size;
+  const tags = L.blocks.reduce((n, b) => n + b.tags.length, 0);          // a supply shown as a tag, not a wire
+  return cross * 3 + stacked * 40 + lanes * 2 + tags * 2.5 + (L.hidden || []).length * 6 + length / 250 + L.box.h / 300 + L.box.w / 600;
+}
+
+function layoutOnce(d, opts, order, less = 0, over = null) {
   const measure = opts.measure || estimate;
   const avail = Math.max(320, opts.width || 560);
   const pillW = (t) => measure(t, "l") + 12;
   const blocks = (d.blocks || []).map((b, i) => ({ id: String(b.id), label: b.label, kind: b.kind || "other", note: b.note || "", i,
-    tier: TIER[b.kind] ?? 3, tags: [] }));
+    tier: over && over.has(String(b.id)) ? over.get(String(b.id)) : TIER[b.kind] ?? 3, tags: [] }));
   const out = { blocks, wires: [], dots: [], pills: [], box: { x: 0, y: 0, w: 0, h: 0 } };
   if (!blocks.length) return out;
   const byId = new Map(blocks.map((b) => [b.id, b]));
@@ -113,7 +176,7 @@ export function layoutDiagram(d, opts = {}) {
   const links = [...merged.values()].map((m) => ({ a: m.a, b: m.b, kind: m.kind, label: m.labels.join(", ") }));
 
   // Tiers, each ordered by where its blocks connect (one sweep down, one up), then wrapped into rows.
-  const tiers = [0, 1, 2, 3].map((t) => blocks.filter((b) => b.tier === t)).filter((t) => t.length);
+  const tiers = order.map((t) => blocks.filter((b) => b.tier === t)).filter((t) => t.length);
   const tierOf = new Map();
   tiers.forEach((t, ti) => t.forEach((b) => tierOf.set(b, ti)));
   const nbrs = new Map(blocks.map((b) => [b, []]));
@@ -134,6 +197,7 @@ export function layoutDiagram(d, opts = {}) {
   const widest = Math.max(...tiers.map((t) => t.length));
   let cap = 2;
   for (let n = Math.min(4, Math.max(2, widest)); n >= 2; n--) if (room(n) >= MIN_W || n === 2) { cap = n; break; }
+  cap = Math.max(2, cap - less);
   const W = clamp(room(cap), MIN_W, MAX_W);
   out.bw = W;
   const rows = [];
