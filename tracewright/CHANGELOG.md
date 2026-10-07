@@ -29,6 +29,8 @@ Simulate the board as it is laid out, plan who routes each net, take on dense bo
 ### Fixed
 - Track ends that overlap without meeting exactly now count as joined, so current paths and simulations follow the copper as KiCad does.
 - Vias that span some of the layers (blind, buried, micro) are read as such.
+- The router's compiled core is built again when the copy on disk was made for another machine (an Intel Mac, Rosetta or Linux), instead of stopping the route.
+- Long release notes in the update dialog end at a line instead of mid-word.
 
 ## [1.0.1] - 2026-10-04
 

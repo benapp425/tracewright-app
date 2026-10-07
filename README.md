@@ -15,7 +15,7 @@ live in KiCad, then sends it to the fab.</p>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-43c283">
 </p>
 
-<p align="center"><img src="docs/images/overview.png" width="900" alt="A project overview in Tracewright, with Claude's review of the demo board"></p>
+<p align="center"><img src="docs/images/overview.png" width="900" alt="A project overview in Tracewright: the demo board, its stages and what to do next"></p>
 
 ## Features
 
@@ -60,7 +60,7 @@ live in KiCad, then sends it to the fab.</p>
   <img src="docs/images/signal.png" width="440" alt="A net's edge and impedance, simulated">
 </p>
 <p align="center">
-  <img src="docs/images/make.png" width="440" alt="Getting the board built: BOM health, test points, panel">
+  <img src="docs/images/make.png" width="440" alt="Getting the board built: test points, drawings and a panel">
   <img src="docs/images/schematic.png" width="440" alt="A schematic with its design notes">
 </p>
 <p align="center">

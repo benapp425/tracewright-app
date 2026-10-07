@@ -3,6 +3,35 @@
 All notable changes to Tracewright. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-10-07
+
+Simulate the board as it is laid out, plan who routes each net, take on dense boards, and get the board built.
+
+### Added
+- **Simulate.** A new place for the board as laid out: the voltage drop and current density in a supply's copper (with the spots that would warm up), the board's temperature from the parts that get warm, where a fast net's return current runs and the loop it opens round a gap, a net's impedance along its route and its edge at the far end (simulated in ngspice, with the series resistor that would tame it), what it picks up from its neighbours, a rail's impedance against its target, and circuit blocks from the schematic in ngspice.
+- **Routing plan.** Every net is routed by the router, routed first with its rules (pairs, crystals, clocks, switch nodes, heavy currents), or left for you (RF, current sense, high voltage), each with its reason, in Board › Routing. Move a net to another mode, keep it to chosen layers, and pick the router's preset (Balanced, Dense, Few vias, Shortest). After a route, each net shows its length, its vias and anything off its plan.
+- **Placement with reasons.** Pick a part to see why it is where it is. Keep parts near a pin, together, apart, at an edge or on a side; Claude places around what you set, in stages (connectors, main chips, their support parts, the rest), and can stop after each for your OK. The placement gets a score.
+- **Up to 12 layers, and HDI.** Stack-ups up to 12 layers. HDI (vias in pads, laser microvias, blind vias) stays off unless you turn it on; Claude offers it when a part needs it. Each BGA gets an escape plan (tracks between its balls, whether a via fits between four, how many signal layers its rings need) and a fan-out: dog-bones, vias in the pads, or stacked microvias down to its ground plane.
+- **Where tracks fit.** The routing space shows the crowded parts of the board in words, and hovering any point says what keeps a track out of it. Regions give an area its own rules: keep tracks out, no vias, finer tracks, more spacing.
+- **Make.** Parts › Make gets the board built: the BOM's health (can every line be bought for the boards you order), a test-point plan, a fab drawing (outline, stack-up, drill table, fab notes) and assembly drawings, a V-scored panel with rails and fiducials, whether the board fits its enclosure (with the openings its connectors need, and an OpenSCAD box to start from), and your blocks: circuits that worked once, saved to use again.
+- **Schematic notes in two layers.** On the sheet, one short line beside the part it explains; the reasoning and its sources go in the design notes, shown when you hover the marker by the part. The schematic checks flag long notes, notes far from their part, support parts drawn away from their pin, and connector pins left unnamed. Designs with several sheets are hierarchical unless you choose flat at the start.
+- **The setup says when a choice cannot work.** In the guided start, a board too small for its parts, too few layers for a BGA, or a part taller than the limit is said plainly, with what would work.
+- **A solved floorplan.** The floorplan comes out solved: blocks inside the board and clear of each other, connectors on their edges without overlapping, long headers along their edge. Turn an edge connector in place (R), or press Solve.
+- **Help.** How the app is laid out, and Check the setup (KiCad, its Python and libraries, ngspice, Claude, the projects folder), also on the projects page and in Settings › About.
+- **Calculator.** Tracks between pads: how many fit, whether a via fits between four balls, rings out per layer.
+
+### Changed
+- **Block diagrams** lay themselves out by trying arrangements and keeping the clearest: supplies above what they feed, fewer crossing lines.
+- **Open in KiCad** sits at the top right of every project.
+- **Settings** has a Design section: new projects' schematic style, router preset, test-point side and fab.
+- **The board's side panels** keep their colours in the light theme.
+
+### Fixed
+- Track ends that overlap without meeting exactly now count as joined, so current paths and simulations follow the copper as KiCad does.
+- Vias that span some of the layers (blind, buried, micro) are read as such.
+- The router's compiled core is built again when the copy on disk was made for another machine (an Intel Mac, Rosetta or Linux), instead of stopping the route.
+- Long release notes in the update dialog end at a line instead of mid-word.
+
 ## [1.0.1] - 2026-10-04
 
 ### Fixed
