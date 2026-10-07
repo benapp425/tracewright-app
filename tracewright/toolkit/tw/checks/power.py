@@ -357,7 +357,7 @@ def power_decoupling(ctx):
             out.append(Finding("power.decoupling", "warning",
                                f"{ref} {net}: nearest capacitor {best[2]} is {best[0]:.1f} mm from pin {best[1]} (limit {limit:g} mm)",
                                {"ref": ref, "net": net, "x": fp.x, "y": fp.y},
-                               hint="Place the small capacitor right at the pin, on the same side, with a short ground return.",
+                               hint="Place the small capacitor right at the pin with a short ground return (under a BGA: on the bottom, beside the ball's via).",
                                key=f"decoup:far:{ref}:{net}"))
     if not by_ic:
         raise NotApplicable("no IC supply pins")

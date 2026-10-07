@@ -85,6 +85,28 @@ def add_constraint(project, c, by="user"):
     return keep
 
 
+def replace_script(project, constraints):
+    """The schematic script's constraints (parts it drew aside, kept at their pin; a BGA's small capacitors on the
+    bottom), written fresh each run; the user's and Claude's stay, and win where they set the same kind for a part."""
+    d = load(project)
+    keep = [c for c in d["constraints"] if c.get("by") != "script"]
+    mine = {(c.get("kind"), c.get("ref")) for c in keep}
+    n = max([int(m.group(1)) for x in keep if (m := re.match(r"k(\d+)$", str(x.get("id", ""))))] or [0])
+    seen = set()
+    for c in constraints:
+        key = (c.get("kind"), c.get("ref"))
+        if c.get("kind") not in KINDS or key in mine or key in seen:
+            continue
+        seen.add(key)
+        n += 1
+        keep.append({k: v for k, v in c.items() if k in ("kind", "ref", "refs", "to", "from", "max_mm", "min_mm", "edge", "side", "why")}
+                    | {"id": f"k{n}", "by": "script", "at": now()})
+    if keep != d["constraints"] or constraints:
+        d["constraints"] = keep
+        save(project, d)
+    return [c for c in keep if c.get("by") == "script"]
+
+
 def remove_constraint(project, cid):
     d = load(project)
     keep = [c for c in d["constraints"] if c.get("id") != cid]

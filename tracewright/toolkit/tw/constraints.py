@@ -12,6 +12,8 @@ files can show: size, layers, thickness, copper, part heights, temperature ratin
 OPTIONS = {
     "max_size_mm": ("Largest board", "size", "mm", "Width and length the board must fit in (either way round).", None),
     "max_height_mm": ("Tallest part", "number", "mm", "Above the board's top surface: enclosure or bay clearance.", None),
+    "assembly_sides": ("Parts on", "choice", "", "Both sides suits a BGA (its small capacitors go underneath) and small "
+                       "boards; one side is cheaper to assemble.", ["top only", "both sides"]),
     "layers": ("Copper layers", "choice", "", "", [2, 4, 6, 8, 10, 12]),
     "thickness_mm": ("Board thickness", "choice", "mm", "", [0.8, 1.0, 1.2, 1.6, 2.0]),
     "copper_oz": ("Outer copper", "choice", "oz", "Heavier copper carries more current in the same width.", [1, 2]),

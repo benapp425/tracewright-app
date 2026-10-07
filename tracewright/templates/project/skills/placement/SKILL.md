@@ -26,7 +26,12 @@ connectors at the edge, constraints kept, hot parts apart): read it after each s
    each block's parts inside its floorplan area; `placement.floorplan` checks connectors and holes against it.
 4. The processor / main IC, then power stages: switcher, inductor and input capacitors in the tightest loop;
    regulator input and output capacitors at their pins.
-5. Decoupling capacitors at the supply pins they serve, same side, short ground return.
+5. Decoupling capacitors at the supply pins they serve, with a short ground return; on the same side, except under a
+   BGA, where there is no room on top: its small capacitors (2.2 uF and less) go on the bottom, each beside the via
+   of the ball it serves (after `fanout`), and its bulk capacitors around it on top. The schematic records which pin a
+   capacitor drawn aside serves ("near U1 pin P12" on the sheet, a `near` constraint, `side` B for a BGA's small ones):
+   keep those. Parts on both sides make the assembly two-sided (it costs more); if the requirements say top only,
+   keep everything on top and say what that costs the BGA.
 6. Crystals right at their pins; sensitive analog away from switch nodes; RF parts per their keep-outs.
 7. Everything else by signal flow; refs readable, polarity marks visible.
 

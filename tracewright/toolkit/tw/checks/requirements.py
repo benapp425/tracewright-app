@@ -23,7 +23,7 @@ def req_limits(ctx):
     cost per board stays under the budget (LCSC unit prices). Unset limits are Claude's choice."""
     lim = constraints.get(ctx.cfg)
     checkable = {k: v for k, v in lim.items() if k in ("max_size_mm", "layers", "thickness_mm", "copper_oz",
-                                                           "max_height_mm", "temp_c", "cost_usd")}
+                                                           "max_height_mm", "assembly_sides", "temp_c", "cost_usd")}
     if not checkable:
         raise NotApplicable("no limits set that the files can show (Claude decides)" if not lim else
                             "the limits set are for Claude and the order, not something the files show")
@@ -77,7 +77,16 @@ def req_limits(ctx):
                                    f"{' ...' if len(unknown) > 12 else ''}", {"ref": sorted(unknown)[0]},
                                    hint="Give their footprints a STEP model (the maker's, or a simple box at the data sheet's "
                                         "height) so the limit can be checked.", key="req:height:unknown"))
-    elif any(k in lim for k in ("max_size_mm", "layers", "thickness_mm", "copper_oz", "max_height_mm")):
+        if lim.get("assembly_sides") == "top only":
+            seen.append("sides")
+            under = sorted(fp.ref for fp in b.fp_list if fp.side == "B" and fp.pads and not fp.dnp
+                           and not fp.ref.startswith(("H", "MH", "FID", "TP", "#")))
+            if under:
+                out.append(Finding("req.limits", "error", f"{len(under)} part{'s' if len(under) > 1 else ''} on the bottom "
+                                   f"({', '.join(under[:10])}{' ...' if len(under) > 10 else ''}); the requirements say top only",
+                                   {"ref": under[0]}, hint="Move them to the top, or allow both sides in the requirements "
+                                   "(two-sided assembly costs more).", key="req:sides"))
+    elif any(k in lim for k in ("max_size_mm", "layers", "thickness_mm", "copper_oz", "max_height_mm", "assembly_sides")):
         out.append(Finding("req.limits", "info", "no board yet: size, layers and heights are checked once there is one",
                            key="req:noboard"))
     if ("temp_c" in lim or "cost_usd" in lim) and ctx.available("netlist"):

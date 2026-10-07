@@ -121,11 +121,22 @@ class LibSymbol:
         return LibSymbol(newname, t)
 
 
+_LIBS = {}
+
+
+def _library(path):
+    """A symbol library's symbols by name, parsed once: asking for rails that are not stock symbols (VDD_SOC) used to
+    parse KiCad's whole power library each time, minutes on a board with many rails."""
+    if path not in _LIBS:
+        tree = sexp.parse(open(path, encoding="utf-8").read())
+        _LIBS[path] = {str(s[1]): s for s in findall(tree, "symbol")}
+    return _LIBS[path]
+
+
 def load_stock(libfile, name):
     """Load a KiCad stock symbol, flattening 'extends'."""
     path = libfile if os.path.isabs(libfile) else os.path.join(symbol_dir(), libfile + ".kicad_sym")
-    tree = sexp.parse(open(path, encoding="utf-8").read())
-    syms = {str(s[1]): s for s in findall(tree, "symbol")}
+    syms = _library(path)
     s = copy.deepcopy(syms[name])
     ext = find(s, "extends")
     if ext:

@@ -103,6 +103,15 @@ def check(root, cv=None, cfg=None):
                         f"The parts need about {m.group(1)} x {m.group(2)} mm; the limit is {mx[0]:g} x {mx[1]:g}.",
                         "Raise the size limit, use both sides of the board, or choose smaller parts.")
 
+    # sides: a BGA's small capacitors go underneath it
+    if lim.get("assembly_sides") == "top only":
+        for name, balls, pitch in _bgas(cv):
+            if balls >= 64:
+                add("tight", f"sides:{name}", f"{name} with parts on the top only",
+                    "Its small decoupling capacitors belong right under it, on the bottom, beside each ball's via; on top "
+                    "they sit outside the ball grid, millimetres from the inner balls.",
+                    "Allow parts on both sides (two-sided assembly costs more), or accept the longer paths.")
+
     # layers: what the parts need to get their pins out, and fast pairs
     layers = lim.get("layers")
     if layers:

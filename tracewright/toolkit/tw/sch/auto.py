@@ -65,6 +65,29 @@ def _hit(a, b, gap=0.0):
     return a[0] < b[2] + e and b[0] < a[2] + e and a[1] < b[3] + e and b[1] < a[3] + e
 
 
+BALL = re.compile(r"^[A-Z]{1,2}\d{1,2}$")
+
+
+def _is_bga(inst):
+    """Pins named as balls (A1, P12, AA3): a BGA, whose small capacitors go on the bottom, under it."""
+    nums = {str(q["number"]) for q in inst.lib.pins}
+    return len(nums) >= 16 and all(BALL.match(n) for n in nums)
+
+
+def _farads(v):
+    """A capacitor's value in farads ("100n", "2u2", "10u 25V"), or None."""
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([pnuµ])(\d*)", str(v or ""))
+    if not m:
+        return None
+    x = float(m.group(1) + ("." + m.group(3) if m.group(3) and "." not in m.group(1) else ""))
+    return x * {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6}[m.group(2)]
+
+
+def _snap_up(v):
+    """The grid point at or after v."""
+    return snap(math.ceil(round(v / kisch.GRID, 6)) * kisch.GRID)
+
+
 def _seg_box(a, b):
     return (min(a[0], b[0]) - 0.15, min(a[1], b[1]) - 0.15, max(a[0], b[0]) + 0.15, max(a[1], b[1]) + 0.15)
 
@@ -88,6 +111,16 @@ def _text_box(s, at, size=1.27):
     a, z = font.ink(s, size)                       # the strokes, from the anchor
     h = len(lines) * size * 1.65
     return (at[0] + a, at[1] - size * 0.3, at[0] + z, at[1] + h)
+
+
+def _near(a, ka, b, kb, gap):
+    """Do two drawn things come within `gap`? Texts side by side need a space between them: 0.3 mm read as one run of
+    text ("FB201PWR_FLAG", two notes as one line); above each other 0.3 mm is the line spacing."""
+    if ka == kb == "text":
+        rows = min(a[3], b[3]) - max(a[1], b[1])             # on one line: they share at least half a line's height
+        if rows >= 0.5 * min(a[3] - a[1], b[3] - b[1]):
+            return _hit((a[0] - 0.7, a[1], a[2] + 0.7, a[3]), b, gap)
+    return _hit(a, b, gap)
 
 
 def _gap(k1, k2):
@@ -176,8 +209,11 @@ class Group:
         return out
 
     def _clear(self, items, anchor=None):
-        """Would these items land on anything drawn, or on each other? A wire may leave the anchor's body
-        (it starts at a pin) and touch the parts of its own pattern where it meets their pins."""
+        """Would these items land on each other, or on anything drawn? A wire may leave the anchor's body
+        (it starts at a pin) and touch the parts of its own pattern where it meets their pins. The candidate is
+        checked against itself first: when that fails (self.why[0] == "self"), no other place can help."""
+        if not self._self_clear(items):
+            return False
         for kind, box, owner in items:
             for k2, b2, o2 in self.boxes:
                 if k2 == "body" and o2 == anchor:
@@ -188,10 +224,14 @@ class Group:
                             self.why = (kind, owner, k2, o2)
                             return False
                         continue
-                if _hit(box, b2, _gap(kind, k2)):
+                if _near(box, kind, b2, k2, _gap(kind, k2)):
                     self.why = (kind, owner, k2, o2)
                     return False
-        for i, (k1, b1, o1) in enumerate(items):          # within the candidate: texts clear, bodies may meet at pins
+        return True
+
+    def _self_clear(self, items):
+        """Do these items (one drawing) keep clear of each other? Texts clear, bodies may meet at pins."""
+        for i, (k1, b1, o1) in enumerate(items):
             for k2, b2, o2 in items[i + 1:]:
                 if "wire" in (k1, k2):
                     if ("text" in (k1, k2)) and _hit(b1, b2, 0.3):
@@ -200,7 +240,7 @@ class Group:
                     continue
                 if o1 == o2 and o1 is not None:
                     continue
-                if _hit(b1, b2, -1.0 if k1 == k2 == "body" else _gap(k1, k2)):
+                if _near(b1, k1, b2, k2, -1.0 if k1 == k2 == "body" else _gap(k1, k2)):
                     self.why = ("self", k1, o1, k2, o2)
                     return False
         return True
@@ -225,7 +265,7 @@ class Group:
         others), "left", "right", or None to leave the symbol as it is drawn. The symbol is mirrored, not
         turned, so pin 1 stays at the top."""
         self.flush()
-        ref = ref or self.page.ref(prefix)
+        ref = self.page.ref(prefix, ref)
         mirror = self._facing(key, ref, rot, unit, value, fields, face)
         if not self.parts:
             inst = self._probe(key, ref, (0, 0), rot, unit, value, fields, mirror=mirror)
@@ -241,6 +281,7 @@ class Group:
             inst = inst or self._probe(key, ref, (x, 0), rot, unit, value, fields, mirror=mirror)
         self._fields_clear_of_pins(inst)
         self.parts[ref] = inst
+        self.__dict__.setdefault("main", []).append(ref)          # the block's own parts (not support parts)
         self.ops.append(("part", inst))
         self._take(self._part_items(inst))
         return inst
@@ -298,8 +339,8 @@ class Group:
         label), a resistor, and `bottom`. cap: a filter capacitor from the tap to `bottom`, beside the lower
         resistor. attrs: what the mid net is (kind="analog" ...; see tw.netmodel). Drawn after the pin
         patterns; returns the references."""
-        refs = (refs[0] or self.page.ref("R"), refs[1] or self.page.ref("R"))
-        cap_ref = (cap_ref or self.page.ref("C")) if cap else None
+        refs = (self.page.ref("R", refs[0]), self.page.ref("R", refs[1]))
+        cap_ref = self.page.ref("C", cap_ref) if cap else None
         if attrs:
             self.page.d.net(mid, **attrs)
         self.later.append(("divider", top, mid, rkey_top, rkey_bottom, bottom, refs, cap, cap_ref))
@@ -316,7 +357,7 @@ class Group:
     def decouple(self, inst, pin, caps, rail, refs=None):
         """Capacitors at a power pin, where they are placed: a wire from the pin to the rail symbol, the
         capacitors hanging off it beside the pin, smallest nearest, each to ground."""
-        refs = list(refs) if refs else [self.page.ref("C") for _ in caps]
+        refs = [self.page.ref("C", r) for r in refs] if refs else [self.page.ref("C") for _ in caps]
         self._ask("decouple", inst, pin, caps=list(caps), rail=rail, refs=refs)
         return refs
 
@@ -325,36 +366,36 @@ class Group:
         beyond it. cap: a capacitor from the same line to ground, drawn with it at the pin (an enable's RC delay,
         a reset's filter): pull(u, "EN", "R10k", "+3V3", net="EN", cap="C1u"). Returns the resistor's reference,
         or (resistor, capacitor) with a cap."""
-        ref = ref or self.page.ref("R")
-        cap_ref = (cap_ref or self.page.ref("C")) if cap else None
+        ref = self.page.ref("R", ref)
+        cap_ref = self.page.ref("C", cap_ref) if cap else None
         self._ask("pull", inst, pin, key=key, to=to, net=net, ref=ref, cap=cap, cap_ref=cap_ref, gnd=gnd)
         return (ref, cap_ref) if cap else ref
 
     def series(self, inst, pin, key, net, ref=None, before=None):
         """A part in line with the pin (series resistor, ferrite): a stub, the part along the pin's
         direction, then `net`'s label. `before` names the pin's side of the part."""
-        ref = ref or self.page.ref("R")
+        ref = self.page.ref("R", ref)
         self._ask("series", inst, pin, key=key, net=net, ref=ref, before=before)
         return ref
 
     def indicator(self, inst, pin, rkey, dkey, refs=(None, None), gnd="GND"):
         """An LED driven from a pin: the pin, a series resistor and the LED in line, then ground."""
-        refs = (refs[0] or self.page.ref("R"), refs[1] or self.page.ref("D"))
+        refs = (self.page.ref("R", refs[0]), self.page.ref("D", refs[1]))
         self._ask("indicator", inst, pin, rkey=rkey, dkey=dkey, refs=refs, gnd=gnd)
         return refs
 
     def crystal(self, inst, pin_a, pin_b, ykey, caps, ref=None, cap_refs=None, gnd="GND"):
         """A crystal on two oscillator pins of one side, with its load capacitors to ground: the crystal
         stands between the two lines, each capacitor runs out from its end of the crystal to ground."""
-        ref = ref or self.page.ref("Y")
-        cap_refs = list(cap_refs) if cap_refs else [self.page.ref("C"), self.page.ref("C")]
+        ref = self.page.ref("Y", ref)
+        cap_refs = [self.page.ref("C", r) for r in cap_refs] if cap_refs else [self.page.ref("C"), self.page.ref("C")]
         self._ask("crystal", inst, pin_a, pins=[str(pin_a), str(pin_b)], ykey=ykey, caps=list(caps), ref=ref,
                   cap_refs=cap_refs, gnd=gnd)
         return ref, cap_refs
 
     def led(self, rail, rkey, dkey, refs=(None, None), gnd="GND"):
         """A supply, a series resistor and an LED to ground, top to bottom (drawn after the pin patterns)."""
-        refs = (refs[0] or self.page.ref("R"), refs[1] or self.page.ref("D"))
+        refs = (self.page.ref("R", refs[0]), self.page.ref("D", refs[1]))
         self.later.append(("led", rail, rkey, dkey, refs, gnd))
         return refs
 
@@ -520,7 +561,8 @@ class Group:
                         ops.append(("flag", fpt))
                     self._commit(ops, items)
                     return
-        self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin]}, record=False)
+        # a global label: a local one joins the supply only on a sheet that has its symbol too (VIN_5V was cut off)
+        self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin], "rail": True}, record=False)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {rail} as a label (no room for its symbol) {getattr(self, 'why', '')}")
 
     def _draw_power_bar(self, rq):
@@ -528,7 +570,15 @@ class Group:
         (pins that do not line up, or no room: a symbol at each)."""
         inst, rail, pins = rq["inst"], rq["rail"], rq["pins"]
         d = inst.pin_dir(pins[0])
-        pts = sorted((inst.pin(p) for p in pins), key=lambda q: q[0])
+        at = {}                                          # stacked pins (one point in the symbol) are joined there
+        for p in pins:
+            at.setdefault(tuple(round(c, 3) for c in inst.pin(p)), p)
+        if len(at) == 1:                                 # all on one point: one symbol (a bar of no length left the
+            self._draw_power({"inst": inst, "pin": pins[0], "rail": rail, "flag": False})   # symbol on nothing)
+            for pin in pins[1:]:
+                self._connect(rail, inst.ref, pin)
+            return
+        pts = sorted((inst.pin(p) for p in at.values()), key=lambda q: q[0])
         if len({round(q[1], 3) for q in pts}) != 1:
             for pin in pins:
                 self._draw_power({"inst": inst, "pin": pin, "rail": rail, "flag": False})
@@ -670,7 +720,8 @@ class Group:
         p, d = inst.pin(pin), inst.pin_dir(pin)
         if self.page.conv.get("decoupling") == "row":             # the project draws them together, beside the part
             self._draw_power({"inst": inst, "pin": pin, "rail": rail, "flag": False})
-            self._aside_caps(caps, refs, rail)
+            self._aside_caps(caps, refs, rail, f"near {inst.ref} pin {pin}")
+            self._keep_near(inst, [pin], refs, 3.0, caps)
             return
         for pitch in (7.62, 10.16, 12.7, 15.24):
             if d[0] == 0:
@@ -681,10 +732,13 @@ class Group:
             for ops, items in plans:
                 if self._clear(items, anchor=inst.ref):
                     self._commit(ops, items)
+                    if _is_bga(inst):                              # at the ball on the sheet, under the BGA on the board
+                        self._keep_near(inst, [pin], refs, 3.0, caps)
                     return
         # no room at the pin: the rail at the pin, the capacitors on it aside, joined by the rail's name
         self._draw_power({"inst": inst, "pin": pin, "rail": rail, "flag": False})
-        self._aside_caps(caps, refs, rail)
+        self._aside_caps(caps, refs, rail, f"near {inst.ref} pin {pin}")
+        self._keep_near(inst, [pin], refs, 3.0, caps)
         self.page.crowded.append(f"{inst.ref} pin {pin}: decoupling drawn beside the part")
 
     def _cap_down(self, key, ref, top):
@@ -772,20 +826,22 @@ class Group:
             return
         # no room on the line: its label at the pin, the resistor aside with the same label (and its capacitor)
         self._draw_net({"inst": inst, "pin": pin, "name": name, "pins": [pin]}, record=False)
-        self._aside_pull(key, ref, to, name)
+        self._aside_pull(key, ref, to, name, f"near {inst.ref} pin {pin}")
         if cap:
-            self._aside_rc_cap(cap, cap_ref, name, gnd)
+            self._aside_rc_cap(cap, cap_ref, name, gnd, f"near {inst.ref} pin {pin}")
+        self._keep_near(inst, [pin], [ref] + ([cap_ref] if cap else []), 5.0)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {ref}{' and ' + cap_ref if cap else ''} drawn beside the part {getattr(self, 'why', '')}")
 
-    def _aside_rc_cap(self, key, ref, name, gnd):
+    def _aside_rc_cap(self, key, ref, name, gnd, where=None):
         """An RC's capacitor where there was no room at the pin: from a label of the line down to ground."""
         def make(x, y):
-            c = self._two(key, ref, (x, y), "down")
-            lab = (x, y)
-            ops = [("part", c), ("power", gnd, c.pin("2"), 0), ("label", name, lab, UP)]
-            items = self._part_items(c) + self._power_items(gnd, c.pin("2")) + [("label", _label_box(name, lab, UP), None)]
+            lab = (x, y)                                      # the line's label, a short wire down to the capacitor
+            c = self._two(key, ref, _add(lab, DOWN, P), "down")
+            ops = [("label", name, lab, UP), ("wire", [lab, c.pin("1")]), ("part", c), ("power", gnd, c.pin("2"), 0)]
+            items = ([("label", _label_box(name, lab, UP), None)] + self._wire_items([lab, c.pin("1")], ref) + self._part_items(c)
+                     + self._power_items(gnd, c.pin("2")))
             return ops, items
-        self._commit(*self._free_spot(make))
+        self._commit(*self._free_spot(self._beside(make, where)))
         self._connect(name, ref, "1")
         self._connect(gnd, ref, "2")
 
@@ -881,7 +937,8 @@ class Group:
             return
         # no room in line: the pin's side labelled, the part aside between the two labels
         self._draw_net({"inst": inst, "pin": pin, "name": near, "pins": [pin]}, record=False)
-        self._aside_series(key, ref, near, net)
+        self._aside_series(key, ref, near, net, f"near {inst.ref} pin {pin}")
+        self._keep_near(inst, [pin], [ref], 5.0)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {ref} drawn beside the part {getattr(self, 'why', '')}")
 
     def _draw_series_pull(self, rq, pq):
@@ -974,7 +1031,7 @@ class Group:
             ops, items = self._indicator_chain(rq, s0, RIGHT)
             return ([("wire", [a, s0]), ("label", a_net, a, LEFT)] + ops,
                     self._wire_items([a, s0], rref) + [("label", _label_box(a_net, a, LEFT), None)] + items)
-        self._commit(*self._free_spot(make))
+        self._commit(*self._free_spot(self._beside(make, f"near {inst.ref} pin {pin}")))
         self.page.crowded.append(f"{inst.ref} pin {pin}: indicator drawn beside the part")
 
     def _crystal_plan(self, rq, top, bot, d, reach, owner):
@@ -986,17 +1043,26 @@ class Group:
         ytop, ybot = snap(mid - 3.81), snap(mid + 3.81)
         y = self._two(rq["ykey"], ref, (x, ytop), "down")
         nt, nb = y.pin("1"), y.pin("2")
-        y.ref_at, y.val_at = (x, snap(ytop - 3.81), None), (x, snap(ybot + 3.81), None)   # name above, value below, centred
         xj = snap(x - d[0] * 2 * P)                      # the lines jog before the crystal, then meet its pins
         ops = [("wire", [top, (xj, top[1]), (xj, nt[1]), nt]) if top[1] != nt[1] else ("wire", [top, nt]),
                ("wire", [bot, (xj, bot[1]), (xj, nb[1]), nb]) if bot[1] != nb[1] else ("wire", [bot, nb]), ("part", y)]
-        items = self._wire_items(ops[0][1], owner) + self._wire_items(ops[1][1], owner) + self._part_items(y)
+        lines = self._wire_items(ops[0][1], owner) + self._wire_items(ops[1][1], owner)
+        caps = []
         for node, cref, key, where in ((nt, c1, rq["caps"][0], "fields_above"), (nb, c2, rq["caps"][1], "fields_below")):
             c = self._two(key, cref, _add(node, d, P), _dir_name(d), **{where: True})
             g = _add(c.pin("2"), d, P)
             ops += [("wire", [node, c.pin("1")]), ("junction", node), ("part", c), ("wire", [c.pin("2"), g]), ("power", gnd, g, 0)]
-            items += self._wire_items([node, c.pin("1")], ref) + self._part_items(c) + self._wire_items([c.pin("2"), g], cref)
-            items += self._power_items(gnd, g)
+            caps += self._wire_items([node, c.pin("1")], ref) + self._part_items(c) + self._wire_items([c.pin("2"), g], cref)
+            caps += self._power_items(gnd, g)
+        # name above, value below, centred; when one reaches a capacitor's text (a long value: "24MHz 8pF"), it starts
+        # at the crystal and runs away from the capacitors
+        edge, away = snap(x + d[0] * 2.54), ("left" if d[0] < 0 else "right")
+        above, below = snap(ytop - 3.81), snap(ybot + 3.81)
+        for y.ref_at, y.val_at in (((x, above, None), (x, below, None)), ((x, above, None), (edge, below, away)),
+                                   ((edge, above, away), (edge, below, away))):
+            items = lines + self._part_items(y) + caps
+            if self._self_clear(items):
+                break
         return ops, items
 
     def _draw_crystal(self, rq):
@@ -1027,24 +1093,89 @@ class Group:
             ops, items = self._crystal_plan(rq, t, b_, RIGHT, 3, None)
             return (ops + [("label", tn, t, LEFT), ("label", bn, b_, LEFT)],
                     items + [("label", _label_box(tn, t, LEFT), None), ("label", _label_box(bn, b_, LEFT), None)])
-        self._commit(*self._free_spot(make))
+        self._commit(*self._free_spot(self._beside(make, f"near {inst.ref} pins {tpin}, {bpin}")))
+        self._keep_near(inst, [tpin, bpin], [ref, c1, c2], 5.0)
         self.page.crowded.append(f"{inst.ref}: crystal drawn beside the part {getattr(self, 'why', '')}")
 
     # ------------------------------------------------------------------ parts drawn aside (a label at each end)
+    def _beside(self, make, where):
+        """A drawing set aside from the pin it serves, with a line under it saying which pin ("near U1 pin P12"):
+        joined to the pin only by a net's name, nothing else on the sheet says where its parts belong."""
+        if not where:
+            return make
+
+        def made(x, y):
+            ops, items = make(x, y)
+            at = (snap(min(b[0] for _, b, _ in items)), _snap_up(max(b[3] for _, b, _ in items) + 1.27))
+            return ops + [("text", where, at)], items + [("text", _text_box(where, at), None)]
+        return made
+
+    def _keep_near(self, inst, pins, refs, max_mm, caps=None):
+        """The layout keeps parts drawn aside at their pin (a placement constraint, rewritten each run). Under a BGA the
+        small capacitors (2.2 uF and less) go on the bottom, beside their ball's via: there is no room on top."""
+        bga = _is_bga(inst)
+        bottom = bga and _project_limit("assembly_sides") != "top only"
+        for i, r in enumerate(refs):
+            where = ", ".join(str(p) for p in pins)
+            self.page.near.append({"kind": "near", "ref": r, "to": f"{inst.ref}.{pins[0]}", "max_mm": max_mm,
+                                   "why": (f"under {inst.ref} (BGA), beside ball {where}'s via" if bga else
+                                           f"drawn beside {inst.ref} on the schematic, for pin {where}")})
+            f = _farads(self._cat(caps[i]).value) if bottom and caps and i < len(caps) else None
+            if f is not None and f <= 2.2e-6:
+                self.page.near.append({"kind": "side", "ref": r, "side": "B",
+                                       "why": f"decoupling for {inst.ref} ball {where}: on the bottom, under the BGA"})
+
+    WIDE = 240.0        # mm: drawings set aside go right of the block's parts until it is this wide, then on shelves below
+
     def _free_spot(self, make, strict=False):
-        """The first place right of (then below) what is drawn where make(x, y) -> (ops, items) is clear. None when
-        there is none and `strict`; otherwise the drawing right of everything, the one place left."""
+        """Where make(x, y) -> (ops, items) is clear: right of what is drawn, at the top, while the block stays within
+        WIDE (or its parts' own width); then the first gap on the shelves below, right of the parts, top to bottom and
+        left to right; then below everything. A BGA's supplies, each with its capacitors aside, used to run off the
+        paper in one row (660 mm). None when the drawing lands on itself and `strict`: no place can help."""
         bb = self.bbox()
-        for row in range(0, 40):
-            for col in range(0, 120):
-                x = snap(bb[2] + 7.62 + col * P) if row == 0 else snap(bb[0] + col * 2 * P)
-                y = snap(bb[1] + 2 * P) if row == 0 else snap(bb[3] + 5.08 + row * P)
+        ops, items = make(0.0, 0.0)
+        if not self._self_clear(items):
+            return None if strict else make(snap(bb[2] + 12.7), snap(bb[1]))
+        u = (min(b[0] for _, b, _ in items), min(b[1] for _, b, _ in items),       # its reach from (x, y)
+             max(b[2] for _, b, _ in items), max(b[3] for _, b, _ in items))
+        parts = [self.parts[r].bbox() for r in getattr(self, "main", []) if r in self.parts]
+        px1 = max(b[2] for b in parts) if parts else bb[0]
+        right = bb[0] + max(self.WIDE, px1 - bb[0] + 40.0, u[2] - u[0] + 20.0)
+        top = snap(bb[1] + 2 * P)
+        for col in range(0, 120):                                   # right of everything, at the top
+            x = snap(bb[2] + 7.62 + col * P)
+            if x + u[2] > right:
+                break
+            ops, items = make(x, top)
+            if self._clear(items):
+                return ops, items
+        g, boxes = 0.9, [b for _, b, _ in self.boxes]               # 0.9: the widest gap two kinds must keep
+        y = snap(bb[1] - u[1])
+        while y + u[1] <= bb[3]:                                    # shelves: each row's first gap right of the parts
+            lo, hi = y + u[1] - g, y + u[3] + g
+            spans = sorted((b[0] - g, b[2] + g) for b in boxes if b[1] < hi and b[3] > lo)
+            x = _snap_up(px1 + 7.62 - u[0])
+            while True:
+                for a, b_ in spans:
+                    if b_ <= x + u[0]:
+                        continue
+                    if a >= x + u[2]:
+                        break
+                    x = _snap_up(b_ - u[0])
+                if x + u[2] > right:
+                    break
                 ops, items = make(x, y)
                 if self._clear(items):
                     return ops, items
+                x = snap(x + P)                                     # a hair too close after all: on along the row
+            y = snap(y + P)
+        for col in range(0, 120):                                   # below everything
+            ops, items = make(snap(bb[0] + col * 2 * P), snap(bb[3] + 5.08 - u[1]))
+            if self._clear(items):
+                return ops, items
         return None if strict else make(snap(bb[2] + 12.7), snap(bb[1]))
 
-    def _aside_pull(self, key, ref, to, name):
+    def _aside_pull(self, key, ref, to, name, where=None):
         down = is_ground(to)
 
         def make(x, y):
@@ -1061,11 +1192,11 @@ class Group:
                 items = self._part_items(r) + self._power_items(to, r.pin("1")) + self._wire_items([r.pin("2"), bot], ref)
                 items.append(("label", _label_box(name, bot, DOWN), None))
             return ops, items
-        self._commit(*self._free_spot(make))
+        self._commit(*self._free_spot(self._beside(make, where)))
         self._connect(name, ref, "1" if down else "2")
         self._connect(to, ref, "2" if down else "1")
 
-    def _aside_series(self, key, ref, near, net):
+    def _aside_series(self, key, ref, near, net, where=None):
         def make(x, y):
             a = (x, y)
             r = self._two(key, ref, _add(a, RIGHT, P), "right")
@@ -1074,9 +1205,9 @@ class Group:
             items = self._wire_items([a, r.pin("1")], ref) + self._part_items(r) + self._wire_items([r.pin("2"), b], ref)
             items += [("label", _label_box(near, a, LEFT), None), ("label", _label_box(net, b, RIGHT), None)]
             return ops, items
-        self._commit(*self._free_spot(make))
+        self._commit(*self._free_spot(self._beside(make, where)))
 
-    def _aside_caps(self, caps, refs, rail):
+    def _aside_caps(self, caps, refs, rail, where=None):
         def plan(pitch):
             def make(x, y):
                 top = (x, y)
@@ -1090,11 +1221,11 @@ class Group:
                 return ops, items
             return make
         for pitch in (7.62, 10.16, 12.7, 15.24):           # wider when a value ("10u 25V") reaches the next capacitor
-            got = self._free_spot(plan(pitch), strict=True)
+            got = self._free_spot(self._beside(plan(pitch), where), strict=True)
             if got:
                 self._commit(*got)
                 return
-        self._commit(*self._free_spot(plan(15.24)))
+        self._commit(*self._free_spot(self._beside(plan(15.24), where)))
 
     # ------------------------------------------------------------------ chains and notes
     def finish(self):
@@ -1214,6 +1345,15 @@ class Group:
         self.page.crowded.append(f"note near {near}: crowded")
 
 
+def _project_limit(key):
+    """A design limit of the project the script runs in (tracewright.json constraints), or None."""
+    try:
+        from .. import env, constraints
+        return constraints.get(env.project().cfg).get(key)
+    except Exception:
+        return None
+
+
 def _project_conventions():
     """The schematic conventions of the project the script runs in (tracewright.json), or the defaults."""
     from . import conventions
@@ -1242,6 +1382,7 @@ class Page:
         self.nets = {}                   # net -> {(ref, pin)}: what the drawing must connect
         self.crowded = []
         self.design_notes = []           # the reasoning behind parts, pins and nets, kept off the sheet (notes.py)
+        self.near = []                   # parts drawn aside, kept at their pin in the layout (placeplan)
         self.note_issues = []            # notes too long, or with no part to sit beside: told to Claude by finish()
         self._n = {}
         self.placed = None
@@ -1249,13 +1390,25 @@ class Page:
             design.pages = []
         design.pages.append(self)
 
-    def ref(self, prefix):
-        if self.conv.get("designators") == "sequential":           # R1, R2, ... across the whole design
-            seq = self.d.__dict__.setdefault("_seq", {})
-            seq[prefix] = seq.get(prefix, 0) + 1
-            return f"{prefix}{seq[prefix]}"
-        self._n[prefix] = self._n.get(prefix, 0) + 1
-        return f"{prefix}{self.base + self._n[prefix]}"
+    def ref(self, prefix, given=None):
+        """A part's reference: the one the script gave (kept, so numbering passes it by), else the next free one.
+        Numbering once handed out D101 to an LED while the script had named a diode D101: KiCad took them for one
+        part and joined their nets (VSYS to GND)."""
+        taken = self.d.__dict__.setdefault("_refs", set())
+        if given:
+            taken.add(given)
+            return given
+        while True:
+            if self.conv.get("designators") == "sequential":       # R1, R2, ... across the whole design
+                seq = self.d.__dict__.setdefault("_seq", {})
+                seq[prefix] = seq.get(prefix, 0) + 1
+                ref = f"{prefix}{seq[prefix]}"
+            else:
+                self._n[prefix] = self._n.get(prefix, 0) + 1
+                ref = f"{prefix}{self.base + self._n[prefix]}"
+            if ref not in taken:
+                taken.add(ref)
+                return ref
 
     def group(self, title):
         g = Group(self, title)

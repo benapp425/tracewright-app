@@ -58,18 +58,22 @@ def stock(lib, name):
     return _STOCK[key]
 
 
+_POWER = {}
+
+
 def power(name):
     """A power symbol for a rail. Stock ones (GND, +3V3, +5V, ...) come from KiCad's power library;
-    any other rail name gets a copy of +5V whose value names the net (KiCad's rule for power symbols)."""
+    any other rail name gets a copy of +5V whose value names the net (KiCad's rule for power symbols), made once."""
     try:
         return stock("power", name)
     except KeyError:
-        base = stock("power", "+5V")
-        s = base.renamed(f"PWR_{''.join(c if c.isalnum() else '_' for c in name)}")
-        for p in kisch.findall(s.tree, "property"):
-            if p[1] == "Value":
-                p[2] = kisch.Q(name)
-        return s
+        if name not in _POWER:
+            s = stock("power", "+5V").renamed(f"PWR_{''.join(c if c.isalnum() else '_' for c in name)}")
+            for p in kisch.findall(s.tree, "property"):
+                if p[1] == "Value":
+                    p[2] = kisch.Q(name)
+            _POWER[name] = s
+        return _POWER[name]
 
 
 class Builder:
@@ -359,9 +363,12 @@ class Design:
                            "attrs": self.net_attrs}, f, indent=1)
             from . import notes as design_notes          # the reasoning behind the sheets, kept beside them
             design_notes.replace_script(hw_dir, [n for pg in self.pages for n in getattr(pg, "design_notes", [])])
+            from .. import placeplan                     # parts drawn aside: the layout keeps them at their pin
+            placeplan.replace_script(hw_dir, [c for pg in self.pages for c in getattr(pg, "near", [])])
         elif self.net_attrs:                           # hand-placed sheets: only what the nets are
             with open(os.path.join(hw_dir, ".tracewright-nets.json"), "w") as f:
                 json.dump({"attrs": self.net_attrs}, f, indent=1)
+        _no_duplicate_refs(self.p.sheets)
         for sh in self.p.sheets:
             sh.write(hw_dir)
         self.p.write_symbol_lib(os.path.join(hw_dir, "lib", f"{self.libname}.kicad_sym"))
@@ -371,6 +378,24 @@ class Design:
                     f"${{KIPRJMOD}}/lib/{self.libname}.pretty")
         os.makedirs(os.path.join(hw_dir, "lib", f"{self.libname}.pretty"), exist_ok=True)
         return [os.path.join(hw_dir, sh.filename) for sh in self.p.sheets]
+
+
+def _no_duplicate_refs(sheets):
+    """Two parts under one reference are one part to KiCad: their pins' nets join (an LED numbered D101 beside a
+    diode named D101 joined VSYS to GND). One part's units may share it, each unit once."""
+    seen = {}
+    for sh in sheets:
+        for inst in sh.insts:
+            if inst.ref.startswith("#"):
+                continue
+            seen.setdefault(inst.ref, []).append((inst.lib.name.split(":")[-1], inst.unit, inst.value, sh.filename))
+    bad = []
+    for ref, uses in seen.items():
+        if len({u[0] for u in uses}) > 1 or len({(u[0], u[1]) for u in uses}) < len(uses):
+            bad.append(f"{ref}: " + " and ".join(f"{v or lib} on {f}" for lib, _, v, f in uses))
+    if bad:
+        raise ValueError("one reference for two parts (KiCad would join their nets); give one another reference: "
+                         + "; ".join(bad))
 
 
 def _ensure_lib(path, head, name, uri):

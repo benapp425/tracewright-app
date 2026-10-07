@@ -3640,6 +3640,13 @@ def setup_says_when_a_pick_cannot_work():
     assert keys["pairs-2l"]["level"] == "tight" and keys["current"]["level"] == "tight" and "2 oz" in keys["current"]["fix"]
     assert [i["level"] for i in got] == sorted([i["level"] for i in got], key=lambda l: l != "impossible"), "impossible first"
     assert all(i["fix"] and i["why"] for i in got)
+    assert not any(k.startswith("sides:") for k in keys), "parts on both sides unless the user says top only"
+    p.cfg["constraints"]["assembly_sides"] = "top only"                # a BGA's small capacitors belong under it
+    p.save()
+    side = {i["key"]: i for i in feasible.check(p.root)}.get("sides:MIMXRT1176DVMAA")
+    assert side and side["level"] == "tight" and "both sides" in side["fix"], side
+    del p.cfg["constraints"]["assembly_sides"]
+    p.save()
 
     async def go():
         webapp = make_app()
@@ -5094,6 +5101,101 @@ def stock_watch_and_stand_ins():
         from tracewright import savings
         return savings.ohms(v.split()[0]) if v else None
     asyncio.run(run())
+
+
+@test(needs=("kicad",))
+def schematic_generator_on_a_big_part():
+    """A BGA-like part with sixteen supplies of its own, its capacitors drawn aside in the project's row style, its
+    ground balls stacked on one point, and a diode the script names D101 beside an LED that numbers itself. The layout
+    stays quick (KiCad's power library was parsed again for every rail it has no symbol for: minutes on an RT1176),
+    each capacitor set aside says which ball it serves and the layout is asked to keep it there (on the bottom, under
+    the BGA), the block stays within its width, the LED takes D102, and KiCad's netlist has exactly what was asked (a
+    second D101 had joined VSYS to GND; stacked balls had left their ground symbol on nothing). The script's placement
+    constraints give way to the user's, and two parts given one reference stop the write."""
+    from tw.sch import Design, finish, Part, kisch, builder
+    from tw.sch.auto import Page, Group, _project_conventions, _farads
+    from tw.sch.kisch import make_ic
+    from tw.examples.demo_board import catalog
+    from tw import sexp, placeplan
+    assert [round(_farads(v) * 1e9, 3) for v in ("100n", "2u2", "10u 25V", "4.7u")] == [100, 2200, 10000, 4700] and _farads("x") is None
+    cat = catalog()
+    rails = [f"VDD_R{i}" for i in range(16)]
+    sym = make_ic("BALLS", [{"left": [(f"A{i + 1}", rails[i], "power_in") for i in range(16)],
+                             "right": [(f"B{i + 1}", f"IO{i}", "bidirectional") for i in range(6)],
+                             "bottom": [("C1", "GND", "power_in"), ("C2", "GND", "power_in"), ("C3", "GND", "power_in")],
+                             "width": 20.32}], ref="U", value="BALLS")
+    pins = {str(kisch.find(q, "number")[1]): q for sub in kisch.findall(sym.tree, "symbol") for q in kisch.findall(sub, "pin")}
+    at0 = kisch.find(pins["C1"], "at")
+    for n in ("C2", "C3"):                                     # the ground balls on one point, as libraries draw a BGA
+        at = kisch.find(pins[n], "at")
+        at[1], at[2] = at0[1], at0[2]
+    cat["BALLS"] = Part(kisch.LibSymbol(sym.name, sym.tree), "Package_BGA:BGA-25_5x5_4.0x4.0mm", "BALLS", "BALLS", "x", "")
+    root = os.path.join(TMP, "bigpart")
+    hw = os.path.join(root, "hardware", "b")
+    os.makedirs(hw)
+    json.dump({"name": "B", "kicad_project": "hardware/b/b.kicad_pro"}, open(os.path.join(root, "tracewright.json"), "w"))
+    parsed, orig = [], sexp.parse
+    sexp.parse = lambda *a, **k: parsed.append(1) or orig(*a, **k)
+    try:
+        kisch._LIBS.clear(), builder._STOCK.clear(), builder._POWER.clear()
+        d = Design("b", title="Big part", company="t")
+        top = d.root("Cover", paper="A4")
+        sh = d.sheet("Supplies", "supplies.kicad_sch", "Supplies", paper="A3")
+        top.subsheet(sh, (38.1, 40.64), (50.8, 25.4), [])
+        pg = Page(d, sh, base=100, catalog=cat, conventions=dict(_project_conventions(), decoupling="row"))
+        g = pg.group("BIG PART")
+        u = g.part("BALLS", "U", ref="U101")
+        for i, r in enumerate(rails):
+            g.decouple(u, f"A{i + 1}", ["C100n"], r)
+        g.power(u, ["C1", "C2", "C3"], "GND")
+        for i in range(6):
+            g.net(u, f"B{i + 1}", f"IO{i}")
+        g2 = pg.group("INDICATORS")
+        d1 = g2.part("LED_R", "D", ref="D101")
+        g2.power(d1, "1", "GND")
+        g2.net(d1, "2", "LAMP")
+        g2.led("+3V3", "R1k", "LED_R")                         # numbers itself: D102, not a second D101
+        t0 = time.time()
+        pg.layout()
+        took = time.time() - t0
+    finally:
+        sexp.parse = orig
+    assert took < 15 and len(parsed) <= 6, (round(took, 1), len(parsed))
+    bb = g.bbox()
+    assert bb[2] - bb[0] <= Group.WIDE + 30, bb               # shelves below, not one row off the paper
+    d.write(hw)
+    refs = [i.ref for i in sh.insts]
+    assert refs.count("D101") == 1 and "D102" in refs, sorted(r for r in refs if r.startswith("D"))
+    txt = open(os.path.join(hw, "supplies.kicad_sch"), encoding="utf-8").read()
+    assert all(f"near U101 pin A{i + 1}" in txt for i in range(16)), [i for i in range(16) if f"near U101 pin A{i + 1}" not in txt]
+    plan = placeplan.load(hw)
+    near = {c["ref"]: c for c in plan["constraints"] if c["kind"] == "near" and c["by"] == "script"}
+    side = {c["ref"]: c for c in plan["constraints"] if c["kind"] == "side" and c["by"] == "script"}
+    assert len(near) == 16 and all(c["to"].startswith("U101.A") and c["max_mm"] == 3 for c in near.values()), list(near.values())[:2]
+    assert set(side) == set(near) and all(c["side"] == "B" for c in side.values()), side
+    open(os.path.join(hw, "b.kicad_pro"), "w").write("{}")
+    r = finish(env.Project(root))
+    assert r.get("connections") == "as asked", r.get("connections")
+    one = sorted(near)[0]                                     # the user's own constraint wins over the script's
+    placeplan.add_constraint(hw, {"kind": "near", "ref": one, "to": near[one]["to"], "max_mm": 2}, by="user")
+    again = placeplan.replace_script(hw, pg.near)
+    cs = placeplan.load(hw)["constraints"]
+    assert not any(c["ref"] == one and c["kind"] == "near" for c in again) and len(again) == 31, len(again)
+    assert [c["max_mm"] for c in cs if c["ref"] == one and c["kind"] == "near"] == [2.0]
+    d2 = Design("dup", title="Dup", company="t")              # two parts, one reference
+    sh2 = d2.root("Dup", paper="A4")
+    pg2 = Page(d2, sh2, base=0, catalog=cat)
+    g3 = pg2.group("TWO")
+    for key in ("R1k", "R10k"):
+        r_ = g3.part(key, "R", ref="R5")
+        g3.power(r_, "1", "+3V3")
+        g3.power(r_, "2", "GND")
+    pg2.layout()
+    try:
+        d2.write(os.path.join(TMP, "dup"))
+        raise AssertionError("two R5s were written")
+    except ValueError as e:
+        assert "R5" in str(e) and "KiCad would join their nets" in str(e), e
 
 
 @test(needs=("kicad",))
