@@ -234,6 +234,18 @@ export function offsetPath(pts, d) {
   return out;
 }
 
+// A board track's length ([ax, ay, bx, by, w, layer, net, mx?, my?]): an arc, through its mid point, along the arc.
+export function trackLength(t) {
+  const ax = t[0], ay = t[1], bx = t[2], by = t[3], L = Math.hypot(bx - ax, by - ay);
+  if (t.length < 9) return L;
+  const mx = t[7], my = t[8], d = 2 * (ax * (my - by) + mx * (by - ay) + bx * (ay - my));
+  if (Math.abs(d) < 1e-9) return L;
+  const a2 = ax * ax + ay * ay, m2 = mx * mx + my * my, b2 = bx * bx + by * by;
+  const cx = (a2 * (my - by) + m2 * (by - ay) + b2 * (ay - my)) / d, cy = (a2 * (bx - mx) + m2 * (ax - bx) + b2 * (mx - ax)) / d;
+  const r = Math.hypot(ax - cx, ay - cy), half = (c) => 2 * Math.asin(Math.min(1, c / (2 * r)));
+  return r * (half(Math.hypot(mx - ax, my - ay)) + half(Math.hypot(bx - mx, by - my)));
+}
+
 export function pathLength(pts) {
   let L = 0;
   for (let i = 0; i + 1 < pts.length; i++) L += Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]);

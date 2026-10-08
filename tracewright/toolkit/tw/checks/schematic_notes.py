@@ -1,6 +1,8 @@
 """Schematics people can read: notes short and beside what they explain (the reasoning in the design notes, off the
 sheet), support parts drawn at the pin they serve, connectors' pins named, titles filled in."""
 import math, re
+PIN_LINE = re.compile(r"^near [A-Z]{1,3}\d{1,4} pins? [A-Z0-9_, ]+$")
+PIN_LINE_PARTS = re.compile(r"^near ([A-Z]{1,3}\d{1,4}) pins? ([A-Z0-9_, ]+)$")
 
 from . import check, Finding, NotApplicable, examined, plural
 from .. import font
@@ -48,6 +50,8 @@ def sch_notes(ctx):
             body = t["text"].strip()
             if not body or (HEADING.match(body) and "\n" not in body) or _is_list(body) or sh.parent is None:
                 continue                                  # a block's title, a numbered list, the cover's notes
+            if PIN_LINE.match(body):
+                continue                                  # "near U1 pin P12": it sits with parts drawn aside, by design
             n += 1
             lines = body.split("\n")
             first = lines[0][:60]
@@ -98,12 +102,18 @@ def sch_support(ctx):
     for sh in ctx.hier.sheets:
         syms = [s for s in sh.symbols if not s.ref.startswith("#")]
         pos = {(s.ref, str(num)): (x, y) for s in syms for num, _, _, x, y in s.pins}
+        said = []                                         # "near U1 pin P12" lines: parts drawn aside, named
+        for t in sh.sf.texts:
+            m = PIN_LINE_PARTS.match(t["text"].strip())
+            if m:
+                said.append((_box(t), m.group(1), {x.strip() for x in m.group(2).split(",")}))
         refs = {s.ref for s in syms}
         for s in syms:
             if not PASSIVE.match(s.ref):
                 continue
             nets = {nl.pin.get((s.ref, str(num))) for num, _, _, _, _ in s.pins}
             signal = [x for x in nets if x and x not in power and not x.startswith("unconnected-")]
+            far = []                                      # a series part serves both ends: drawn at either is enough
             for net in signal:
                 users = [(r, p) for r, p in nl.nets.get(net, []) if r in refs and r != s.ref and not PASSIVE.match(r)]
                 if len(users) != 1:
@@ -116,12 +126,17 @@ def sch_support(ctx):
                 if not at or not mine:
                     continue
                 d = min(math.hypot(m[0] - at[0], m[1] - at[1]) for m in mine)
-                if d > 40:
-                    name = re.sub(r"~\{([^}]*)\}", r"\1", nl.pin_name(r, p) or "")      # KiCad's overbar markup, as read
-                    out.append(Finding("sch.support", "warning", f"{s.ref} serves {r} pin {p}{' (' + name + ')' if name else ''} but is "
-                                       f"drawn {d:.0f} mm from it", {"sheet": sh.name_path, "file": sh.filename, "ref": s.ref},
-                                       hint=f"Draw {s.ref} at the pin: pull(..., cap=...) for an RC, decouple(...) for a capacitor, "
-                                            f"pull(...) or series(...) for a resistor.", key=f"support:{s.ref}:{r}:{p}"))
+                if d > 40 and any(sr == r and str(p) in sp and min(_dist(tb, (m[0], m[1], m[0], m[1])) for m in mine) < 25
+                                  for tb, sr, sp in said):
+                    d = 0.0                               # drawn aside with its pin named beside it
+                far.append((d, r, p))
+            if far and min(f[0] for f in far) > 40:
+                d, r, p = min(far)
+                name = re.sub(r"~\{([^}]*)\}", r"\1", nl.pin_name(r, p) or "")      # KiCad's overbar markup, as read
+                out.append(Finding("sch.support", "warning", f"{s.ref} serves {r} pin {p}{' (' + name + ')' if name else ''} but is "
+                                   f"drawn {d:.0f} mm from it", {"sheet": sh.name_path, "file": sh.filename, "ref": s.ref},
+                                   hint=f"Draw {s.ref} at the pin: pull(..., cap=...) for an RC, decouple(...) for a capacitor, "
+                                        f"pull(...) or series(...) for a resistor.", key=f"support:{s.ref}:{r}:{p}"))
     if not n:
         raise NotApplicable("no support parts on single pins")
     examined(ctx, plural(n, "support part"))

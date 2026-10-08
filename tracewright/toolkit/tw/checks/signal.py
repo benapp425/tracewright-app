@@ -21,6 +21,8 @@ SLOW_TOKENS = {"EN", "RST", "RESET", "INT", "IRQ", "PWR", "DET", "PRESENT", "LED
                "FLT", "FAULT", "STAT", "ALERT", "BOOT", "SW", "PHY_RST"}
 ZDIFF = {"usb": 90.0, "hdmi": 100.0, "mipi": 100.0, "eth": 100.0, "lvds": 100.0, "pcie": 85.0, "sata": 100.0}
 SKEW = {"usb": 1.25, "hdmi": 0.15, "mipi": 0.15, "lvds": 0.15, "pcie": 0.15, "eth": 0.15, "sata": 0.15}
+IFACE_NAME = {"usb": "USB 2.0", "hdmi": "HDMI", "mipi": "MIPI", "lvds": "LVDS", "pcie": "PCIe", "eth": "Ethernet",
+              "sata": "SATA", "clk": "a clock pair", "hs": "a high-speed pair"}
 
 
 def tokens(name):
@@ -82,6 +84,26 @@ def pair_kind(name):
     if any(re.match(r"^(TX|RX|TD|RD|D|LANE)\d*[PN]?$", t) for t in toks):
         return "hs"
     return None
+
+
+def pair_tolerance(ctx, p, n, kind=None):
+    """{"mm", "why"}: how far apart in length the two halves of a pair may be, the budget hs.pairs holds
+    them to. The project's highspeed.skew_mm (a pattern on the positive half's short name, the last match
+    wins) first; then USB full speed's 10 mm; then the interface's budget (SKEW); else 0.5 mm. None for a
+    pair with no interface or clock name, which hs.pairs does not check."""
+    kind = kind or pair_kind(p)
+    if not kind:
+        return None
+    sp = p.rsplit("/", 1)[-1]
+    out = None
+    for pat, v in (ctx.setting("highspeed.skew_mm", {}) or {}).items():
+        if re.search(pat, sp, re.I):
+            out = {"mm": float(v), "why": "set for this project"}
+    if out:
+        return out
+    if kind == "usb" and usb_speed(ctx, (p, n)) == "fs":
+        return {"mm": 10.0, "why": "USB full speed"}
+    return {"mm": SKEW.get(kind, 0.5), "why": IFACE_NAME.get(kind, kind)}
 
 
 def ctx_grounds(ctx, board):
@@ -485,15 +507,12 @@ def hs_pairs(ctx):
             out.append(Finding("hs.pairs", "warning", f"only one half of pair {name} is routed", {"net": sp},
                                key=f"hs:half:{sp}"))
             continue
-        lim = None
-        for pat, v in (ctx.setting("highspeed.skew_mm", {}) or {}).items():
-            if re.search(pat, sp, re.I):
-                lim = float(v)
-        lim = lim if lim is not None else (10.0 if fs else SKEW.get(kind, 0.5))
+        tol = pair_tolerance(ctx, p, n, kind)
+        lim = tol["mm"]
         skew = abs(length[p] - length[n])
         if skew > lim:
             out.append(Finding("hs.pairs", "warning", f"pair {name}: {length[p]:.2f} vs {length[n]:.2f} mm, "
-                               f"skew {skew:.2f} mm > {lim:g} mm", {"net": sp},
+                               f"skew {skew:.2f} mm > {lim:g} mm ({tol['why']})", {"net": sp},
                                hint="Tune the shorter half near where the mismatch starts (a bend or the connector).",
                                key=f"hs:skew:{sp}"))
         if vias[p] != vias[n]:

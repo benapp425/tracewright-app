@@ -33,7 +33,14 @@ description: Draw or change the schematic - generate it with tw.sch for new desi
   one, it is what the user will see), `notes` (notes to rewrite: too long, or not beside a part) and `critic` (notes
   far from their parts, support parts drawn away from their pin, connector pins without names, sheets without titles). The engine sizes text with KiCad's own glyph widths (tw.font), so what it
   places clear is clear on the plot. Signals leaving a group get labels; signals on several sheets get global
-  labels, redrawn in the project's style.
+  labels, redrawn in the project's style. In the hierarchical style, four or more signals between the same sheets
+  travel as one bus ({GPIO_SD}: one pin and one line on the cover page, the signals named on each sheet), and the
+  cover page is laid out again around its sheets' pins; leave the sheet symbols' places and sizes to it.
+- Decoupling is drawn in a row beside the part by default, each row with the pin it serves under it ("near U1 pin
+  P12"), and the layout is asked to keep those parts at that pin (a BGA's small capacitors on the bottom).
+- Run it with `./tw schematic`, in the foreground: under a minute even for a big BGA. It prints each sheet as it is
+  laid out, then finish's steps, and ends with "Schematic done ..." (report in build/schematic-report.json) or
+  "Schematic failed ...". Do not run it in the background or watch it with monitors.
 
 For what the patterns cannot draw, the low-level builder (`tools/tw/examples/demo_board.py`):
 - A `catalog()` of `Part(symbol, footprint, value, MPN, manufacturer, LCSC, datasheet)`; stock symbols with
@@ -50,7 +57,7 @@ For what the patterns cannot draw, the low-level builder (`tools/tw/examples/dem
   layout constraint -- a line or two, written like an engineer's markup. The cover: the board's name, one line on
   what it is, `d.contents`, a short numbered `notes` list, revisions. Never: tool instructions, explanations of
   how labels work, part counts, text inside sheet symbols, review checklists or firmware requirements (docs/).
-- Run the script, then `tw.sch.finish(project)` (upgrade + the project's style + ERC + netlist), then
+- Run `./tw schematic` (the script ends with `tw.sch.finish(project)`: upgrade + the project's style + ERC + netlist), then
   `run_checks` with `sch.*` (incl. `sch.style`, `sch.text` for the notes, and `sch.pinout`: every symbol's pins
   against the real part's pinout), `bom.*` (incl.
   `bom.package`), `power.domains` (parts on different rails wired together), `power.regulators`,

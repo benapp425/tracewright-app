@@ -83,6 +83,13 @@ def _farads(v):
     return x * {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6}[m.group(2)]
 
 
+def _rail_tag(rq):
+    """How a net label is written: "global" for a supply drawn as a label by choice, "rail?" for one drawn as a label for
+    lack of room (local if its symbol is on the sheet anyway), None for a signal (global only when it crosses sheets)."""
+    r = rq.get("rail")
+    return "rail?" if r == "fallback" else "global" if r else None
+
+
 def _snap_up(v):
     """The grid point at or after v."""
     return snap(math.ceil(round(v / kisch.GRID, 6)) * kisch.GRID)
@@ -92,11 +99,20 @@ def _seg_box(a, b):
     return (min(a[0], b[0]) - 0.15, min(a[1], b[1]) - 0.15, max(a[0], b[0]) + 0.15, max(a[1], b[1]) + 0.15)
 
 
-def _label_box(name, pt, d, flag=True):
-    """The page area a label covers (a global label's flag outline included)."""
-    w = font.ink_width(name) + (3.4 if flag else 0.4)
+_CROSS = set()      # nets labelled on another sheet already (their labels are flagged, centred on the wire), set per group
+
+
+def _label_box(name, pt, d, flag=None):
+    """The page area a label covers, as KiCad draws the kind it will be: a global (or hierarchical) label's flag is
+    centred on its wire (its text 1.15 mm up, its outline 0.95 mm down as the plot reads it); a local label's text sits
+    above its wire, about 1.55 mm up. flag None: by the net (_CROSS). The flag's 2.5 mm used for every label made
+    neighbouring pins 2.54 mm apart collide (every other label jogged); a centred box for a local label missed its
+    text's top (a value just above it overlapped on the plot)."""
+    if flag is None:                                # a label whose kind is not known yet: room for either
+        flag = True if name in _CROSS else "either"
+    w = font.ink_width(name) + (0.4 if flag is False else 3.4)
     x, y = pt
-    h0, h1 = (1.55, 0.95) if flag else (1.5, 0.0)
+    h0, h1 = {True: (1.15, 0.95), False: (1.5, 0.0), "either": (1.55, 0.95)}[flag]
     if d == RIGHT:
         return (x, y - h0, x + w, y + h1)
     if d == LEFT:
@@ -113,9 +129,21 @@ def _text_box(s, at, size=1.27):
     return (at[0] + a, at[1] - size * 0.3, at[0] + z, at[1] + h)
 
 
+def _core(b):
+    """A label's box as the same kind as its neighbours: labels that touch are written as one kind (Page.emit), so
+    two of them never meet as a local label's text above a global label's flag."""
+    if abs((b[3] - b[1]) - 2.5) < 0.01:                 # either kind, sideways: the local text's top above the flag's
+        return (b[0], b[1] + 0.4, b[2], b[3])
+    if abs((b[2] - b[0]) - 2.5) < 0.01:                 # standing
+        return (b[0] + 0.4, b[1], b[2], b[3])
+    return b
+
+
 def _near(a, ka, b, kb, gap):
     """Do two drawn things come within `gap`? Texts side by side need a space between them: 0.3 mm read as one run of
     text ("FB201PWR_FLAG", two notes as one line); above each other 0.3 mm is the line spacing."""
+    if ka == kb == "label":
+        return _hit(_core(a), _core(b), gap)
     if ka == kb == "text":
         rows = min(a[3], b[3]) - max(a[1], b[1])             # on one line: they share at least half a line's height
         if rows >= 0.5 * min(a[3] - a[1], b[3] - b[1]):
@@ -203,9 +231,11 @@ class Group:
         probe.ref_at = probe.val_at = None
         probe.hide_value = probe.fields_left = probe.fields_above = probe.fields_below = False
         body, owner = probe.bbox(), "#" + rail + str(pt)
-        out = [("body", body, owner), ("text", probe.field_boxes()[0] if probe.field_boxes() else body, owner)]
-        if int(rot) % 180 == 90:          # turned sideways its bars fill the pin pitch: the next pin's text keeps off them
-            out.append(("halo", (body[0], body[1] - 0.4, body[2], body[3] + 0.4), owner))
+        text = probe.field_boxes()[0] if probe.field_boxes() else body
+        out = [("body", body, owner), ("text", text, owner)]
+        if int(rot) % 180 == 90:          # turned sideways its bars and name fill the pin pitch: the next pin's text keeps
+            out.append(("halo", (body[0], body[1] - 0.4, body[2], body[3] + 0.4), owner))           # off them (a label
+            out.append(("halo", (text[0], text[1] - 0.4, text[2], text[3] + 0.4), owner))           # 0.2 mm off looks joined)
         return out
 
     def _clear(self, items, anchor=None):
@@ -435,11 +465,22 @@ class Group:
             return (2, side, p[0])
         return (2 if hangs else 3, side, -p[1] if hangs else p[1])
 
+    def _cross(self):
+        """Which nets already have labels on another sheet of the design: theirs will be flagged."""
+        _CROSS.clear()
+        here = self.page.sheet.filename
+        for pg in getattr(self.page.d, "pages", []):
+            if pg.sheet.filename != here:
+                for g in pg.groups:
+                    _CROSS.update(op[1] for op in g.ops if op[0] == "label" and (len(op) < 5 or op[4] != "rail?"))
+        _CROSS.update(self.page.d.__dict__.get("_global_rails", ()))
+
     def flush(self):
         """Draw what was asked for, in order. Every pin still waiting keeps its way out (a short stub's
         worth, reserved) so an earlier pattern cannot wall it in. When a pattern still found no room and was
         drawn aside, the group is drawn again with that pin's whole way out kept clear from the start (its
         label's, its part's or its supply symbol's worth), and the drawing with the fewest patterns aside is kept."""
+        self._cross()
         todo, self.pending = self.pending, []
         series = {(id(rq["inst"]), rq["pin"]): rq for rq in todo if rq["kind"] == "series"}
         merged = []
@@ -496,7 +537,8 @@ class Group:
                 L = lead + 7.62 + P + label(rq.get("net"))
             else:
                 L = {"net": P + label(rq.get("name")), "indicator": 3 * P + 2 * 7.62,
-                     "pull": 3 * P + label(rq.get("net"))}.get(kind, 2 * P)
+                     "pull": 3 * P + label(rq.get("net")),
+                     "crystal": P + label(f"{rq['inst'].ref}_{pin}")}.get(kind, 2 * P)    # its label when drawn aside
             return [("wire", _seg_box(_add(p, d, P), _add(p, d, max(2 * P, L))), tag)]
         half = max(1.3, font.ink_width(str(rq.get("rail") or "")) / 2 + 0.3)
         f = _add(p, d, 3 * P if kind == "decouple" else 2 * P)
@@ -504,7 +546,7 @@ class Group:
 
     def _state(self):
         return (list(self.ops), list(self.boxes), dict(self.parts), {k: set(v) for k, v in self.page.nets.items()},
-                list(self.page.crowded), copy.deepcopy(self.__dict__.get("marks", {})))
+                list(self.page.crowded), copy.deepcopy(self.__dict__.get("marks", {})), list(self.later), list(self.page.near))
 
     def _restore(self, st):
         self.ops, self.boxes, self.parts = list(st[0]), list(st[1]), dict(st[2])
@@ -512,6 +554,8 @@ class Group:
         self.page.nets.update({k: set(v) for k, v in st[3].items()})
         self.page.crowded[:] = st[4]
         self.__dict__["marks"] = copy.deepcopy(st[5])
+        self.later[:] = st[6]                             # what an attempt queued for later goes with it
+        self.page.near[:] = st[7]
 
     def _commit(self, ops, items):
         for op in ops:
@@ -521,7 +565,9 @@ class Group:
         self._take(items)
 
     def _draw_nc(self, rq):
-        self.ops.append(("nc", rq["inst"].pin(rq["pin"])))
+        x, y = rq["inst"].pin(rq["pin"])
+        self.ops.append(("nc", (x, y)))
+        self.boxes.append(("body", (x - 0.8, y - 0.8, x + 0.8, y + 0.8), rq["inst"].ref))   # its X: notes and labels keep off
 
     def _draw_power(self, rq):
         inst, pin, rail, flag = rq["inst"], rq["pin"], rq["rail"], rq["flag"]
@@ -561,8 +607,9 @@ class Group:
                         ops.append(("flag", fpt))
                     self._commit(ops, items)
                     return
-        # a global label: a local one joins the supply only on a sheet that has its symbol too (VIN_5V was cut off)
-        self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin], "rail": True}, record=False)
+        # global where it must be: a local label joins the supply only on a sheet that has its symbol too (VIN_5V was
+        # cut off); local where the sheet has it (GND on a connector: a global label's flag ran into the next pin's label)
+        self._draw_net({"inst": inst, "pin": pin, "name": rail, "pins": [pin], "rail": "fallback"}, record=False)
         self.page.crowded.append(f"{inst.ref} pin {pin}: {rail} as a label (no room for its symbol) {getattr(self, 'why', '')}")
 
     def _draw_power_bar(self, rq):
@@ -659,6 +706,9 @@ class Group:
 
     def _draw_net(self, rq, record=True):
         inst, name, pins = rq["inst"], rq["name"], rq["pins"]
+        if rq.get("rail") is True:                         # a supply drawn as a label by choice: a global label
+            _CROSS.add(name)
+            self.page.d.__dict__.setdefault("_global_rails", set()).add(name)
         if record:
             for pin in pins:
                 self._connect(name, inst.ref, pin)
@@ -669,7 +719,7 @@ class Group:
         for L in (P, 2 * P, 3 * P, 4 * P, 6 * P, 8 * P):
             if len(pins) == 1:
                 end = _add(pts[0], d, L)
-                ops = [("wire", [pts[0], end]), ("label", name, end, d) + (("global",) if rq.get("rail") else ())]
+                ops = [("wire", [pts[0], end]), ("label", name, end, d) + (_rail_tag(rq),)]
                 items = self._wire_items([pts[0], end], inst.ref) + [("label", _label_box(name, end, d), None)]
             else:                                                  # stubs to a common line, joined, one label beyond
                 reach = max(q[0] * d[0] + q[1] * d[1] for q in pts) + L
@@ -694,17 +744,25 @@ class Group:
                     self._mark(name, lab[2], lab[3], inst.ref, [it for it in items if it[0] == "label"] +
                                [it for it in items if it[0] == "wire"][-1:])
                 return
+        if len(pins) == 1:                                  # longer stubs first: past what crowds the pin
+            for L in (10 * P, 12 * P, 16 * P, 20 * P):
+                end = _add(pts[0], d, L)
+                ops = [("wire", [pts[0], end]), ("label", name, end, d) + (_rail_tag(rq),)]
+                items = self._wire_items([pts[0], end], inst.ref) + [("label", _label_box(name, end, d), None)]
+                if self._clear(items, anchor=inst.ref):
+                    self._commit(ops, items)
+                    return
         if len(pins) == 1 and d[1] == 0:                   # out, down (or up) to a clear row, then the label
             p = pts[0]
             for vdir in (DOWN, UP):
-                for a in (P, 2 * P, 3 * P, 4 * P, 5 * P):
-                    for b in range(1, 10):
+                for a in (P, 2 * P, 3 * P, 4 * P, 5 * P, 7 * P, 9 * P):
+                    for b in range(1, 20):
                         c2 = _add(_add(p, d, a), vdir, b * P)
-                        for L in (P, 2 * P, 3 * P):
+                        for L in (P, 2 * P, 3 * P, 5 * P):
                             path = [p, _add(p, d, a), c2, _add(c2, d, L)]
                             items = self._wire_items(path, inst.ref) + [("label", _label_box(name, path[-1], d), None)]
                             if self._clear(items, anchor=inst.ref):
-                                self._commit([("wire", path), ("label", name, path[-1], d) + (("global",) if rq.get("rail") else ())], items)
+                                self._commit([("wire", path), ("label", name, path[-1], d) + (_rail_tag(rq),)], items)
                                 return
         # nowhere clear: each pin carries the label itself (no wire, so it cannot touch another net)
         for q in pts:
@@ -720,7 +778,7 @@ class Group:
         p, d = inst.pin(pin), inst.pin_dir(pin)
         if self.page.conv.get("decoupling") == "row":             # the project draws them together, beside the part
             self._draw_power({"inst": inst, "pin": pin, "rail": rail, "flag": False})
-            self._aside_caps(caps, refs, rail, f"near {inst.ref} pin {pin}")
+            self.later.append(("caps", caps, refs, rail, f"near {inst.ref} pin {pin}"))   # after the group's own parts
             self._keep_near(inst, [pin], refs, 3.0, caps)
             return
         for pitch in (7.62, 10.16, 12.7, 15.24):
@@ -1058,8 +1116,10 @@ class Group:
         # at the crystal and runs away from the capacitors
         edge, away = snap(x + d[0] * 2.54), ("left" if d[0] < 0 else "right")
         above, below = snap(ytop - 3.81), snap(ybot + 3.81)
+        lower, higher = snap(below + 2 * P), snap(above - 2 * P)            # past the capacitors' own text
         for y.ref_at, y.val_at in (((x, above, None), (x, below, None)), ((x, above, None), (edge, below, away)),
-                                   ((edge, above, away), (edge, below, away))):
+                                   ((edge, above, away), (edge, below, away)), ((x, above, None), (x, lower, None)),
+                                   ((x, higher, None), (x, lower, None)), ((edge, higher, away), (edge, lower, away))):
             items = lines + self._part_items(y) + caps
             if self._self_clear(items):
                 break
@@ -1230,11 +1290,15 @@ class Group:
     # ------------------------------------------------------------------ chains and notes
     def finish(self):
         self.flush()
+        self._cross()
         for item in self.later:
             if item[0] == "led":
                 self._draw_led(*item[1:])
             elif item[0] == "divider":
                 self._draw_divider(*item[1:])
+        for item in self.later:                           # decoupling rows set aside: once the group's parts have their places
+            if item[0] == "caps":
+                self._aside_caps(*item[1:])
         for item in self.later:
             if item[0] == "note":
                 self._draw_note(*item[1:])
@@ -1265,6 +1329,10 @@ class Group:
     def _draw_divider(self, top_rail, mid, rkt, rkb, bottom, refs, cap, cap_ref):
         """top rail / R / tap -> label / R / bottom, top to bottom; the filter cap from the tap, beside."""
         r1ref, r2ref = refs
+        own = {r1ref, r2ref, cap_ref}
+        served = sorted((r, p) for r, p in self.page.nets.get(mid, set()) if r not in own and not re.match(r"(R|C|L|FB)\d", r))
+        chip = self.parts.get(served[0][0]) if len(served) == 1 else None
+        where = f"near {served[0][0]} pin {served[0][1]}" if chip else None     # which pin the tap feeds, said beside it
         bb = self.bbox()
         x0 = snap(bb[2] + 10.16) if self.boxes else 0
         for k in range(60):
@@ -1288,8 +1356,12 @@ class Group:
                 end = _add(tap, RIGHT, 4 * P)
                 ops += [("wire", [tap, end]), ("label", mid, end, RIGHT)]
                 items += self._wire_items([tap, end]) + [("label", _label_box(mid, end, RIGHT), None)]
+            if where:
+                ops, items = self._beside(lambda _x, _y, o=ops, i=items: (o, i), where)(0, 0)
             if self._clear(items):
                 self._commit(ops, items)
+                if chip:
+                    self._keep_near(chip, [served[0][1]], [r for r in (r1ref, r2ref, cap_ref) if r], 5.0)
                 self._connect(top_rail, r1ref, "1")
                 for ref, pin in ((r1ref, "2"), (r2ref, "1")) + (((cap_ref, "1"),) if cap else ()):
                     self._connect(mid, ref, pin)
@@ -1420,6 +1492,8 @@ class Page:
         title): every block goes to the highest, then leftmost, spot where it fits (beside the blocks
         above, or in the room under a short one), clear of the title block in the corner; the sheet
         grows to A3, then A2, only when they do not fit."""
+        import time as _time
+        t0 = _time.time()
         for g in self.groups:
             g.finish()
         pads = (6.35, 10.16, 6.35, 6.35)             # left, top (the title), right, bottom
@@ -1453,6 +1527,8 @@ class Page:
             oy = y + pads[1] - gy0
             ox, oy = round(ox / P) * P, round(oy / P) * P
             self.placed.append((g, (ox, oy), (snap(x), snap(y), snap(x + w), snap(y + h))))
+        from . import progress
+        progress(f"laid out {self.sheet.filename}: {_time.time() - t0:.1f} s, {len(self.crowded)} crowded spots, {self.sheet.paper}")
         return self
 
     @staticmethod
@@ -1485,15 +1561,49 @@ class Page:
             placed.append((best[0], best[1], best[0] + w, best[1] + h))
         return out
 
+    def _label_kinds(self, global_nets, supplies_here):
+        """Global or local for every label on the sheet, one kind for labels that touch: a local label's text sits
+        above its wire and a global label's flag is centred on its wire, so the two on neighbouring pins overlap. The
+        layout kept room for either kind where a net's sheets were not known yet; here, if any label in a touching
+        group must be global, the group is (a global label named once is harmless: KiCad's ERC does not flag it)."""
+        labs = []
+        for gi, (g, (ox, oy), _) in enumerate(self.placed):
+            for oi, op in enumerate(g.ops):
+                if op[0] == "label":
+                    b = _label_box(op[1], (op[2][0] + ox, op[2][1] + oy), op[3], flag="either")
+                    labs.append(((gi, oi), _label_kind(op, global_nets, supplies_here), b))
+        parent = list(range(len(labs)))
+
+        def root(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        order = sorted(range(len(labs)), key=lambda i: labs[i][2][0])
+        for a_, i in enumerate(order):                     # sweep in x: only boxes that reach each other
+            bi = labs[i][2]
+            for j in order[a_ + 1:]:
+                bj = labs[j][2]
+                if bj[0] > bi[2] + 0.05:
+                    break
+                if _hit(bi, bj, 0.05):
+                    parent[root(i)] = root(j)
+        glob = {}
+        for i, (_, g_, _) in enumerate(labs):
+            glob[root(i)] = glob.get(root(i), False) or g_
+        return {k: glob[root(i)] for i, (k, _, _) in enumerate(labs)}
+
     def emit(self, global_nets):
+        supplies_here = {op[1] for g in self.groups for op in g.ops if op[0] == "power"}       # rails with a symbol on this sheet
         """Draw the laid-out groups onto the sheet (called by Design.write, once the whole design is known)."""
         if self.placed is None:
             self.layout()
         sh = self.sheet
-        for g, (ox, oy), (x0, y0, x1, y1) in self.placed:
+        final = self._label_kinds(global_nets, supplies_here)
+        for gi, (g, (ox, oy), (x0, y0, x1, y1)) in enumerate(self.placed):
             sh.block(x0, y0, x1, y1, g.title)
             mv = lambda p, ox=ox, oy=oy: (snap(p[0] + ox), snap(p[1] + oy))
-            for op in g.ops:
+            for oi, op in enumerate(g.ops):
                 kind = op[0]
                 if kind == "part":
                     inst = op[1]
@@ -1517,7 +1627,7 @@ class Page:
                     sh.junction(mv(op[1]))
                 elif kind == "label":
                     name, pt, d = op[1], op[2], op[3]
-                    if name in global_nets or op[4:5] == ("global",):
+                    if final[(gi, oi)]:
                         q = mv(pt)
                         sh.items.append(["global_label", kisch.Q(name), ["shape", "bidirectional"], ["at", q[0], q[1], _rot_of(d)],
                                          ["fields_autoplaced", "yes"],
@@ -1532,13 +1642,20 @@ class Page:
                     sh.text(op[1], mv(op[2]), size=1.27)
 
 
+def _label_kind(op, global_nets, supplies_here):
+    tag = op[4] if len(op) > 4 else None
+    if tag == "rail?":
+        return op[1] not in supplies_here
+    return op[1] in global_nets or tag == "global"
+
+
 def resolve(design):
     """Nets named on more than one sheet: they get global labels."""
     where = {}
     for pg in getattr(design, "pages", []):
         for g in pg.groups:
             for op in g.ops:
-                if op[0] == "label":
+                if op[0] == "label" and (len(op) < 5 or op[4] != "rail?"):   # a supply's label: local if its symbol is there
                     where.setdefault(op[1], set()).add(pg.sheet.filename)
     return {n for n, s in where.items() if len(s) > 1}
 

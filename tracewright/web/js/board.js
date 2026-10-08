@@ -6,6 +6,7 @@ import { icon } from "./icons.js";
 import { FlagLayer, FlagTool, flagEditor } from "./review.js";
 import { FloorplanView } from "./floorplan.js";
 import { BoardEditor } from "./boardedit.js";
+import { trackLength } from "./boardgeom.js";
 
 const COL = {
   "F.Cu": [226, 64, 64], "B.Cu": [64, 110, 232], "In1.Cu": [214, 170, 48], "In2.Cu": [70, 180, 100], "In3.Cu": [180, 100, 210],
@@ -309,7 +310,7 @@ export class BoardView {
     const d = this.data, s = { pads: 0, vias: 0, tracks: {}, pour: {}, parts: new Set() };
     for (const f of this.fps) for (const p of f.pads) if (p.net === net) { s.pads++; s.parts.add(f.ref); }
     for (const v of d.vias) if (v[4] === net) s.vias++;
-    for (const t of d.tracks) if (t[6] === net) s.tracks[t[5]] = (s.tracks[t[5]] || 0) + (t.length > 7 ? Math.hypot(t[7] - t[0], t[8] - t[1]) + Math.hypot(t[2] - t[7], t[3] - t[8]) : Math.hypot(t[2] - t[0], t[3] - t[1]));
+    for (const t of d.tracks) if (t[6] === net) s.tracks[t[5]] = (s.tracks[t[5]] || 0) + trackLength(t);
     for (const p of this.pours) if (p.net === net) s.pour[p.layer] = (s.pour[p.layer] || 0) + p.area;
     return s;
   }
@@ -700,7 +701,8 @@ export class BoardView {
       if (f.fields && (f.fields.MPN || f.fields.LCSC)) html += `<br><span class="k">${esc(f.fields.MPN || "")} ${esc(f.fields.LCSC || "")}</span>`;
     } else {
       const t = this.pickTrack(x, y);
-      if (t) html = t.kind === "track" ? `<b>${esc(t.net.split("/").pop() || "no net")}</b><br><span class="k">track ${t.w} mm · ${t.layer}</span>`
+      const pi = t && t.kind === "track" ? this.pairInfo(t.net) : null;
+      if (t) html = t.kind === "track" ? `<b>${esc(t.net.split("/").pop() || "no net")}</b><br><span class="k">track ${t.w} mm · ${t.layer}</span>${pi ? `<br><span class="k">${esc(this.pairText(pi))}</span>` : ""}`
         : `<b>${esc(t.net.split("/").pop() || "no net")}</b><br><span class="k">via ${t.d}/${t.drill} mm</span>`;
       else if (this.panel === "copper") {
         const p = this.pickPour(x, y);
@@ -751,7 +753,9 @@ export class BoardView {
     this.selBar.style.display = "flex";
     const label = items.map((i) => i.ref || "net " + i.net.split("/").pop()).join(", ");
     const refs = [...this.sel];
+    const pi = this.selNet && !refs.length ? this.pairInfo(this.selNet) : null;
     this.selBar.append(icon(this.selNet && !refs.length ? "cable" : "microchip", 14), h("span.sl", label.length > 60 ? label.slice(0, 60) + "..." : label),
+      pi ? h("span.pairtol" + (pi.over ? ".over" : pi.routed && pi.tol != null ? ".ok" : ""), { "data-tip": pi.mate && pi.routed ? `${pi.la.toFixed(2)} mm vs ${pi.mate.split("/").pop()} ${pi.lb.toFixed(2)} mm` : "" }, this.pairText(pi)) : null,
       h("button.tbtn", { "data-tip": "Flag the selection", onclick: () => {
         const box = this.selectionBox();
         if (box) this.flags.create({ x: box[0], y: box[1], region: box, refs, nets: this.selNet ? [this.selNet] : [] });
@@ -1245,13 +1249,15 @@ export class BoardView {
       { onclick: () => { this.solo = l; this.renderLayers(); this.dirty(); }, "data-tip": l ? `Only ${l}` : "Every copper layer" },
       l ? h("i", { style: { background: rgba(COL[l] || [160, 160, 160]) } }) : null, l ? l.replace(".Cu", "") : "All"))));
     if (this.spot) {
-      const s = this.stats(this.spot);
+      const s = this.stats(this.spot), pi = this.pairInfo(this.spot);
       const rows = this.copper.filter((l) => s.tracks[l] || s.pour[l]).map((l) => h("div.srow3", h("span.k", l),
         h("span", [s.tracks[l] ? `${s.tracks[l].toFixed(1)} mm` : null, s.pour[l] ? `pour ${Math.round(s.pour[l])} mm²` : null].filter(Boolean).join(" · "))));
       box.appendChild(h("div.spotcard",
         h("div.row", h("i.sw", { style: { background: col(this.spot) } }), h("b.grow.ellipsis", short(this.spot)),
           h("button.tbtn", { style: { height: "22px", minWidth: "22px", padding: 0 }, "data-tip": "Clear the spotlight", onclick: () => this.setSpot(null) }, icon("x", 12))),
         this.netKindOf(this.spot) ? h("div.tiny.nkind", netKindText(this.netKindOf(this.spot), short)) : null,
+        pi ? h("div.pairtol", pi.mate && pi.routed ? h("div.tiny", `${short(this.spot)} ${pi.la.toFixed(2)} mm · ${short(pi.mate)} ${pi.lb.toFixed(2)} mm`) : null,
+          h("div.tiny" + (pi.over ? ".over" : pi.routed && pi.tol != null ? ".ok" : ""), this.pairText(pi))) : null,
         h("div.tiny", { style: { color: "var(--hud-muted)", margin: "3px 0 6px" } }, `${s.pads} pads on ${s.parts.size} parts · ${s.vias} vias`),
         rows.length ? rows : h("div.tiny", { style: { color: "var(--hud-muted)" } }, "No tracks or pours yet"),
         h("div.row", { style: { marginTop: "8px", gap: "4px" } },
@@ -1313,6 +1319,32 @@ export class BoardView {
     const s = (net || "").split("/").pop();
     for (const [n, v] of Object.entries(k)) if (n.split("/").pop() === s) return v;
     return null;
+  }
+
+  netLength(net) {
+    let L = 0;
+    for (const t of this.data.tracks) if (t[6] === net) L += trackLength(t);
+    return L;
+  }
+
+  // A differential pair's two halves measured against the skew budget hs.pairs holds them to, or null for other nets.
+  // {mate, la, lb, skew, tol, why, routed, over}; tol null: a pair the checks do not length-match
+  pairInfo(net) {
+    const k = net ? this.netKindOf(net) : null;
+    if (!k || k.kind !== "pair" || !k.pair || !this.data) return null;
+    const s = String(k.pair).split("/").pop();
+    const mate = (this.data.nets || []).find((n) => n === k.pair || n.split("/").pop() === s) || null;
+    const la = this.netLength(net), lb = mate ? this.netLength(mate) : 0, skew = Math.abs(la - lb);
+    const tol = k.skew_mm != null ? k.skew_mm : null;
+    return { mate, la, lb, skew, tol, why: k.skew_why || "", routed: la > 0 && lb > 0, over: tol != null && la > 0 && lb > 0 && skew > tol + 1e-9 };
+  }
+
+  // the pair's skew and budget in a line: "Skew 0.08 mm, allowed 0.15 mm (MIPI)"
+  pairText(pi) {
+    if (!pi) return "";
+    if (pi.tol == null) return pi.routed ? `Skew ${pi.skew.toFixed(2)} mm, no length budget (not a high-speed pair)` : "No length budget (not a high-speed pair)";
+    const allowed = `${+pi.tol.toFixed(3)} mm${pi.why ? ` (${pi.why})` : ""}`;
+    return pi.routed ? `Skew ${pi.skew.toFixed(2)} mm, allowed ${allowed}` : `Halves may differ by ${allowed}`;
   }
 
   netBox(net) {

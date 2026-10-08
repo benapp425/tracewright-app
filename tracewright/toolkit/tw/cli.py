@@ -103,6 +103,28 @@ def cmd_netlist(a):
     print(kicad.netlist(p.sch, os.path.join(p.build, f"{p.stem}.net")))
 
 
+def cmd_schematic(a):
+    """Run design/schematic.py in the foreground: each sheet as it is laid out, then finish's steps, and one last line
+    that says it is done (or failed). Under a minute even for a big BGA; no need to run it in the background."""
+    import subprocess, time
+    p = env.project()
+    script = os.path.join(p.root, "design", "schematic.py")
+    if not os.path.exists(script):
+        print("no design/schematic.py: write the schematic script first (skill: schematic-capture)")
+        return 1
+    t0 = time.time()
+    r = subprocess.run([sys.executable, "-u", script], cwd=p.root, env=dict(os.environ, PYTHONUNBUFFERED="1"))
+    took = time.time() - t0
+    rep = os.path.join(p.build, "schematic-report.json")
+    if r.returncode == 0:
+        print(f"Schematic done in {took:.0f} s (the script ended; report: build/schematic-report.json)"
+              if os.path.exists(rep) and os.path.getmtime(rep) >= t0 else
+              f"Schematic done in {took:.0f} s (the script ended; it did not call finish(), so nothing was checked)")
+        return 0
+    print(f"Schematic failed in {took:.0f} s: design/schematic.py exited with {r.returncode} (the error is above)")
+    return r.returncode or 1
+
+
 def cmd_svg(a):
     p = env.project()
     files = kicad.sch_svg(p.sch, os.path.join(p.build, "sch_svg"), drawing_sheet=False, theme="_builtin_default")
@@ -487,6 +509,7 @@ def main(argv=None):
     s = sub.add_parser("selftest")
     s.add_argument("ids", nargs="*")
     s.add_argument("-v", "--verbose", action="store_true")
+    sub.add_parser("schematic")
     sub.add_parser("erc")
     sub.add_parser("drc")
     sub.add_parser("netlist")

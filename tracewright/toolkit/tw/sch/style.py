@@ -357,6 +357,39 @@ def _wire(a, b):
             f'(uuid {_q(_uid())}))')
 
 
+def _bus(a, b):
+    return (f'(bus (pts (xy {_mm(a[0])} {_mm(a[1])}) (xy {_mm(b[0])} {_mm(b[1])})) (stroke (width 0) (type default)) '
+            f'(uuid {_q(_uid())}))')
+
+
+def _link(name, a, b):
+    """A stub or link between two points: a bus for a bundle ({ALIAS}), else a wire."""
+    return _bus(a, b) if name.startswith("{") else _wire(a, b)
+
+
+def _natural(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
+def _alias_name(members, sheets, taken):
+    """A bundle's name: the words its members start with (GPIO_SD_B1_00 .. GPIO_SD_B2_04 -> GPIO_SD), else the
+    sheets it joins (MCU_SYSTEM_GPIO_RIGHT); never a name a net or another bundle already has."""
+    parts = [m.split("_") for m in members]
+    common = []
+    for words in zip(*parts):
+        if len(set(words)) != 1:
+            break
+        common.append(words[0])
+    base = "_".join(common)
+    if not (len(common) >= 2 or (len(common) == 1 and len(base) >= 4 and base not in ("GPIO", "PIN", "NET", "SIG"))):
+        base = "_".join(_tag(s) for s in sheets[:2])
+    base = re.sub(r"[^A-Za-z0-9_]", "_", base).strip("_") or "BUS"
+    name, k = base, 2
+    while name in taken or name in members:
+        name, k = f"{base}_{k}", k + 1
+    return name
+
+
 def _sheet_pin(name, shape, pt, side):
     rot, just = (180, "left") if side == "left" else (0, "right")
     return (f'(pin {_q(name)} {shape} (at {_mm(pt[0])} {_mm(pt[1])} {rot}) (uuid {_q(_uid())}) '
@@ -820,8 +853,100 @@ def _obstacles(doc, sh):
     return out
 
 
-def _plan_hierarchical(d):
-    rep = {"relabelled": 0, "pins_added": 0, "kept_supplies": [], "local": [], "grown": [], "renamed": {}, "crowded": []}
+def _settle_flags(d, planned, rep):
+    """Write the planned labels, with no flag beside a plain label: a hierarchical or global label's flag is centred on
+    its wire and runs into the text a plain label carries above its own on the next row (2.54 mm). Such a signal takes
+    a plain label and its hierarchical label is set apart on a stub; such a supply takes a plain label where its power
+    symbol is on the sheet (KiCad joins the two by name). Repeated until nothing changes: a flag made plain can crowd
+    the next one."""
+    power_on = collections.defaultdict(set)
+    for sh in d.h.sheets:
+        power_on[sh.file] |= {s.value for s in sh.symbols if s.is_power and s.value}
+    final = {k: e["kind"] for k, e in planned.items()}
+    kind_of = lambda f, lb: final.get((f, id(lb["node"])), lb["kind"])
+    apart, plain_supply = {}, {}
+    changed = True
+    while changed:
+        changed = False
+        for f, doc in d.docs.items():
+            plain = [lb for lb in doc.labels if kind_of(f, lb) == "label"]
+            if not plain:
+                continue
+            for lb in doc.labels:
+                k = kind_of(f, lb)
+                if k not in ("hierarchical_label", "global_label"):
+                    continue
+                x, y = lb["pt"]
+                if not any(o is not lb and abs(abs(o["pt"][1] - y) - PITCH) <= 2 and abs(o["pt"][0] - x) < round(12.7 * MM)
+                           for o in plain):
+                    continue
+                key = (f, id(lb["node"]))
+                e = planned.get(key)
+                if e and k == "hierarchical_label":
+                    final[key] = "label"
+                    apart[(f, e["g"])] = e
+                    changed = True
+                elif not e and k == "global_label" and lb["text"] in d.power and lb["text"] in power_on[f]:
+                    final[key] = "label"
+                    plain_supply[key] = (doc, lb)
+                    changed = True
+    for key, e in planned.items():
+        lb = e["lb"]
+        e["doc"].edits.append((lb["node"], _label(final[key], e["name"], lb["pt"], lb["rot"], _shape(lb["shape"]), lb["size"])))
+        rep["relabelled"] += 1
+    for (doc, lb) in plain_supply.values():
+        doc.edits.append((lb["node"], _label("label", lb["text"], lb["pt"], lb["rot"], _shape(lb["shape"]), lb["size"])))
+        rep.setdefault("supplies_plain", []).append(lb["text"])
+    for (f, g), e in sorted(apart.items(), key=lambda kv: kv[0]):
+        _bus_label_on_child(d, e["p"], e["name"], [g], rep, shape=_shape(e["lb"]["shape"]))
+
+
+def _bus_label_on_child(d, path, text, members, rep, shape="bidirectional"):
+    """One hierarchical label on a sheet, on a short stub (a bus for a bundle's {ALIAS}, a wire for one signal), in the
+    first clear spot beside the labels of its members (right of them, then below), else anywhere clear on the page."""
+    sh = d.inst[path]
+    doc = d.docs[sh.file]
+    placed = doc.__dict__.setdefault("bus_labels", [])             # this run's bus labels: two on one bus would join
+    obstacles = [o[2] for o in _obstacles(doc, sh)] + [(min(a[0], b[0]) - MM // 2, min(a[1], b[1]) - MM // 2,
+                                                          max(a[0], b[0]) + MM // 2, max(a[1], b[1]) + MM // 2) for _, a, b in doc.wires] + placed
+    for r in findall(doc.tree, "rectangle"):                       # block frames: a label must not cross one
+        st, en = find(r, "start"), find(r, "end")
+        if st and en:
+            ax, ay, bx, by = (round(float(v) * UNIT) for v in (st[1], st[2], en[1], en[2]))
+            ax, bx, ay, by = min(ax, bx), max(ax, bx), min(ay, by), max(ay, by)
+            m = MM // 2
+            obstacles += [(ax - m, ay - m, bx + m, ay + m), (ax - m, by - m, bx + m, by + m),
+                          (ax - m, ay - m, ax + m, by + m), (bx - m, ay - m, bx + m, by + m)]
+    mine = [lb["pt"] for lb in doc.labels if lb["text"] in members]
+    if mine:
+        x0, y0 = min(p[0] for p in mine), min(p[1] for p in mine)
+        x1, y1 = max(p[0] for p in mine), max(p[1] for p in mine)
+    else:
+        x0 = y0 = x1 = y1 = round(25.4 * MM)
+    stub = round(5.08 * MM)
+    starts = [(x1 + round((15.24 + 2.54 * k) * MM), y0 + j * PITCH) for k in range(0, 30, 2) for j in range(0, 40)]
+    starts += [(x0 + k * PITCH, y1 + round(7.62 * MM) + j * PITCH) for j in range(0, 30) for k in range(0, 40, 2)]
+    starts += [(round(20.32 * MM) + k * PITCH * 2, round(20.32 * MM) + j * PITCH) for j in range(0, 120) for k in range(0, 60)]
+    for a in starts:
+        a = (a[0] // PITCH * PITCH, a[1] // PITCH * PITCH)
+        end = (a[0] + stub, a[1])
+        box = _label_box("hierarchical_label", text, end, 0)
+        seg = (a[0], a[1] - MM // 2, end[0], a[1] + MM // 2)
+        tail = _label_box("label", text, a, 180) if not text.startswith("{") else seg
+        if any(_overlaps(box, o) or _overlaps(seg, o) or _overlaps(tail, o) for o in obstacles):
+            continue
+        doc.adds.append(_link(text, a, end))
+        doc.adds.append(_label("hierarchical_label", text, end, 0, shape))
+        if not text.startswith("{"):                                 # the stub's other end joins the net by name
+            doc.adds.append(_label("label", text, a, 180))
+        placed += [box, tail, (a[0] - PITCH, a[1] - PITCH, end[0] + PITCH, a[1] + PITCH)]
+        return
+    rep["crowded"].append(f"{text} on {sh.name}: no clear spot for its bus label")
+
+
+def _plan_hierarchical(d, bundle_min=4):
+    rep = {"relabelled": 0, "pins_added": 0, "kept_supplies": [], "local": [], "grown": [], "renamed": {}, "crowded": [],
+           "bundles": {}}
     D = d.D
     where = collections.defaultdict(set)                            # global name -> instances with a global label of it
     for sh in d.h.sheets:
@@ -877,8 +1002,39 @@ def _plan_hierarchical(d):
                 return cand
         raise Refused(f"no free name for {g} on sheet {d.inst[path].name}")
 
+    # Bundles: four or more signals that join the same sheets under the root travel as one bus, named by an alias
+    # ({GPIO_SD}). On each sheet the members keep plain local labels at their pins, which join the bus by name
+    # (measured with kicad-cli: an unnamed group or an alias in braces joins its members to labels of their names on
+    # the sheet, no bus entries needed); the root shows one pin and one bus per sheet instead of a wall of labels.
+    bundled, aliases = {}, {}
+    root_path = next((sh.path for sh in d.h.sheets if d.inst[sh.path].parent is None), None)
+    if bundle_min and root_path:
+        taken = {lb["text"] for doc in d.docs.values() for lb in doc.labels} | set(d.power)
+        groups = collections.defaultdict(list)
+        for g, paths, lca, passing in todo:
+            if lca != root_path or root_path in paths or set(passing) != set(paths) or len(paths) < 2:
+                continue
+            if any(d.count.get(d.inst[p].file, 1) > 1 or d.inst[p].parent is None or d.inst[p].parent.path != root_path
+                   for p in paths):
+                continue
+            net = D.find(("G", g))
+            if any(local_name(p, g, net) != g for p in paths):
+                continue
+            groups[frozenset(paths)].append(g)
+        for key, gs in sorted(groups.items(), key=lambda kv: sorted(kv[1])):
+            if len(gs) < bundle_min:
+                continue
+            pages = lambda q: (int(d.inst[q].page) if str(getattr(d.inst[q], "page", "")).isdigit() else 999, d.inst[q].name)
+            name = _alias_name(sorted(gs, key=_natural), [d.inst[p].name for p in sorted(key, key=pages)], taken)
+            taken.add(name)
+            aliases[name] = (sorted(gs, key=_natural), key)
+            for g in gs:
+                bundled[g] = name
+            rep["bundles"][name] = len(gs)
+
     stubs = collections.defaultdict(list)          # parent path -> [(child path, name on the child, name on the parent, shape, kind)]
     done_files = set()
+    planned = {}                                   # (file, label node) -> what the global label becomes
     for g, paths, lca, passing in todo:
         net = D.find(("G", g))
         shape = "passive"
@@ -899,15 +1055,27 @@ def _plan_hierarchical(d):
                 continue
             done_files.add((sh.file, g))
             doc = d.docs[sh.file]
-            kind = "hierarchical_label" if p in passing else "label"
+            kind = "hierarchical_label" if p in passing and g not in bundled else "label"
             for i, lb in enumerate(doc.labels):
                 if lb["kind"] == "global_label" and lb["text"] == g:
-                    doc.edits.append((lb["node"], _label(kind, name_on[p], lb["pt"], lb["rot"], _shape(lb["shape"]), lb["size"])))
-                    rep["relabelled"] += 1
+                    planned[(sh.file, id(lb["node"]))] = {"doc": doc, "lb": lb, "kind": kind, "name": name_on[p], "p": p, "g": g}
+        if g in bundled:
+            continue
         for p in sorted(passing):
             parent = d.inst[p].parent.path
             own = parent in paths or parent == lca
             stubs[parent].append((p, name_on[p], name_on[parent], shape, own))
+    _settle_flags(d, planned, rep)
+    defined = set()
+    for name, (members, key) in sorted(aliases.items()):
+        text = "{" + name + "}"
+        for f in [d.inst[root_path].file] + [d.inst[p].file for p in sorted(key)]:
+            if (f, name) not in defined:
+                defined.add((f, name))
+                d.docs[f].adds.append(f'(bus_alias {_q(name)} (members {" ".join(_q(m) for m in members)}))')
+        for p in sorted(key):
+            stubs[root_path].append((p, text, text, "bidirectional", False))
+            _bus_label_on_child(d, p, text, members, rep)
     # Sheet pins with a short wire and a label on the parent page. Each pin faces the sheets (or parts)
     # it joins; a slot is taken only where the pin's name, the stub and the label land clear of every
     # wire, part, label and text on the page. The first stub on a page that only passes the signal up
@@ -965,7 +1133,7 @@ def _plan_hierarchical(d):
                                       (x - round(1.2 * MM) - tw, y - round(0.9 * MM), x - round(1.2 * MM), y + round(0.9 * MM)) if side == "right"
                                       else (x + round(1.2 * MM), y - round(0.9 * MM), x + round(1.2 * MM) + tw, y + round(0.9 * MM))))
                     rep["pins_added"] += 1
-                doc.adds.append(_wire((ax1, y), (bx0, y)))
+                doc.adds.append(_link(pname, (ax1, y), (bx0, y)))
                 occupied |= {(ax1, y), (bx0, y)}
                 obstacles.append(("wire", pname, seg))
                 wired |= {(ca, pname), (cb, pname)}
@@ -1047,7 +1215,7 @@ def _plan_hierarchical(d):
                     obstacles.append(("pinname", cu, name_box))
                 new_h = max(new_h, pt[1] - y0 + PITCH)
                 doc.edits.append(((sd["node"].span[1] - 1, sd["node"].span[1] - 1), "\t" + _sheet_pin(cname, shape, pt, side) + "\n\t"))
-                doc.adds.append(_wire(pt, end))
+                doc.adds.append(_link(pname, pt, end))
                 if up:
                     up_done.add((parent, pname))
                 doc.adds.append(_label(kind, pname, end, rot, shape if up else "passive"))
@@ -1102,7 +1270,7 @@ def _diff(before, after, limit=6):
 STALE = re.compile(r"sheet[- ]pins?|hierarchical|global (labels?|nets?)|wired sheet to sheet|off-?page|same name are", re.I)
 
 
-def convert(sch, target, write=True, workdir=None):
+def convert(sch, target, write=True, workdir=None, bundle_min=4, arrange=True):
     """Redraw the schematic in `target` style ('flat' or 'hierarchical'). Returns a report:
     {"ok", "style" (before), "target", "changed" (files), "proof", "report", "message"}; ok is False
     (and nothing written) when the conversion is refused or the proof fails."""
@@ -1117,7 +1285,10 @@ def convert(sch, target, write=True, workdir=None):
                                      f"Already {target}."))
         return res
     if desc["buses"]:
-        res["message"] = "The schematic uses buses; redraw those by hand (the conversion handles single wires only)."
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(sch))), "..", "design", "schematic.py")
+        res["message"] = ("The schematic bundles signals into buses, which this redraw does not take apart: set the style in "
+                          "the schematic settings and run the script again (./tw schematic)." if os.path.exists(script) else
+                          "The schematic uses buses; redraw those by hand (the conversion handles single wires only).")
         return res
     if target == "flat":
         try:
@@ -1134,12 +1305,22 @@ def convert(sch, target, write=True, workdir=None):
                               "them: " + "; ".join(_diff(set(before), d.partition(), 3)))
             return res
         try:
-            rep = _plan_flat(d, nl0) if target == "flat" else _plan_hierarchical(d)
+            rep = _plan_flat(d, nl0) if target == "flat" else _plan_hierarchical(d, bundle_min)
         except Refused as e:
             res["message"] = str(e)
             return res
         new = {f: doc.result() for f, doc in d.docs.items()}
         new = {f: t for f, t in new.items() if t is not None}
+        if target == "hierarchical" and arrange:            # the cover page laid out again around its sheets' pins
+            from . import cover
+            src = new.get(d.sch)
+            if src is None:
+                with open(d.sch, encoding="utf-8") as fh:
+                    src = fh.read()
+            arranged, crep = cover.arrange(src)
+            rep["cover"] = crep
+            if crep.get("arranged"):
+                new[d.sch] = arranged
         work = os.path.join(tmp, "converted")
         root = _copy_tree(d, work)
         base = os.path.dirname(d.sch)

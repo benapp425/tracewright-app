@@ -7,6 +7,7 @@ Run in the project folder. Everything writes its results to `build/` and prints 
 | `./tw status` | project files, board summary, last check verdict |
 | `./tw check [ids...]` | the design checks -> build/checks.json, checks_report.md, readiness.md (`--list`, `--refresh`, `--offline`) |
 | `./tw selftest` | plant one fault per check in a copy of the fixture board; every check must catch its fault |
+| `./tw schematic` | run design/schematic.py in the foreground: each sheet as it is laid out, finish's steps, and a last line "Schematic done ..." (report: build/schematic-report.json) or "Schematic failed ..." |
 | `./tw erc`, `./tw drc` | KiCad's own checks (JSON in build/) |
 | `./tw netlist` | build/<name>.net |
 | `./tw svg` | plot every schematic sheet to build/sch_svg/ |

@@ -1067,11 +1067,7 @@ export class BoardEditor {
   }
 
   // ------------------------------------------------------------------ length tuning
-  netLength(net) {
-    let L = 0;
-    for (const t of this.v.data.tracks) if (t[6] === net) L += Math.hypot(t[2] - t[0], t[3] - t[1]);
-    return L;
-  }
+  netLength(net) { return this.v.netLength(net); }
 
   tuneClick(x, y) {
     const c = this.pickCopper(x, y);
@@ -1079,14 +1075,16 @@ export class BoardEditor {
     const d = this.v.data, t = d.tracks[c.i];
     if (t.length > 7) { this.flash("Pick a straight run, not an arc"); return; }
     const net = t[6], now = this.netLength(net);
-    const kind = this.v.netKindOf(net);
-    const mate = kind && kind.kind === "pair" && kind.pair ? (d.nets || []).find((n) => n === kind.pair || n.split("/").pop() === String(kind.pair).split("/").pop()) : null;
+    const pi = this.v.pairInfo(net), mate = pi ? pi.mate : null;
     const target = h("input.einp", { type: "number", step: "0.05", value: (mate ? Math.max(now, this.netLength(mate)) : now + 1).toFixed(2), style: { width: "90px" } });
     const side = h("select.esel", h("option", { value: "1" }, "On the left"), h("option", { value: "-1" }, "On the right"));
     const apply = () => this.tune(c.i, parseFloat(target.value), parseInt(side.value, 10));
     this.closePop();
     this.pop = h("div.epop", { onmousedown: (e) => e.stopPropagation() }, h("div.ep-h", icon("activity", 14), `Tune ${short(net)}`),
       h("div.ep-r", h("span", "Now"), h("span", `${fmt(now)} mm`)), mate ? h("div.ep-r", h("span", "Its pair"), h("span", `${short(mate)} ${fmt(this.netLength(mate))} mm`)) : null,
+      pi ? h("div.ep-r.pairtol", h("span", "Skew"), h("span" + (pi.over ? ".over" : pi.routed && pi.tol != null ? ".ok" : ""),
+        pi.tol != null ? `${fmt(pi.skew)} of ${fmt(pi.tol)} mm allowed${pi.why ? ` (${pi.why})` : ""}` : `${fmt(pi.skew)} mm, no budget`)) : null,
+      pi && mate && pi.lb > 0 && now > pi.lb + (pi.tol || 0) ? h("div.ep-note", `This is the longer half: tune ${short(mate)} to match`) : null,
       h("label.ep-r", h("span", "Make it"), h("span", target, " mm")), h("label.ep-r", h("span", "Bumps"), side),
       h("div.ep-b", h("button.btn.sm", { onclick: () => this.closePop() }, "Cancel"), h("button.btn.sm.primary", { onclick: apply }, "Tune it")));
     const [sx, sy] = this.v.toScreen(x, y);

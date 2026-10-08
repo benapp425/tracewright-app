@@ -199,6 +199,14 @@ def mem_pairs(ctx):
     b.tracks = [t for t in b.tracks if t.net.rsplit("/", 1)[-1] != "USB_D_N"]
 
 
+def mem_pair_skew(ctx):
+    b = ctx.board
+    net = next(t.net for t in b.tracks if t.net.rsplit("/", 1)[-1] == "USB_D_N")
+    t = Track()
+    t.a, t.b, t.w, t.layer, t.net, t.mid, t.uuid, t.locked = (200.0, 200.0), (212.0, 200.0), 0.25, "F.Cu", net, None, "", False
+    b.tracks.append(t)
+
+
 def mem_power(ctx):
     ctx.p.cfg.setdefault("checks", {})["power_paths"] = [{"net": "+5V", "from": "J1", "to": "U1", "amps": 5}]
 
@@ -592,6 +600,7 @@ CASES = [
     ("pcb.silk", "J1's reference 0.5 mm high", ("mem", mem_silk), "silk"),
     ("route.style", "two tracks meeting at 34 degrees", ("mem", mem_route_style), "acute"),
     ("hs.pairs", "USB_D_N unrouted, USB_D_P routed", ("mem", mem_pairs), "only one half"),
+    ("hs.pairs", "USB_D_N 12 mm longer than USB_D_P", ("mem", mem_pair_skew), "skew"),
     ("power.width", "5 A declared through the +5V track", ("mem", mem_power), "+5V"),
     ("power.decoupling", "C4 lifted off +3V3", ("mem", mem_decoupling), "U2"),
     ("dfm.rules", "board minimum track 0.05 mm", ("mem", mem_dfm_rules), "track"),

@@ -15,9 +15,14 @@ OPTIONS = {
     "supplies": {"label": "Supplies drawn as", "default": "symbols",
                  "choices": [("symbols", "Power symbols", "A power symbol at each pin: supplies up, ground down."),
                              ("labels", "Global labels", "A global label names the rail at each pin (ground stays a symbol).")]},
-    "decoupling": {"label": "Decoupling capacitors", "default": "at_pin",
+    "decoupling": {"label": "Decoupling capacitors", "default": "row",
                    "choices": [("at_pin", "At the pin", "Each capacitor drawn at the power pin it serves, the way it is placed."),
-                               ("row", "In a row", "The part's capacitors together in a row beside it, joined by the rail's name.")]},
+                               ("row", "In a row", "The part's capacitors together in a row beside it, joined by the rail's name, "
+                                                   "each row labelled with the pin it serves (near U1 pin P12).")]},
+    "bundles": {"label": "Signals between sheets", "default": "bus",
+                "choices": [("bus", "Bundled", "Four or more signals between the same sheets travel as one bus: one pin and "
+                                              "one line on the cover page, the signals named on each sheet."),
+                            ("wires", "One pin each", "Every signal has its own sheet pin and label on the cover page.")]},
     "active_low": {"label": "Active-low nets", "default": "_N",
                    "choices": [("_N", "RESET_N", "A trailing _N."), ("N_prefix", "NRESET", "A leading N."),
                                ("#", "RESET#", "A trailing #."), ("overbar", "~{RESET}", "KiCad's overbar in the label.")]},

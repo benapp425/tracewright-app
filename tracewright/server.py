@@ -2099,19 +2099,28 @@ def make_app():
     async def nets_list(request):
         """Every net's record from the net model (tw.netmodel): its kind (ground, a supply with its voltage
         and current, one half of a pair, a clock, an RF line...), what was declared and what is inferred,
-        and a short tag for lists."""
+        and a short tag for lists. A pair's halves carry skew_mm and skew_why: how far apart in length the
+        halves may be, the budget the hs.pairs check holds them to."""
         rt = app.rt(request.match_info["pid"])
         from tw import netmodel
+        from tw.checks.context import Context
+        from tw.checks import signal
 
         def work():
             p = rt.p
             p.reload()
-            m = netmodel.for_project(p.tw)
+            ctx = Context(p.tw, offline=True)
+            m = netmodel.for_context(ctx)
             out = {}
             for n, r in m.records.items():
                 src = r.get("source") or {}
                 out[n] = {**{k: v for k, v in r.items() if k != "source"}, "tag": netmodel.tag(r),
                           "declared": sorted(k for k, v in src.items() if v != "inferred")}
+                if r.get("kind") == "pair" and r.get("pair"):
+                    pn = signal.find_pairs([n, r["pair"]])          # which half is the positive one, as the check sees it
+                    tol = signal.pair_tolerance(ctx, *pn[0]) if pn else None
+                    if tol:
+                        out[n]["skew_mm"], out[n]["skew_why"] = tol["mm"], tol["why"]
             return {"nets": out, "summary": m.summary(), "unused": [k for k, _ in m.unused_keys()]}
         return jresp(await asyncio.to_thread(work))
 

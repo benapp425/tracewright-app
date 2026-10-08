@@ -407,6 +407,52 @@ def suggested_placement_on_the_board():
     asyncio.run(go())
 
 
+@test()
+def diff_pairs_are_held_to_their_skew_budget():
+    """hs.pairs holds each pair's two halves to its interface's length budget (USB 2.0 1.25 mm; MIPI, HDMI, LVDS, PCIe,
+    Ethernet, SATA 0.15 mm; a clock or other fast pair 0.5 mm; USB full speed 10 mm; the project's highspeed.skew_mm
+    over all of them): a pair just inside its budget passes, one just over is flagged with the budget and why. A pair
+    with no interface or clock name has no budget."""
+    from tw.checks.context import Context
+    from tw.checks import signal
+    from tw.board import Track
+    p = fixture_copy("pairs")
+    ctx = Context(p, offline=True)
+    b = ctx.board
+    cases = [("CSI_D0", 0.15, "MIPI"), ("HDMI_TX2", 0.15, "HDMI"), ("LVDS_A", 0.15, "LVDS"), ("PCIE_TX0", 0.15, "PCIe"),
+             ("ETH_TX", 0.15, "Ethernet"), ("SATA_TX", 0.15, "SATA"), ("USB2", 1.25, "USB 2.0"), ("REFCLK", 0.5, "a clock pair"),
+             ("LANE0", 0.5, "a high-speed pair")]
+
+    def half(net, y, L):
+        t = Track()
+        t.a, t.b, t.mid, t.w, t.layer, t.net, t.uuid, t.locked = (300.0, y), (300.0 + L, y), None, 0.2, "F.Cu", net, None, False
+        return t
+
+    def lay(over):
+        """Every case's pair drawn side by side, the N half longer by just under (or just over) its budget."""
+        b.tracks = [t for t in b.tracks if not t.net.startswith("/T/")]
+        for i, (name, tol, _) in enumerate(cases):
+            pn, nn = f"/T/{name}_P", f"/T/{name}_N"
+            b.nets.update((pn, nn))
+            b.tracks += [half(pn, 10.0 * i, 20.0), half(nn, 10.0 * i + 0.4, 20.0 + (tol * 1.2 + 0.01 if over else tol * 0.8))]
+        return {f.where["net"]: f.message for f in signal.hs_pairs(ctx) if f.key and f.key.startswith("hs:skew:")}
+
+    for name, tol, why in cases:
+        assert signal.pair_tolerance(ctx, f"/T/{name}_P", f"/T/{name}_N") == {"mm": tol, "why": why}, name
+    assert signal.pair_tolerance(ctx, "/T/ISENSE_P", "/T/ISENSE_N") is None
+    inside = lay(False)
+    assert not any(n.startswith(tuple(c[0] for c in cases)) for n in inside), inside
+    over = lay(True)
+    for name, tol, why in cases:
+        msg = over.get(f"{name}_P")
+        assert msg and f"> {tol:g} mm ({why})" in msg, (name, msg)
+    p.cfg.setdefault("highspeed", {})["skew_mm"] = {"^CSI_": 0.05}          # the project's own budget wins
+    assert signal.pair_tolerance(ctx, "/T/CSI_D0_P", "/T/CSI_D0_N") == {"mm": 0.05, "why": "set for this project"}
+    assert "> 0.05 mm (set for this project)" in lay(False)["CSI_D0_P"]
+    if HAVE_KICAD:                                                          # the demo's USB chip is full speed only
+        assert signal.pair_tolerance(ctx, "/MCU/USB_D_P", "/MCU/USB_D_N") == {"mm": 10.0, "why": "USB full speed"}
+
+
 @test(needs=("kicad", "kpy"))
 def router_reroutes_cleanly():
     """The whole demo board routed again from nothing (every track and via taken off first): every net routed,
@@ -2659,6 +2705,8 @@ def net_kinds_part_inspector_and_schematic_conventions():
             n = (await (await c.get(f"/api/projects/{proj.id}/nets")).json())["nets"]
             by = {nettypes.short(x): v for x, v in n.items()}
             assert by["GND"]["kind"] == "ground" and by["+3V3"]["kind"] == "power" and by["USB_D_P"]["kind"] == "pair", by
+            assert by["USB_D_P"]["skew_mm"] == by["USB_D_N"]["skew_mm"] == 10.0, by["USB_D_P"]      # the board view's pair budget
+            assert by["USB_D_P"]["skew_why"] == "USB full speed" and "skew_mm" not in by["GND"]
             info = await (await c.get(f"/api/projects/{proj.id}/parts/U2")).json()
             assert info["value"].startswith("ATtiny85") and len(info["pins"]) == 8, info
             vcc = next(p for p in info["pins"] if p["pin"] == "8")
@@ -5196,6 +5244,100 @@ def schematic_generator_on_a_big_part():
         raise AssertionError("two R5s were written")
     except ValueError as e:
         assert "R5" in str(e) and "KiCad would join their nets" in str(e), e
+
+
+@test(needs=("kicad",))
+def schematic_bundles_and_the_cover_page():
+    """Six signals between two sheets travel as one bus ({SENSE_LINE}: one pin per sheet on the cover, the members'
+    plain labels on each sheet join it by name, as measured with kicad-cli); a seventh, to a third sheet, keeps its own
+    pin; the cover page is laid out again around the pins (the script left the sheet symbols on top of each other and
+    the contents on them); KiCad's netlist is as asked and its plot has no overlaps. On the header the grounds between
+    the signals had no room for their symbols and became labels: once the signals' labels are plain, so are theirs (a
+    flag beside a plain label runs into its text). `./tw schematic` runs it in the foreground and its last line says
+    it is done."""
+    import subprocess
+    from tw import sexp
+    root = os.path.join(TMP, "bundles")
+    os.makedirs(os.path.join(root, "design"))
+    hw = os.path.join(root, "hardware", "b")
+    json.dump({"name": "B", "kicad_project": "hardware/b/b.kicad_pro", "schematic": {"style": "hierarchical"}},
+              open(os.path.join(root, "tracewright.json"), "w"))
+    script = f"""import sys
+sys.path.insert(0, {os.path.join(ROOT, "tracewright", "toolkit")!r})
+from tw import env
+from tw.sch import Design, finish, Part, stock
+from tw.sch.auto import Page
+from tw.sch.kisch import make_ic
+from tw.examples.demo_board import catalog
+cat = catalog()
+cat["BIG"] = Part(make_ic("BIG", [{{"right": [(str(i + 1), f"S{{i}}", "bidirectional") for i in range(7)],
+                                    "left": [("8", "VDD", "power_in"), ("9", "GND", "power_in")], "width": 12.7}}], ref="U", value="BIG"),
+                  "Package_SO:SOIC-16_3.9x9.9mm_P1.27mm", "BIG", "BIG", "x", "")
+cat["HDR9"] = Part(make_ic("HDR9", [{{"left": [(str(i + 1), f"P{{i + 1}}", "passive") for i in range(9)], "width": 7.62}}], ref="J", value="HDR9"),
+                   "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical", "HDR9", "HDR9", "x", "")
+d = Design("b", title="Bundles", company="t")
+top = d.root("Cover", paper="A4")
+a = d.sheet("Chip", "chip.kicad_sch", "The chip", paper="A4", description="the chip")
+b = d.sheet("Header", "header.kicad_sch", "The header", paper="A4", description="the header")
+c = d.sheet("Led", "led.kicad_sch", "The light", paper="A4", description="the light")
+top.subsheet(a, (25.4, 25.4), (25.4, 12.7), [])
+top.subsheet(b, (30.48, 27.94), (25.4, 12.7), [])          # on top of the first, as a script might leave it
+top.subsheet(c, (33.02, 30.48), (25.4, 12.7), [])
+d.contents((27.94, 30.48))
+names = [f"SENSE_LINE_{{i:02d}}" for i in range(6)] + ["IRQ"]
+pa = Page(d, a, base=100, catalog=cat)
+g = pa.group("CHIP")
+u = g.part("BIG", "U", ref="U101")
+g.power(u, "8", "+3V3")
+g.power(u, "9", "GND")
+for i, n in enumerate(names):
+    g.net(u, str(i + 1), n)
+pa.layout()
+pb = Page(d, b, base=200, catalog=cat)
+g = pb.group("HEADER")
+j = g.part("HDR9", "J", ref="J201")
+for pin, n in zip("124578", names[:6]):
+    g.net(j, pin, n)
+for pin in "369":                                           # grounds between the signals, as on a board-to-board connector
+    g.power(j, pin, "GND")
+pb.layout()
+pc = Page(d, c, base=300, catalog=cat)
+g = pc.group("LIGHT")
+r = g.part("R1k", "R", ref="R301")
+g.net(r, "1", "IRQ")
+g.power(r, "2", "GND")
+pc.layout()
+d.write({hw!r})
+print(finish(env.project({root!r}))["connections"])
+"""
+    open(os.path.join(root, "design", "schematic.py"), "w").write(script)
+    os.makedirs(hw, exist_ok=True)
+    open(os.path.join(hw, "b.kicad_pro"), "w").write("{}")
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tracewright", "toolkit", "tw", "cli.py"), "schematic"], cwd=root,
+                       capture_output=True, text=True, timeout=600)
+    lines = [l for l in r.stdout.strip().splitlines() if l.strip()]
+    assert r.returncode == 0 and lines and lines[-1].startswith("Schematic done in"), (r.returncode, r.stdout[-800:], r.stderr[-1500:])
+    assert "laid out chip.kicad_sch" in r.stderr and "Schematic done:" in r.stderr, r.stderr[-800:]
+    rep = json.load(open(os.path.join(root, "build", "schematic-report.json")))
+    assert rep["connections"] == "as asked" and rep["style"]["ok"], (rep.get("connections"), rep.get("style"))
+    assert rep["plot"]["count"] == 0, rep["plot"]
+    cover = open(os.path.join(hw, "b.kicad_sch"), encoding="utf-8").read()
+    t = sexp.parse(cover)
+    sheets = [n for n in t[1:] if isinstance(n, list) and n and n[0] == "sheet"]
+    pins = sorted(str(q[1]) for s in sheets for q in sexp.findall(s, "pin"))
+    assert pins == ["IRQ", "IRQ", "{SENSE_LINE}", "{SENSE_LINE}"], pins         # six signals: one bus; IRQ alone
+    assert '(bus_alias "SENSE_LINE"' in cover and "SENSE_LINE_05" in cover, cover[:400]
+    boxes = []
+    for s in sheets:
+        at, size = sexp.find(s, "at"), sexp.find(s, "size")
+        boxes.append((float(at[1]), float(at[2]), float(at[1]) + float(size[1]), float(at[2]) + float(size[2])))
+    for i, a_ in enumerate(boxes):                                             # pulled apart
+        for b_ in boxes[i + 1:]:
+            assert a_[2] <= b_[0] or b_[2] <= a_[0] or a_[3] <= b_[1] or b_[3] <= a_[1], boxes
+    chip = open(os.path.join(hw, "chip.kicad_sch"), encoding="utf-8").read()
+    assert 'hierarchical_label "{SENSE_LINE}"' in chip and '(label "SENSE_LINE_00"' in chip and '(bus_alias "SENSE_LINE"' in chip, chip[-600:]
+    header = open(os.path.join(hw, "header.kicad_sch"), encoding="utf-8").read()
+    assert '(label "GND"' in header and '(global_label "GND"' not in header, header.count('(global_label "GND"')
 
 
 @test(needs=("kicad",))

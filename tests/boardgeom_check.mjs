@@ -85,6 +85,11 @@ for (const extra of [0.2, 1, 3, 7.5]) {
 }
 const tight = G.serpentine([0, 0], [6, 0], 10, 1.0, 1.5);
 check(tight && tight.short > 4 && Math.abs(tight.added + tight.short - 10) < 1e-6, `a run too short: ${JSON.stringify(tight && [tight.added, tight.short])}`);
+// 7. a track's length: an arc along the arc (a quarter circle of radius 2, a half circle), a straight one end to end
+const q = Math.SQRT1_2 * 2;
+check(Math.abs(G.trackLength([2, 0, 0, 2, 0.2, "F.Cu", "n", q, q]) - Math.PI) < 1e-9, "quarter arc length");
+check(Math.abs(G.trackLength([-2, 0, 2, 0, 0.2, "F.Cu", "n", 0, -2]) - 2 * Math.PI) < 1e-9, "half arc length");
+check(Math.abs(G.trackLength([0, 0, 3, 4, 0.2, "F.Cu", "n"]) - 5) < 1e-12, "straight length");
 
 if (fails.length) { console.log(fails.slice(0, 20).join("\n")); process.exit(1); }
 console.log(`ok (${n} nets, ${Math.round(ms / n)} ms each)`);

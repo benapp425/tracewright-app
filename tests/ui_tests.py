@@ -1097,6 +1097,69 @@ async def board_editor_routes_a_pair_and_tunes_a_length(t):
 
 
 @test
+async def board_pair_says_its_skew_budget_and_tunes_within_it(t):
+    """A differential pair picked on the board says how far apart its halves are and the budget the checks hold it to
+    (the demo's USB pair: full speed, 10 mm), in the selection bar and in the spotlight card; the tune popup says it too
+    and offers the other half's length, and tuning the shorter half to it leaves the pair within 0.15 mm (MIPI's
+    budget, the tightest)."""
+    import math
+    base = f"api/projects/{t.pid}/board"
+    b0 = t.s.get(base)
+    nets = sorted(n for n in b0["nets"] if n.split("/")[-1] in ("USB_D_P", "USB_D_N"))
+    check(len(nets) == 2 and all(len(x) == 7 for x in b0["tracks"] if x[6] in nets), nets)
+    length = lambda b, n: sum(math.hypot(x[2] - x[0], x[3] - x[1]) for x in b["tracks"] if x[6] == n)
+    la = {n: length(b0, n) for n in nets}
+    short_net, long_net = sorted(nets, key=la.get)
+    skew0 = abs(la[nets[0]] - la[nets[1]])
+    check(skew0 > 0.3, f"the demo's pair is already matched ({skew0:.3f} mm): nothing to tune")
+    # a point on the short half's longest straight run, clear of every part (a click there picks the track, not a part)
+    run = max((x for x in b0["tracks"] if x[6] == short_net), key=lambda x: math.hypot(x[2] - x[0], x[3] - x[1]))
+    inside = lambda q: any(f["bbox"][0] - 0.3 <= q[0] <= f["bbox"][2] + 0.3 and f["bbox"][1] - 0.3 <= q[1] <= f["bbox"][3] + 0.3 for f in b0["footprints"])
+    pts = [(run[0] + (run[2] - run[0]) * u, run[1] + (run[3] - run[1]) * u) for u in (0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8)]
+    px, py = next((q for q in pts if not inside(q)), pts[0])
+    try:
+        await t.open_project("board")
+        await t.page.wait(f"!!({BV} && {BV}.data && {BV}.netKinds && Object.keys({BV}.netKinds).length)", 30)
+        await t.page.js(f"{BV}.setPanel('layers'); 1")
+        await t.page.key("f", "KeyF", text="f")
+        await settle(t.page)
+        await board_click(t.page, px, py)
+        await t.page.wait("document.querySelector('.selbar .pairtol')", 5)
+        bar = await t.page.js("document.querySelector('.selbar .pairtol').textContent")
+        check(bar == f"Skew {skew0:.2f} mm, allowed 10 mm (USB full speed)", bar)
+        await t.page.click(".ltabs button[data-panel=copper]")
+        await board_click(t.page, px, py)
+        await t.page.wait("document.querySelector('.spotcard .pairtol')", 5)
+        card = await t.page.js("document.querySelector('.spotcard .pairtol').innerText")
+        check(f"USB_D_P {la[nets[1]]:.2f} mm · USB_D_N {la[nets[0]]:.2f} mm" in card and f"Skew {skew0:.2f} mm, allowed 10 mm (USB full speed)" in card, card)
+        await t.shot("board-pair-skew")
+        await t.page.js(f"{BV}.setSpot(null); {BV}.setPanel('layers'); 1")
+        await t.page.click(".tbtn.editbtn")
+        await t.page.key("t", "KeyT", text="t")
+        await board_click(t.page, px, py)
+        await t.page.wait("document.querySelector('.epop input.einp')", 5)
+        pop = await t.page.js("document.querySelector('.epop .pairtol').innerText")
+        check(f"{round(skew0, 3):g} of 10 mm allowed (USB full speed)" in pop.replace("\n", " "), pop)
+        want = await t.page.js("document.querySelector('.epop input.einp').value")
+        check(want == f"{la[long_net]:.2f}", f"the popup offers {want}, the other half is {la[long_net]:.3f} mm")
+        await t.shot("board-pair-tune")
+        await t.page.js("[...document.querySelectorAll('.epop button')].find((b) => b.textContent === 'Tune it').click(); 1")
+        for _ in range(60):
+            b1 = t.s.get(base)
+            if length(b1, short_net) > la[short_net] + 0.3:
+                break
+            await asyncio.sleep(0.25)
+        skew1 = abs(length(b1, nets[0]) - length(b1, nets[1]))
+        check(skew1 <= 0.15, f"after tuning {short_net.split('/')[-1]}: skew {skew1:.3f} mm (was {skew0:.3f})")
+        await t.page.wait(f"{BV}.pairInfo({json.dumps(short_net)}).skew < 0.15", 10)
+    finally:
+        for _ in range(5):
+            if not t.s.get(base + "/history")["undo"]:
+                break
+            t.s.post(base + "/undo")
+
+
+@test
 async def second_opinion_card(t):
     """A second opinion's concerns show under the run in the chat; Ask Claude about these puts them in the message
     box for the user to send (or not)."""
