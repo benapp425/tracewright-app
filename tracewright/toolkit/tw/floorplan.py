@@ -8,7 +8,8 @@ millimetres from the board's top-left corner, y down).
                            blocks' areas and keep-outs drawn on Dwgs.User (group "Floorplan"), and the
                            connectors, holes and one-part blocks whose references are on the board moved to their
                            places (a block turned on the plan turns its part; a connector's rotation is left as it
-                           is: turn each so it faces off its edge); keep-outs named as a slot or cut-out are cut in
+                           is: turn each so it faces off its edge; one set on the bottom side goes onto the
+                           bottom); keep-outs named as a slot or cut-out are cut in
                            the outline layer (a milled slot with round ends when long and thin)
 
 The check placement.floorplan holds the placed board to it: each connector on its planned edge, each hole
@@ -68,14 +69,15 @@ def placed(fp, origin=ORIGIN):
             else:
                 x, y, rect = ox + at, oy + H - d / 2, [ox + at - w / 2, oy + H - d, ox + at + w / 2, oy + H]
             out["connectors"].append({"id": it["id"], "ref": it.get("ref") or "", "label": it.get("label", ""), "edge": e,
-                                      "x": round(x, 3), "y": round(y, 3), "rect": [round(v, 3) for v in rect], "faces": e})
+                                      "x": round(x, 3), "y": round(y, 3), "rect": [round(v, 3) for v in rect], "faces": e,
+                                      "side": "bottom" if it.get("side") == "bottom" else "top"})
         else:
             x, y = ox + it["x"], oy + it["y"]
             rot = int(it.get("rot") or 0) % 360
             if rot in (90, 270):                           # turned a quarter: its area turns with it
                 w, d = d, w
             out["blocks"].append({"id": it["id"], "ref": it.get("ref") or "", "label": it.get("label", ""), "kind": it.get("kind", ""),
-                                  "x": round(x, 3), "y": round(y, 3), "rot": rot,
+                                  "x": round(x, 3), "y": round(y, 3), "rot": rot, "side": "bottom" if it.get("side") == "bottom" else "top",
                                   "rect": [round(v, 3) for v in (x - w / 2, y - d / 2, x + w / 2, y + d / 2)]})
     for k in fp.get("keepouts") or []:
         x, y = ox + k["x"], oy + k["y"]
@@ -96,10 +98,12 @@ def describe(fp, origin=ORIGIN):
     for c in pl["connectors"]:
         mv = " (the user put it here)" if next((i for i in fp.get("items") or [] if i["id"] == c["id"] and i.get("moved")), None) else ""
         out.append(f"Connector {c['ref'] or c['id']} {c['label']}: on the {c['edge']} edge, centre ({c['x']:g}, {c['y']:g}), "
-                   f"inside [{', '.join(f'{v:g}' for v in c['rect'])}], opening facing {c['faces']}{mv}")
+                   f"inside [{', '.join(f'{v:g}' for v in c['rect'])}], opening facing {c['faces']}"
+                   + (", on the bottom side" if c["side"] == "bottom" else "") + mv)
     for k in pl["blocks"]:
         it = next((i for i in fp.get("items") or [] if i["id"] == k["id"]), {})
         how = [f"turned {k['rot']}°"] if k.get("rot") else []
+        how += ["on the bottom side"] if k.get("side") == "bottom" else []
         how += ["placed by the user"] if it.get("moved") else []
         how += ["locked: keep it there"] if it.get("locked") else []
         out.append(f"Block {k['label'] or k['id']}{' (' + k['ref'] + ')' if k['ref'] else ''}: area [{', '.join(f'{v:g}' for v in k['rect'])}]"
@@ -140,8 +144,10 @@ def ops(fp, board=None, origin=None, outline=None):
     refs = {f.ref for f in board.fp_list} if board is not None else set()
     for c in pl["connectors"] + pl["holes"]:
         if c.get("ref") and c["ref"] in refs:
-            out.append({"op": "move", "ref": c["ref"], "x": c["x"], "y": c["y"]})
+            out.append({"op": "move", "ref": c["ref"], "x": c["x"], "y": c["y"],
+                        **({"side": "B" if c["side"] == "bottom" else "F"} if c.get("side") else {})})
     for k in pl["blocks"]:                                  # a block that is one part: the part goes there, turned as planned
         if k.get("ref") and k["ref"] in refs:
-            out.append({"op": "move", "ref": k["ref"], "x": k["x"], "y": k["y"], **({"rot": k["rot"]} if k.get("rot") else {})})
+            out.append({"op": "move", "ref": k["ref"], "x": k["x"], "y": k["y"], "side": "B" if k["side"] == "bottom" else "F",
+                        **({"rot": k["rot"]} if k.get("rot") else {})})
     return out

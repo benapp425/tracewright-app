@@ -540,6 +540,65 @@ async def signoff_page_scrolls(t):
 
 
 @test
+async def floorplan_two_sided(t):
+    """A block put on the bottom side (F, or the bar's button): drawn dashed, saved with its side (Claude is told), no
+    longer clashing with a top-side block over it; Top / Bottom / Both shows one side faint; `floorplan apply` puts its
+    part on the bottom."""
+    root = t.s.demo["root"]
+    cfgp = os.path.join(root, "tracewright.json")
+    before = open(cfgp).read()
+    cfg = json.loads(before)
+    cfg["start"] = {"mode": "guided", "phase": "ready"}
+    with open(cfgp, "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.makedirs(os.path.join(root, ".tracewright"), exist_ok=True)
+    fp = json.loads(json.dumps(DEMO_FLOORPLAN))
+    fp["items"].append({"id": "caps", "label": "Bulk caps", "kind": "power", "x": 30, "y": 16, "w": 8, "h": 6})   # right over the MCU
+    with open(os.path.join(root, ".tracewright", "canvas.json"), "w") as f:
+        json.dump({"floorplan": fp}, f)
+    cv = lambda: t.s.get(f"api/projects/{t.pid}/canvas")["floorplan"]
+    item = lambda iid: next(i for i in cv()["items"] if i.get("id") == iid)
+    try:
+        await t.page.goto(t.s.url + f"#/p/{t.pid}")
+        await t.page.wait("document.querySelector('.fp-svg .fp-board') && document.querySelector('.fp-sides')", 20)
+        await asyncio.sleep(1.0)                             # the page settles (the floorplan redraws as its column sizes)
+        check(await t.page.js("document.querySelector('.fp-item[data-id=caps]').classList.contains('bad')"),
+              "two blocks on one side, one over the other, are not flagged")
+        await fp_click(t.page, "caps")
+        await t.page.key("f")
+        for _ in range(40):                                  # saved (the PATCH lands a moment after the key)
+            if item("caps").get("side") == "bottom":
+                break
+            await asyncio.sleep(0.15)
+        check(item("caps").get("side") == "bottom" and item("caps")["moved"], item("caps"))
+        cls = await t.page.js("document.querySelector('.fp-item[data-id=caps]').getAttribute('class')")
+        check("bottom" in cls and "bad" not in cls, cls)
+        check(not await t.page.js("document.querySelector('.fp-item[data-id=mcu]').classList.contains('bad')"),
+              "a top block still clashes with the one now on the bottom")
+        await t.page.js("[...document.querySelectorAll('.fp-side')].find((b) => b.textContent.startsWith('Top')).click(); 1")
+        await asyncio.sleep(0.3)
+        check(await t.page.js("document.querySelector('.fp-item[data-id=caps]').classList.contains('off')"), "the bottom block is not faint in the top view")
+        await t.page.js("[...document.querySelectorAll('.fp-side')].find((b) => b.textContent.startsWith('Bottom')).click(); 1")
+        await asyncio.sleep(0.3)
+        check(await t.page.js("document.querySelector('.fp-item[data-id=mcu]').classList.contains('off') && !document.querySelector('.fp-item[data-id=caps]').classList.contains('off')"),
+              "the bottom view does not show the bottom side")
+        await t.shot("floorplan-bottom-side")
+        # the board: `floorplan apply` puts a one-part block that is on the bottom onto the bottom
+        sys.path.insert(0, os.path.join(ROOT, "tracewright", "toolkit"))
+        from tw import floorplan, env as twenv
+        from tw.board import Board
+        brd = Board.load(twenv.Project(root).pcb)
+        ops = floorplan.ops({**cv(), "items": [{**i, "ref": "U1"} if i["id"] == "caps" else i for i in cv()["items"]]}, board=brd)
+        mv = next(o for o in ops if o.get("op") == "move" and o.get("ref") == "U1")
+        check(mv.get("side") == "B", mv)
+        check(any("on the bottom side" in l for l in floorplan.describe(cv())), floorplan.describe(cv()))
+    finally:
+        with open(cfgp, "w") as f:
+            f.write(before)
+        os.remove(os.path.join(root, ".tracewright", "canvas.json"))
+
+
+@test
 async def floorplan_shows_on_the_board_until_there_is_one(t):
     pr = t.s.post("api/projects", {"name": "Floorplan board", "brief": ""})     # no start: nothing goes to Claude
     check(not pr.get("has_pcb"), f"a new project already has a board: {pr}")
@@ -1485,6 +1544,25 @@ async def placement_panel_why_and_constraints(t):
     finally:
         os.remove(path)
         await t.page.js(f"{BV}.setPanel('layers'); 1")
+
+
+@test
+async def routing_panel_room_and_pairs(t):
+    """The board's Routing tab reads whether the board can be routed in its room (the demo: routable, with its busiest
+    line) and lists each pair with its skew against the budget the checks hold it to (the demo's USB pair: full speed,
+    10 mm); a pair's row puts it in the spotlight."""
+    await t.open_project("board")
+    await t.page.wait(f"!!({BV} && {BV}.ws)", 30)
+    await t.page.js(f"localStorage.setItem('tw.layers.collapsed', '0'); {BV}.setPanel('routing'); 1")
+    await t.page.wait("document.querySelector('.dn-rb') && document.querySelector('.pr-row')", 30)
+    rb = await t.page.js("document.querySelector('.dn-rb').innerText")
+    check("Room to route" in rb and "Routable" in rb and "busiest line" in rb, rb)
+    row = await t.page.js("document.querySelector('.pr-row').innerText")
+    check("USB_D_P / USB_D_N" in row and "of 10 mm" in row, row)
+    await t.shot("routing-room-and-pairs")
+    await t.page.js("document.querySelector('.pr-row').click(); 1")
+    await t.page.wait(f"{BV}.panel === 'copper' && {BV}.spot && {BV}.spot.endsWith('USB_D_P')", 10)
+    await t.page.js(f"{BV}.setPanel('layers'); 1")
 
 
 @test

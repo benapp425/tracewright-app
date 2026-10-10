@@ -83,6 +83,21 @@ def _farads(v):
     return x * {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6}[m.group(2)]
 
 
+_PLAN = None
+
+
+def _pin_plan():
+    """{ref: {pin the script names: pin it is drawn on}} from the project's design/pin-plan.json (tw.pinplan), once."""
+    global _PLAN
+    if _PLAN is None:
+        try:
+            from .. import env, pinplan
+            _PLAN = pinplan.load(env.project().root)
+        except Exception:
+            _PLAN = {}
+    return _PLAN
+
+
 def _rail_tag(rq):
     """How a net label is written: "global" for a supply drawn as a label by choice, "rail?" for one drawn as a label for
     lack of room (local if its symbol is on the sheet anyway), None for a signal (global only when it crosses sheets)."""
@@ -343,6 +358,11 @@ class Group:
 
     # ------------------------------------------------------------------ pin patterns (asked for, drawn at flush)
     def _ask(self, kind, inst, pin, **kw):
+        perm = _pin_plan().get(inst.ref)                 # the layout's pin plan (tw.pinplan): this pin's net goes elsewhere
+        if perm:
+            pin = perm.get(str(pin), str(pin))
+            if kw.get("pins"):
+                kw["pins"] = [perm.get(str(p), str(p)) for p in kw["pins"]]
         self.pending.append({"kind": kind, "inst": inst, "pin": str(pin), **kw})
 
     def nc(self, inst, pins):

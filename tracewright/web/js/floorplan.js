@@ -2,8 +2,9 @@
 // holes, each connector on its edge, the main blocks where they go, keep-outs -- drawn from the canvas's
 // floorplan section (canvas.py). Everything can be dragged: blocks, keep-outs and holes anywhere on the board,
 // connectors along the edges (onto another edge too), the board's corner to resize it. A click selects: R turns
-// it a quarter (a connector: along its edge or across it), L locks it (Claude keeps it where it is), the arrow
-// keys nudge it (Shift: 5 mm). Solve packs everything inside the board without overlaps (fpsolve.py). Each change is saved and told to Claude (PATCH .../canvas/floorplan). Millimetres
+// it a quarter (a connector: along its edge or across it), F puts it on the other side of the board, L locks it
+// (Claude keeps it where it is), the arrow keys nudge it (Shift: 5 mm). Top / Bottom / Both shows one side or both;
+// what sits on the bottom is drawn dashed, seen through the board from the top. Solve packs everything inside the board without overlaps (fpsolve.py). Each change is saved and told to Claude (PATCH .../canvas/floorplan). Millimetres
 // from the board's top-left corner, y down.
 import { h, api, toast } from "./util.js";
 import { icon } from "./icons.js";
@@ -74,6 +75,7 @@ function wrap(text, n, k) {
   return lines;
 }
 function overlaps(a, b) { return a[0] < b[0] + b[2] - 0.01 && b[0] < a[0] + a[2] - 0.01 && a[1] < b[1] + b[3] - 0.01 && b[1] < a[1] + a[3] - 0.01; }
+const sideOf = (it) => (it.side === "bottom" ? "bottom" : "top");
 
 export class FloorplanView {
   // opts: {pid, editable, maxSize: [a, b] | null, width, maxHeight}
@@ -89,6 +91,9 @@ export class FloorplanView {
         icon("layout-grid", 13), "Solve");
       this.el.appendChild(this.solveBtn);
     }
+    this.view = "both";                               // which side is shown: top | bottom | both
+    this.sides = h("div.fp-sides");
+    this.el.appendChild(this.sides);
     this.caption = h("div.fp-solved", { style: { display: "none" } });
     this.el.appendChild(this.caption);
     this.selId = null;
@@ -191,7 +196,10 @@ export class FloorplanView {
     for (let i = 0; i < rects.length; i++) {
       const [ia, ra] = rects[i];
       if (ra[0] < -0.01 || ra[1] < -0.01 || ra[0] + ra[2] > W + 0.01 || ra[1] + ra[3] > H + 0.01) bad.add(ia.id);
-      for (let j = i + 1; j < rects.length; j++) if (overlaps(ra, rects[j][1])) { bad.add(ia.id); bad.add(rects[j][0].id); }
+      for (let j = i + 1; j < rects.length; j++) {
+        if (sideOf(ia) !== sideOf(rects[j][0])) continue;          // one on top, one on the bottom: no clash
+        if (overlaps(ra, rects[j][1])) { bad.add(ia.id); bad.add(rects[j][0].id); }
+      }
     }
     this.bad = bad;
     for (const [it, rc] of rects) svg.appendChild(this.item(it, rc, bad.has(it.id)));
@@ -212,6 +220,20 @@ export class FloorplanView {
     this.caption.textContent = said.length ? "Solved: " + said.join(" · ") : "";
     this.caption.style.display = said.length ? "" : "none";
     this.renderBar();
+    this.renderSides();
+  }
+
+  // Top / Bottom / Both: which side of the board is shown (what is on the other side drawn faint)
+  renderSides() {
+    const nb = (this.fp.items || []).filter((it) => sideOf(it) === "bottom").length;
+    this.sides.replaceChildren();
+    if (!this.opts.editable && !nb) { this.sides.style.display = "none"; return; }
+    this.sides.style.display = "";
+    for (const [v, t, tip] of [["top", "Top", "The top side (the bottom side faint)"], ["bottom", "Bottom", "The bottom side, seen through the board from the top"],
+      ["both", "Both", "Both sides: the bottom dashed"]]) {
+      this.sides.appendChild(h("button.fp-side" + (this.view === v ? ".on" : ""), { "data-tip": tip, onclick: () => { this.view = v; this.draw(); } },
+        t + (v === "bottom" && nb ? ` ${nb}` : "")));
+    }
   }
 
   // the suggested layout: each move's outline where it would go, an arrow from where it is, its number
@@ -255,8 +277,9 @@ export class FloorplanView {
 
   item(it, [x, y, w, hh], bad) {
     const S = this.S, X = (v) => this.ox + v * S, Y = (v) => this.oy + v * S;
+    const off = this.view !== "both" && sideOf(it) !== this.view;
     const cls = "fp-item " + (it.edge ? "conn" : "blk " + (it.kind || "other")) + (bad ? " bad" : "") + (it.moved ? " moved" : "") +
-      (it.id === this.selId ? " sel" : "") + (it.locked ? " locked" : "");
+      (it.id === this.selId ? " sel" : "") + (it.locked ? " locked" : "") + (sideOf(it) === "bottom" ? " bottom" : "") + (off ? " off" : "");
     const g = el("g", { class: cls, "data-id": it.id });
     g.appendChild(el("rect", { x: X(x), y: Y(y), width: w * S, height: hh * S, rx: it.edge ? 1.5 : 4 }));
     const name = it.edge ? [it.ref, it.label].filter(Boolean).join(" ") : it.label || it.id;
@@ -278,8 +301,9 @@ export class FloorplanView {
     const lk = this.lockMark(it, X(x + w), Y(y));
     if (lk) g.appendChild(lk);
     g.appendChild(el("title", {}, `${name}${it.note ? " — " + it.note : ""}\n${fmt(it.w)} × ${fmt(it.h)} mm${it.rot ? `, turned ${it.rot}°` : ""}` +
+      `${sideOf(it) === "bottom" ? "\nOn the bottom side" : ""}` +
       `${it.locked ? "\nLocked: Claude keeps it here" : it.moved ? "\nPlaced by you" : ""}${bad ? "\nOverlaps something or runs off the board" : ""}`));
-    if (this.opts.editable) this.dragBy(g, { kind: it.edge ? "conn" : "blk", it });
+    if (this.opts.editable && !off) this.dragBy(g, { kind: it.edge ? "conn" : "blk", it });
     return g;
   }
 
@@ -358,6 +382,9 @@ export class FloorplanView {
     if (!f) { bar.style.display = "none"; return; }
     const it = f.it;
     if (f.kind !== "hole") bar.appendChild(h("button.fp-bb", { "data-tip": f.kind === "conn" ? "Turn: along the edge or across it (R). Drag it to another edge" : "Turn a quarter (R)", onclick: () => this.rotate() }, icon("rotate-cw", 14)));
+    if (f.kind === "blk" || f.kind === "conn") bar.appendChild(h("button.fp-bb" + (sideOf(it) === "bottom" ? ".on" : ""),
+      { "data-tip": sideOf(it) === "bottom" ? "On the bottom side: put it on top (F)" : "Put it on the bottom side (F)", onclick: () => this.flip() },
+      icon("flip-horizontal-2", 14)));
     bar.appendChild(h("button.fp-bb" + (it.locked ? ".on" : ""), { "data-tip": it.locked ? "Unlock (L)" : "Lock: Claude keeps it here (L)", onclick: () => this.toggleLock() },
       icon(it.locked ? "lock" : "lock-open", 14)));
     bar.style.display = "";
@@ -377,6 +404,7 @@ export class FloorplanView {
     if (!f) return;
     const k = e.key;
     if (k === "r" || k === "R") this.rotate();
+    else if (k === "f" || k === "F") this.flip();
     else if (k === "l" || k === "L") this.toggleLock();
     else if (k === "Escape") this.select(null);
     else if (k.startsWith("Arrow")) {
@@ -404,6 +432,18 @@ export class FloorplanView {
     }
     it.moved = true;
     this.draw();
+  }
+
+  // onto the other side of the board (a block or a connector); the view follows it so it stays in sight
+  flip() {
+    const f = this.find(this.selId);
+    if (!f || (f.kind !== "blk" && f.kind !== "conn")) return;
+    const start = { ...f.it };
+    f.it.side = sideOf(f.it) === "bottom" ? "top" : "bottom";
+    f.it.moved = true;
+    if (this.view !== "both") this.view = f.it.side;
+    this.draw();
+    this.save({ id: f.it.id, side: f.it.side }, f.it, start);
   }
 
   toggleLock() {

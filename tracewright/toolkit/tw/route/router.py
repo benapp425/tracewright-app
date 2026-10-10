@@ -267,9 +267,10 @@ class Board:
             self._rmax[key] = rmax
         return self._window(bb[0] - rmax, bb[1] - rmax, bb[2] + rmax, bb[3] + rmax)
 
-    def stamp(self, net, cls, layers, kind, geom, extra=0.0, via_only=False, block_all_vias=False):
+    def stamp(self, net, cls, layers, kind, geom, extra=0.0, via_only=False, block_all_vias=False, bare=False):
         """Mark cells near copper of `net` for every profile. kind: 'poly' (list of pts), 'seg'
-        (ax, ay, bx, by, halfwidth), 'circle' (cx, cy, r)."""
+        (ax, ay, bx, by, halfwidth), 'circle' (cx, cy, r). bare: `extra` from the copper's edge, no clearance (a
+        margin that is not a clearance to another net: no via touching an SMD pad)."""
         code = self.code(net) if net else -2
         j0, j1, i0, i1 = self.stamp_window(cls, kind, geom, extra)
         if kind == "seg":
@@ -285,7 +286,7 @@ class Board:
         else:
             dist = np.maximum(np.hypot(PX - cx, PY - cy) - r, 0)
         for pname, pr in self.profiles.items():
-            cl = self.clearance(cls, pname) + extra
+            cl = extra if bare else self.clearance(cls, pname) + extra
             for li, lname in enumerate(self.layers):
                 if lname not in layers:
                     continue
@@ -316,7 +317,7 @@ class Board:
                     # no vias in pads, whatever the net (SMD: solder wicking; plated pads: pointless and
                     # the drill would cut the pad)
                     self.stamp("", cls, [lname], "poly", poly["outline"], via_only=True, block_all_vias=True,
-                               extra=0.05 if smd else 0.0)
+                               extra=0.05 if smd else 0.0, bare=True)          # another net's pad: its clearance above
             if p["drill"] > 0:  # through holes: block vias on both layers around the hole too
                 self.stamp(p["net"] or f"__nc_{p['ref']}_{p['num']}", cls, list(self.layers), "circle",
                            (p["pos"][0], p["pos"][1], p["drill"] / 2 + 0.1), via_only=True)
@@ -348,10 +349,21 @@ class Board:
         cls = self.net_class.get(net, "Default")
         self.stamp(net, cls, [layer], "seg", (a[0], a[1], b[0], b[1], w / 2))
 
-    def stamp_via(self, net, pos, d, layers=None):
+    def stamp_via(self, net, pos, d, layers=None, drill=None):
         """A via's copper; layers: the ones a microvia or blind via spans (None: a through via, every layer). The
-        router's own vias go through every layer, so one on any spanned layer is blocked there as well."""
+        router's own vias go through every layer, so one on any spanned layer is blocked there as well. With the
+        board's hole-to-hole minimum (self.h2h) and the drill, no other via's hole comes nearer than that."""
         cls = self.net_class.get(net, "Default")
+        h2h = getattr(self, "h2h", 0.0)
+        if h2h and layers is None:
+            dr = drill if drill else d * 0.45
+            for pname, pr in self.profiles.items():
+                r = dr / 2 + h2h + pr.via_drill / 2
+                j0, j1, i0, i1 = self._window(pos[0] - r, pos[1] - r, pos[0] + r, pos[1] + r)
+                sl = (slice(j0, j1), slice(i0, i1))
+                m = np.hypot(self.GX[sl] - pos[0], self.GY[sl] - pos[1]) < r - 1e-6
+                for li in range(len(self.layers)):
+                    self._mark(self.V[pname][li], sl, m, -2)
         ls = list(self.layers) if layers is None else [l for l in layers if l in self.layers]
         if ls:
             self.stamp(net, cls, ls, "circle", (pos[0], pos[1], d / 2))
@@ -730,7 +742,12 @@ class Router:
                 else:
                     segs.append((B.layers[l], a, b, pr.w))
             if k < len(runs) - 1:
-                vias.append((xy[-1], pr.via_d, pr.via_drill))
+                v = pr
+                if pr.neck and B.necks:                   # inside a neck area: the neck's via (it was checked with it)
+                    j, i = pts[-1]
+                    if B.neck_mask[j, i]:
+                        v = B.profiles[pr.neck]
+                vias.append((xy[-1], v.via_d, v.via_drill))
         return segs, vias
 
     def commit(self, net, prof, path, lt):
@@ -743,7 +760,7 @@ class Router:
         for lname, a, b, w in segs:
             B.stamp_track(net, lname, a, b, w)
         for pos, dv, dr in vias:
-            B.stamp_via(net, pos, dv)
+            B.stamp_via(net, pos, dv, drill=dr)
         rec = {"net": net, "profile": prof, "segments": segs, "vias": vias, "fixed": fixed}
         self.routes.append(rec)
         self._on_grid[id(rec)] = (rec, self._windows(rec))
@@ -761,7 +778,7 @@ class Router:
         for lname, a, b, w in rec["segments"]:
             B.stamp_track(rec["net"], lname, a, b, w)
         for pos, dv, dr in rec["vias"]:
-            B.stamp_via(rec["net"], pos, dv)
+            B.stamp_via(rec["net"], pos, dv, drill=dr)
 
     # ------------------------------------------------------------------ rip-up and reroute
     def rip(self, nets):

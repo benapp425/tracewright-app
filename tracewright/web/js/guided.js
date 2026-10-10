@@ -178,7 +178,7 @@ export class GuidedCanvas {
     if (editable) list = this.suggestBox(fp, pr);
     return this.card("layout-grid", "Floorplan", `${fp.board.w} × ${fp.board.h} mm`, this.fpView.el,
       h("div.gd-fpnote", bad ? h("span.bad", `${bad} overlap${bad === 1 ? "s" : ""} or run${bad === 1 ? "s" : ""} off the board`) : null,
-        h("span", opts.editable ? `Drag to move, click to select: R turns, L locks, arrows nudge${moved ? ` · ${moved} placed by you` : ""}. Claude follows what you place.`
+        h("span", opts.editable ? `Drag to move, click to select: R turns, F puts it on the other side, L locks, arrows nudge${moved ? ` · ${moved} placed by you` : ""}. Claude follows what you place.`
           : `${n} items. The board holds the layout now.`)),
       fp.note ? h("div.gd-fpnote", fp.note) : null, list);
   }

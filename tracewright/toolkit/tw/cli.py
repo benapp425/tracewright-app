@@ -407,6 +407,74 @@ def cmd_escape(a):
     return 0
 
 
+def cmd_routability(a):
+    from tw import routability
+    r = routability.estimate(env.project())
+    print({"fine": "Routable", "tight": "Tight", "impossible": "Not routable as it is", "unknown": "Unknown"}[r["verdict"]] + ":")
+    for l in r["lines"]:
+        print("  " + l)
+    for f in r["fixes"]:
+        print("  fix: " + f)
+
+
+def cmd_pins(a):
+    from tw import pinplan
+    p = env.project()
+    plan = pinplan.propose(p, log=lambda m: None)
+    for l in plan["lines"]:
+        print(l)
+    if not plan["moves"]:
+        return
+    if a.apply:
+        r = pinplan.apply(p, plan)
+        if r.get("error"):
+            print("error: " + r["error"], file=sys.stderr)
+            return 1
+        print(f"Pin plan applied: {r['moves']} moves in design/pin-plan.json and docs/pin-plan.md; " + r.get("schematic", "")
+              + ("; board updated" if r.get("board") else ""))
+    else:
+        for m in plan["moves"][:40]:
+            print(f"  {m['net'].rsplit('/', 1)[-1]}: {m['ref']} pin {m['from']} -> {m['to']}")
+        print("(a proposal: ./tw pins --apply draws the schematic with it and updates the board)")
+
+
+def cmd_pinout(a):
+    from tw import pinout
+    p = env.project()
+    path = pinout.write(p)
+    print(f"{os.path.relpath(path, p.root)}: {len(pinout.table(p))} connectors")
+
+
+def cmd_tune(a):
+    from tw.route import tune
+    r = tune.tune(env.project(), apply=not a.dry_run)
+    for t in r["tuned"]:
+        print(f"  {t['net'].rsplit('/', 1)[-1]}: +{t['added_mm']} mm ({t['why']})")
+    for t in r["left"]:
+        print(f"  not tuned: {t['net'].rsplit('/', 1)[-1]}: {t['why']}")
+    print(f"Tuning done: {len(r['tuned'])} tuned, {len(r['left'])} left")
+
+
+def cmd_breakout(a):
+    from tw import breakout
+    p = env.project()
+    if a.make_room:
+        mr = breakout.make_room(p, refs=a.refs or None, apply=not a.dry_run, log=lambda m: None)
+        for x in mr["parts"]:
+            print(f"  {x['ref']}: {x['with_a_spot_after']} of {x['balls_needing_vias']} balls with a via spot "
+                  f"(was {x['with_a_spot_before']}), {len(mr['moves'])} parts under it moved")
+        p = env.project()
+    rep = breakout.run(p, refs=a.refs or None, apply=not a.dry_run)
+    for r in rep["parts"]:
+        if r.get("left"):
+            print(f"  {r['ref']}: not broken out: " + ", ".join(f"{x['pad']} {x['net'].rsplit('/', 1)[-1]} ({x['why']})"
+                                                           for x in r["left"][:20]) + (" ..." if len(r["left"]) > 20 else ""))
+    if rep.get("error"):
+        print("the board was not changed: " + rep["error"])
+    print(f"Breakout done: {rep['tracks']} tracks, {rep['vias']} vias" + ("" if not a.dry_run else " (dry run: nothing written)")
+          + "; ./tw route takes the nets up at their ports")
+
+
 def cmd_space(a):
     """Where tracks fit: the crowded regions (connections against the room), or at one point what keeps a track out."""
     from tw import space
@@ -565,6 +633,17 @@ def main(argv=None):
     su.add_argument("--layers", type=int, choices=[2, 4, 6, 8, 10, 12])
     es = sub.add_parser("escape", help="how each BGA and fine-pitch part gets its pins out: tracks between balls, vias, layers needed, HDI")
     es.add_argument("ref", nargs="?")
+    bo = sub.add_parser("breakout", help="bring the pins of BGAs and fine-pitch parts out before routing: vias, each ball's escape "
+                                         "on its layer to the edge of the part; ./tw route then starts from those ends")
+    bo.add_argument("refs", nargs="*")
+    bo.add_argument("--dry-run", action="store_true")
+    bo.add_argument("--make-room", action="store_true", help="first move the parts under a BGA off its via spots")
+    sub.add_parser("routability", help="can the board be routed in its room and layers: escapes, crowded lines, demand")
+    pn = sub.add_parser("pins", help="the pin plan: free GPIO moved to the connector pins that lie the way they leave the chip")
+    pn.add_argument("--apply", action="store_true")
+    sub.add_parser("pinout", help="docs/connectors.md: every connector's pins and their nets, from KiCad's netlist")
+    tn = sub.add_parser("tune", help="meanders: pairs within their skew budget, length groups within their tolerance")
+    tn.add_argument("--dry-run", action="store_true")
     sp = sub.add_parser("space", help="where tracks fit: the crowded regions; with --x --y, what keeps a track off that point")
     sp.add_argument("--x", type=float)
     sp.add_argument("--y", type=float)

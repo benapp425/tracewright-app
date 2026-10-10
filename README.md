@@ -30,7 +30,10 @@ live in KiCad, then sends it to the fab.</p>
 - **Notes that read like a person wrote them.** One short line on the sheet beside the part it explains; the reasoning and its sources in the design notes, shown when you hover the part.
 - **Placement with reasons.** Pick a part to see why it is where it is. Keep parts near a pin, together, apart or at an edge; Claude places around it, in stages, and scores the result.
 - **A routing plan.** Each net is routed by the router, routed first with its rules (pairs, clocks, switch nodes, heavy currents), or left for you (RF, current sense, high voltage), with its reason. Pick the router's preset and keep a net to chosen layers.
-- **Up to 12 layers, and HDI.** Claude plans the stack-up and routes every signal layer. HDI (vias in pads, microvias, blind vias) stays off unless you turn it on; each BGA gets an escape plan and a fan-out.
+- **Up to 12 layers, and HDI.** Claude plans the stack-up and routes every signal layer. HDI (vias in pads, microvias, blind vias) stays off unless you turn it on.
+- **Dense boards.** Before routing, each BGA is broken out: a via on every ball that needs one, each signal's escape out to the edge of the ball field layer by layer, and the parts under it moved off its via spots. Fine-pitch connectors get staggered vias. On a breakout board, the free GPIO move to the connector pins that lie the way they leave the chip. The board says first whether it can be routed in its room and layers.
+- **Pairs to their budget.** Click a pair to see its skew against what its interface allows; the route tunes pairs and length groups within their budgets.
+- **Both sides from the start.** The setup's floorplan puts blocks and connectors on the top or the bottom.
 - **Where tracks fit.** See the crowded parts of the board, hover any point to see what keeps a track out, and give an area its own rules (keep-out, no vias, finer tracks, more spacing).
 - **Cost before you run.** See a request's likely cost and share of your plan's limit before you send it.
 - **My parts.** Save parts you have checked, with their footprints, 3D models and notes, for every project.

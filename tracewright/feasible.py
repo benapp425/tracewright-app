@@ -122,6 +122,18 @@ def check(root, cv=None, cfg=None):
                 add(level, f"bga:{name}", f"{layers} layers for {name} ({balls}-ball BGA)",
                     f"Its inner balls need {need} layers to get out" + (" (4 is possible with a careful escape plan)" if need == 6 and layers == 4 else "") + ".",
                     f"Use {need} layers" + (" or a smaller package" if layers <= 2 else "") + ".")
+            else:                                         # enough in total: the signal layers its rings need, with one to spare
+                from tw import stackup as _st
+                sig = (_st.TEMPLATES.get(layers) or "").count("S")
+                side = math.ceil(math.sqrt(balls))
+                rings = math.ceil(side / 2)
+                top, per = (2, 2) if (pitch or 0.8) >= 0.75 else (1, 1)
+                need_s = 1 + math.ceil(max(0, rings - top) / per)
+                if sig and need_s >= sig and balls >= 144:
+                    add("tight", f"bga-margin:{name}", f"{name} needs about all {sig} signal layers of {layers}",
+                        f"Its {rings} rings of balls take about {need_s} signal layers to get out; {layers} layers give {sig}, "
+                        "none to spare where a capacitor under it or a via is in the way.",
+                        f"Use {layers + 2} layers for a spare signal layer (or plan the escape with care).")
             if pitch and pitch <= 0.5 and not hdi:
                 add("tight", f"hdi:{name}", f"{name} has a {pitch:g} mm pitch",
                     "Between its balls there is no room for a normal via: it needs via-in-pad or microvias (HDI).",

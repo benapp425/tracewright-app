@@ -603,6 +603,76 @@ def tool_list(rt, app):
         return _text(f"{summ['ref']}: {summ['vias']} vias ({summ['method']})" + (f", {summ['stubs']} stubs" if summ.get("stubs") else "")
                      + ". Next: route; run_checks drc and hdi.vias.")
 
+    @reg("routability", "Can the board be routed in its room and layers, before routing it: each BGA's escape against the "
+         "signal layers (with a spare layer, or tight), the crowded lines across the board (nets that must cross against "
+         "the tracks that fit), the tracks' demand against the free area. Says fine, tight or impossible, with fixes "
+         "(more layers, a larger board, moved parts). Read it after placement, before breakout and route.",
+         {"type": "object", "properties": {}})
+    async def routability_tool(args):
+        from tw import routability
+        tw = proj()
+        if not tw.has_pcb():
+            return _text("no board yet", error=True)
+        r = await run(routability.estimate, tw)
+        return _text(f"{r['verdict']}: " + "; ".join(r["lines"]) + ("\nfixes: " + "; ".join(r["fixes"]) if r["fixes"] else ""))
+
+    @reg("breakout", "Bring the pins of every BGA and fine-pitch part out before routing (the way a person starts a dense "
+         "board): a dog-bone via for each ball that needs one, then layer by layer, outer rings first, each signal ball's "
+         "track out to the edge of the ball field -- its port, where route takes the net up; beside fine-pitch parts whose "
+         "nets change layer (a connector on the bottom), a via for each pad in two staggered rows. make_room: first move "
+         "the parts under a BGA (its bottom capacitors) a fraction of a mm so every ball has a via spot. refs: only these "
+         "parts. Then route; escapes the route did not use are taken off again.",
+         {"type": "object", "properties": {"refs": {"type": "array", "items": {"type": "string"}}, "make_room": {"type": "boolean"}}})
+    async def breakout_tool(args):
+        from tw import breakout
+        tw = proj()
+        if not tw.has_pcb():
+            return _text("no board yet", error=True)
+        rt.mark_self(120)
+        lines = []
+        if args.get("make_room"):
+            mr = await run(breakout.make_room, tw, args.get("refs") or None, True, 0.8, lambda m: None)
+            lines += [f"{x['ref']}: {x['with_a_spot_after']} of {x['balls_needing_vias']} balls with a via spot (was "
+                      f"{x['with_a_spot_before']}), {len(mr['moves'])} parts under it moved" for x in mr["parts"]]
+        rep = await run(breakout.run, proj(), args.get("refs") or None, True, lambda m: None)
+        rt.mark_self(4)
+        hub.emit("board.changed", version=-1, source="tracewright")
+        for r in rep["parts"]:
+            if r["kind"] == "array":
+                lines.append(f"{r['ref']}: {r['escaped']} of {r['signals'] - r['under']} signal balls out ("
+                             + ", ".join(f"{k} {v}" for k, v in r["by_layer"].items()) + f"), {r['vias']} vias"
+                             + (f"; not out: {', '.join(x['pad'] + ' ' + x['net'].rsplit('/', 1)[-1] for x in r['left'][:12])}" if r["left"] else ""))
+            else:
+                lines.append(f"{r['ref']}: {r['vias']} vias beside {r['pads']} pads" + (f", {len(r['left'])} without room" if r["left"] else ""))
+        if rep.get("error"):
+            return _text("the breakout did not apply: " + rep["error"], error=True)
+        return _text("\n".join(lines) + "\nNext: route (it takes each net up at its port); run_checks drc.")
+
+    @reg("pins", "The pin plan for breakout-style boards: free GPIO (nets named after the chip pin they bring out) moved to "
+         "the connector pins that lie the way their escape leaves the chip, within their own connector and row, so they "
+         "run side by side instead of crossing. action propose (default): the moves and the crossings before and after; "
+         "apply: only once the user agrees -- it changes the schematic (design/pin-plan.json, the schematic generated "
+         "again, the board updated, docs/pin-plan.md). tracewright.json pinplan.fixed keeps nets or connectors as they are.",
+         {"type": "object", "properties": {"action": {"type": "string", "enum": ["propose", "apply"]}}})
+    async def pins_tool(args):
+        from tw import pinplan
+        tw = proj()
+        if not tw.has_pcb():
+            return _text("no board yet", error=True)
+        plan = await run(pinplan.propose, tw, None, lambda m: None)
+        if args.get("action") != "apply" or not plan["moves"]:
+            ex = "; ".join(f"{m['net'].rsplit('/', 1)[-1]} {m['ref']}.{m['from']}->{m['to']}" for m in plan["moves"][:20])
+            return _text(plan["lines"][0] + (f". First moves: {ex}" if ex else "") +
+                         (". Ask the user before apply: it changes the schematic and the pin map." if plan["moves"] else ""))
+        rt.mark_self(300)
+        r = await run(pinplan.apply, tw, plan)
+        rt.mark_self(4)
+        hub.emit("board.changed", version=-1, source="tracewright")
+        if r.get("error"):
+            return _text(r["error"], error=True)
+        return _text(f"{plan['lines'][0]}. Applied: design/pin-plan.json, docs/pin-plan.md, {r.get('schematic', '')}; board updated. "
+                     "Update any pin table the design keeps (docs) from the plan; then breakout and route.")
+
     @reg("region", "Rules for one area of the board, kept by KiCad's DRC and the router: kind keepout (no tracks or "
          "vias: an antenna's clearance, under a crystal), novias (tracks pass, no vias), neck (finer tracks and spacing: "
          "under a dense connector; track and clearance in mm), spacing (more clearance between nets, no pour: high "

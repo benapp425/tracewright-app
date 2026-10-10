@@ -1168,6 +1168,19 @@ def make_app():
         if p.tw.has_pcb():
             b = await asyncio.to_thread(rt.board)
             out["parts"] = await asyncio.to_thread(escape.plan, p.tw, b)
+            from tw import routability
+            try:
+                r = await asyncio.to_thread(routability.estimate, p.tw, b)
+                out["routability"] = {k: r[k] for k in ("verdict", "lines", "fixes")}
+            except Exception as e:
+                out["routability"] = {"verdict": "unknown", "lines": [str(e)[:200]], "fixes": []}
+            try:
+                with open(os.path.join(p.tw.build, "breakout.json")) as f:
+                    bo = json.load(f)
+                out["breakout"] = [{k: x.get(k) for k in ("ref", "kind", "escaped", "signals", "under", "vias", "by_layer")}
+                                   | {"left": len(x.get("left") or [])} for x in bo.get("parts", [])]
+            except (OSError, ValueError):
+                out["breakout"] = None
             have = {(round(v.x, 2), round(v.y, 2)) for v in b.vias}
             for pl in out["parts"]:
                 fp = b.footprints.get(pl["ref"])
@@ -1389,6 +1402,128 @@ def make_app():
         if js is None:
             return jresp({"empty": True})
         return jresp(js)
+
+    @routes.post("/api/projects/{pid}/breakout")
+    async def breakout_post(request):
+        """{make_room?: true}: the dense parts broken out (tw.breakout) -- the parts under each BGA moved off its via
+        spots first, then its vias and escapes, and vias beside fine-pitch parts whose nets change layer -- one undo step."""
+        from tw import breakout
+        from tw.pcb import client
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: break out when it is done, or stop it", 409)
+        body = await request.json()
+
+        def work():
+            with rt.edits.lock:
+                snap = rt.edits.before()
+                rt.mark_app_edit(60)
+                ap = lambda ops: client.apply(rt.p.tw, ops, save=True, live="auto")
+                try:
+                    mr = breakout.make_room(rt.p.reload().tw, apply=True, log=lambda m: None, apply_fn=ap) \
+                        if body.get("make_room", True) else None
+                    rep = breakout.run(rt.p.reload().tw, apply=True, log=lambda m: None, apply_fn=ap)
+                except Exception as e:
+                    rt.edits.failed(snap)
+                    return None, None, str(e)
+                if rep.get("error"):
+                    rt.edits.failed(snap)
+                    return None, None, rep["error"]
+                rt.edits.done(snap, "Break out the dense parts")
+                return mr, rep, None
+        async with rt.edit_lock:
+            mr, rep, e = await asyncio.to_thread(work)
+        if e:
+            return err(str(e)[:300], 422)
+        parts = [{k: x.get(k) for k in ("ref", "kind", "escaped", "signals", "under", "vias", "by_layer")} | {"left": len(x.get("left") or [])}
+                 for x in rep["parts"]]
+        rt.user_changes.append("board (the user, in the app): broke out the dense parts: " + "; ".join(
+            f"{x['ref']} {x['escaped']} out" for x in parts if x.get("escaped") is not None))
+        rt.hub.emit("board.changed", version=-1, source="app")
+        return jresp({"ok": True, "parts": parts, "moved": len((mr or {}).get("moves") or []), "history": rt.edits.state()})
+
+    @routes.get("/api/projects/{pid}/pairs")
+    async def pairs_get(request):
+        """Each differential pair with its halves' lengths, the skew and the budget the checks hold it to."""
+        from tw.route import tune
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_pcb():
+            return jresp({"pairs": []})
+        b = await asyncio.to_thread(rt.board)
+        return jresp({"pairs": await asyncio.to_thread(tune.pairs, rt.p.reload().tw, b)})
+
+    @routes.post("/api/projects/{pid}/tune")
+    async def tune_post(request):
+        """Meanders on the shorter halves (and length groups' short members) to within their budgets: one undo step."""
+        from tw.route import tune
+        from tw.pcb import client
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: tune when it is done, or stop it", 409)
+
+        def work():
+            with rt.edits.lock:
+                snap = rt.edits.before()
+                rt.mark_app_edit(30)
+                try:
+                    r = tune.tune(rt.p.reload().tw, apply=True, log=lambda m: None,
+                                  apply_fn=lambda ops: client.apply(rt.p.tw, ops, save=True, live="auto"))
+                except Exception as e:
+                    rt.edits.failed(snap)
+                    return None, str(e)
+                if r["tuned"]:
+                    rt.edits.done(snap, f"Tune {len(r['tuned'])} net{'s' if len(r['tuned']) != 1 else ''}")
+                else:
+                    rt.edits.failed(snap)
+                return r, None
+        async with rt.edit_lock:
+            r, e = await asyncio.to_thread(work)
+        if e:
+            return err(e[:300], 422)
+        if r["tuned"]:
+            rt.user_changes.append("board (the user, in the app): tuned " + ", ".join(x["net"].rsplit("/", 1)[-1] for x in r["tuned"]))
+            rt.hub.emit("board.changed", version=-1, source="app")
+        return jresp({"ok": True, "tuned": r["tuned"], "left": r["left"], "history": rt.edits.state()})
+
+    @routes.get("/api/projects/{pid}/pins")
+    async def pins_get(request):
+        """The pin plan's proposal (tw.pinplan): free GPIO moved to the connector pins that lie the way they leave the chip."""
+        from tw import pinplan
+        rt = app.rt(request.match_info["pid"])
+        if not rt.p.tw.has_pcb():
+            return err("there is no board yet", 404)
+        plan = await asyncio.to_thread(pinplan.propose, rt.p.reload().tw, None, lambda m: None)
+        rt.pin_plan = plan
+        return jresp({k: plan[k] for k in ("moves", "groups", "crossings_before", "crossings_after", "lines")})
+
+    @routes.post("/api/projects/{pid}/pins")
+    async def pins_post(request):
+        """Apply the proposed pin plan: design/pin-plan.json, the schematic generated again, the board updated."""
+        from tw import pinplan
+        pid = request.match_info["pid"]
+        rt = app.rt(pid)
+        if app.agent_busy(pid):
+            return err("Claude is working on the design: apply the pin plan when it is done, or stop it", 409)
+        plan = getattr(rt, "pin_plan", None) or await asyncio.to_thread(pinplan.propose, rt.p.reload().tw, None, lambda m: None)
+        if not plan["moves"]:
+            return jresp({"ok": True, "moves": 0})
+        rt.mark_app_edit(600)
+        r = await asyncio.to_thread(pinplan.apply, rt.p.reload().tw, plan)
+        rt.mark_app_edit(4)
+        if r.get("error"):
+            return err(r["error"][:400], 422)
+        rt.pin_plan = None
+        rt.user_changes.append(f"pin plan (the user, in the app): applied {len(plan['moves'])} pin moves "
+                               "(design/pin-plan.json, docs/pin-plan.md); the schematic was generated again")
+        rt.hub.emit("schematic.changed", source="tracewright", files=[])
+        rt.hub.emit("board.changed", version=-1, source="app")
+        return jresp({"ok": True, "moves": len(plan["moves"]), "schematic": r.get("schematic")})
 
     @routes.get("/api/projects/{pid}/routing")
     async def routing_get(request):

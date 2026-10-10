@@ -187,7 +187,7 @@ def _keep_moves(old, new):
         was = before.get(o.get("id"))
         if not was:
             continue
-        for k in ("x", "y", "edge", "at", "rot"):
+        for k in ("x", "y", "edge", "at", "rot", "side"):
             o.pop(k, None)
             if k in was:
                 o[k] = was[k]
@@ -199,8 +199,9 @@ def _keep_moves(old, new):
 
 
 def move(root, what):
-    """The user dragged something on the floorplan: {id, x, y} (a block or hole), {id, edge, at} (a connector) or
-    {board: {w, h}} (the outline's corner). Returns (canvas, a line for Claude's next turn)."""
+    """The user dragged something on the floorplan: {id, x, y} (a block or hole), {id, edge, at} (a connector),
+    {id, side: top | bottom} (a block or connector onto the other side) or {board: {w, h}} (the outline's corner).
+    Returns (canvas, a line for Claude's next turn)."""
     with _lock:
         d = load(root)
         fp = d.get("floorplan")
@@ -227,6 +228,14 @@ def move(root, what):
                 raise ValueError(f"no {iid} on the floorplan")
             W, H = fp["board"]["w"], fp["board"]["h"]
             name = o.get("ref") or o.get("label") or o["id"]
+            if what.get("side") in ("top", "bottom") and len(what) == 2 and "d" not in o and "kind" in o:
+                o["side"] = what["side"]                                # {id, side}: onto the other side of the board
+                o["moved"] = True
+                fp.pop("solved", None)
+                d["floorplan"] = fp
+                d["updated"] = time.time()
+                _save(root, {k: v for k, v in d.items() if v is not None})
+                return d, f"floorplan: the user put {name} on the {what['side']} side of the board"
             if "locked" in what and len(what) == 2:                  # {id, locked}: a lock, nothing moves
                 o["locked"] = bool(what["locked"])
                 d["floorplan"] = fp

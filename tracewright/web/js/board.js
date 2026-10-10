@@ -1073,8 +1073,9 @@ export class BoardView {
     this.routingLoading = true;
     const P = `/api/projects/${encodeURIComponent(this.pid)}`;
     try {
-      const [r, e, g] = await Promise.all([api(`${P}/routing`), api(`${P}/escape`).catch(() => null), api(`${P}/regions`).catch(() => null)]);
-      this.routing = { ...r, escape: e, regions: g ? g.regions : [], regionKinds: g ? g.kinds : {} };
+      const [r, e, g, pr] = await Promise.all([api(`${P}/routing`), api(`${P}/escape`).catch(() => null), api(`${P}/regions`).catch(() => null),
+        api(`${P}/pairs`).catch(() => null)]);
+      this.routing = { ...r, escape: e, regions: g ? g.regions : [], regionKinds: g ? g.kinds : {}, pairs: pr ? pr.pairs : [] };
     } catch (e) { this.routing = { error: e.message }; }
     this.routingLoading = false;
     if (this.panel === "routing") this.renderLayers();
@@ -1093,6 +1094,7 @@ export class BoardView {
       h("button.tbtn", { "data-tip": "Read again", onclick: () => { this.routing = null; this.loadRouting(true); } }, icon("refresh-cw", 12))));
     if (cur) box.appendChild(h("div.rt-why", cur.why));
     this.densePanel(box, R.escape);
+    this.pairsPanel(box, R.pairs || []);
     const GROUPS = [["hand", "By hand", "pencil", "The router leaves these for you; each keeps the rules under it"],
       ["guided", "With rules", "route", "Routed first, keeping their rules"], ["auto", "Auto", "zap", "The router takes these as it finds them"]];
     this.rtOpen = this.rtOpen || {};
@@ -1111,13 +1113,35 @@ export class BoardView {
     this.regionsPanel(box, R.regions || []);
   }
 
-  // dense parts: how each gets its pins out, the fan-out, and HDI (off unless the user turns it on)
+  // dense parts: can the board be routed, how each part gets its pins out (breakout, the pin plan), and HDI (off unless
+  // the user turns it on)
   densePanel(box, E) {
     if (!E) return;
     const parts = (E.parts || []).filter((p) => p.kind === "array" || !p.ok);
     const H = E.hdi || {};
+    const RB = E.routability;
+    if (RB && RB.verdict && RB.verdict !== "unknown") {
+      const tag = { fine: ["ok", "Routable"], tight: ["warn", "Tight"], impossible: ["bad", "Not routable as it is"] }[RB.verdict] || ["", RB.verdict];
+      box.appendChild(h("div.dn-rb", { "data-verdict": RB.verdict },
+        h("div.rt-line", icon("gauge", 12), h("b.grow", "Room to route"), h("span.dn-tag." + tag[0], tag[1])),
+        h("div.dn-lines", (RB.lines || []).map((l) => h("div", l[0].toUpperCase() + l.slice(1)))),
+        (RB.fixes || []).length ? h("div.dn-lines.dn-fix", RB.fixes.map((l) => h("div", "Fix: " + l))) : null));
+    }
     if (!parts.length && !H.on) return;
-    box.appendChild(h("div.pl-h", icon("waypoints", 12), "Fan-out"));
+    box.appendChild(h("div.pl-h", icon("waypoints", 12), "Dense parts"));
+    const BO = E.breakout || [];
+    if (parts.some((p) => p.kind === "array")) {
+      const did = BO.filter((x) => x.kind === "array");
+      box.appendChild(h("div.dn-bo",
+        did.length ? h("div.dn-lines", did.map((x) => h("div", `${x.ref}: ${x.escaped} of ${(x.signals || 0) - (x.under || 0)} signal balls out` +
+          (x.by_layer ? ` (${Object.entries(x.by_layer).map(([l, n]) => `${l.replace(".Cu", "")} ${n}`).join(", ")})` : "") +
+          (x.left ? `, ${x.left} with nowhere to go` : "")))) : null,
+        h("div.pl-add",
+          h("button.btn.sm" + (did.length ? "" : ".primary"), { "data-tip": "Move the parts under each BGA off its via spots, put a via on every ball that needs one, and bring each signal ball out to the edge of its ball field on its layer. The router then starts from those ends.",
+            onclick: (e) => this.breakOut(e.currentTarget) }, did.length ? "Break out again" : "Break out"),
+          h("button.btn.sm", { "data-tip": "On a breakout board: the free GPIO on the connector pins that lie the way they leave the chip, so they run side by side",
+            onclick: (e) => this.pinPlan(e.currentTarget) }, "Pin plan…"))));
+    }
     for (const p of parts) {
       const state = !p.method ? ["bad", "Needs HDI"] : p.need > p.have ? ["warn", `Needs ${p.need} signal layers`] : ["ok", p.method === "top" ? "Escapes on top" : "Fits"];
       const done = p.vias_under > 0;
@@ -1135,6 +1159,62 @@ export class BoardView {
           : h("button.btn.sm", { onclick: () => this.turnOnHdi() }, "Turn on…")),
       H.on ? h("div.dn-opts", [["via_in_pad", "Vias in pads"], ["microvias", "Microvias"], ["blind", "Blind vias"]].map(([k, t]) =>
         h("label.dn-opt", h("input", { type: "checkbox", checked: !!H[k], onchange: (e) => this.setHdi({ [k]: e.target.checked }) }), t))) : null));
+  }
+
+  // pairs: each one's halves, the skew and the budget the checks hold it to; Tune brings the ones over it within
+  pairsPanel(box, pairs) {
+    if (!pairs.length) return;
+    const over = pairs.filter((p) => p.ok === false).length;
+    box.appendChild(h("div.pl-h", icon("activity", 12), h("span.grow", `Pairs (${pairs.length})`),
+      over ? h("button.btn.sm", { "data-tip": "Meanders on the shorter halves, to within each pair's budget", onclick: (e) => this.tuneAll(e.currentTarget) }, `Tune ${over}`) : null));
+    for (const p of pairs.slice(0, 40)) {
+      const nm = `${p.p.split("/").pop()} / ${p.n.split("/").pop()}`;
+      const st = p.ok == null ? ["", "not routed"] : p.ok ? ["ok", `${p.skew.toFixed(2)} of ${+p.budget.toFixed(3)} mm`] : ["bad", `${p.skew.toFixed(2)} of ${+p.budget.toFixed(3)} mm`];
+      box.appendChild(h("div.lnrow.pr-row", { "data-tip": `${p.length_p.toFixed(2)} mm and ${p.length_n.toFixed(2)} mm; allowed ${+p.budget.toFixed(3)} mm (${p.why})`,
+        onclick: () => this.setSpot(p.p, true) }, h("span.grow.ellipsis", nm), h("span.pr-st." + (st[0] || "na"), st[1])));
+    }
+  }
+
+  async tuneAll(b) {
+    if (b) b.disabled = true;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/tune`, { body: {} });
+      toast(r.tuned.length ? `Tuned ${r.tuned.map((x) => x.net.split("/").pop()).join(", ")}` + (r.left.length ? `; ${r.left.length} without room` : "")
+        : (r.left[0] || {}).why || "Nothing to tune", r.tuned.length ? "ok" : "info", 6000);
+    } catch (e) { toast(e.message, "error"); }
+    if (b) b.disabled = false;
+    this.routing = null; this.loadRouting(true);
+  }
+
+  async breakOut(b) {
+    if (b) b.disabled = true;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/breakout`, { body: { make_room: true } });
+      const a = (r.parts || []).filter((x) => x.kind === "array");
+      toast(a.map((x) => `${x.ref}: ${x.escaped} of ${(x.signals || 0) - (x.under || 0)} out`).join("; ") + (r.moved ? `; ${r.moved} parts under it moved` : ""), "ok", 6000);
+    } catch (e) { toast(e.message, "error"); }
+    if (b) b.disabled = false;
+    this.routing = null; this.loadRouting(true);
+  }
+
+  // the pin plan: the proposal, then (if the user agrees) the schematic drawn again with it
+  async pinPlan(b) {
+    if (b) b.disabled = true;
+    let pl;
+    try { pl = await api(`/api/projects/${encodeURIComponent(this.pid)}/pins`); }
+    catch (e) { toast(e.message, "error"); if (b) b.disabled = false; return; }
+    if (b) b.disabled = false;
+    if (!pl.moves.length) { toast(pl.lines[0] || "Nothing to move", "info", 5000); return; }
+    const rows = pl.moves.slice(0, 60).map((m) => `${m.net.split("/").pop()}: ${m.ref} pin ${m.from} → ${m.to}`);
+    const ok = await confirmDialog({ title: "Apply the pin plan?", ok: "Apply",
+      text: `${pl.lines[0]}.\n\n${rows.join("\n")}${pl.moves.length > 60 ? `\n… and ${pl.moves.length - 60} more` : ""}\n\nThis changes the schematic and the connector pin map (docs/pin-plan.md lists every move).` });
+    if (!ok) return;
+    toast("Drawing the schematic with the pin plan…", "info", 4000);
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(this.pid)}/pins`, { body: {} });
+      toast(`${r.moves} pins moved. ${r.schematic || ""}`, "ok", 6000);
+    } catch (e) { toast(e.message, "error"); }
+    this.routing = null; this.loadRouting(true);
   }
 
   async turnOnHdi() {

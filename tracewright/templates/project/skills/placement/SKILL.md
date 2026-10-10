@@ -23,7 +23,8 @@ connectors at the edge, constraints kept, hot parts apart): read it after each s
    floorplan from a guided start (`./tw floorplan`), `./tw floorplan apply` does this and step 3's positions:
    the outline, each block's area on Dwgs.User, the connectors and holes where the user agreed or dragged them.
 3. Connectors on the edges where their cables go, facing out (check the footprint's "PCB edge" mark). Place
-   each block's parts inside its floorplan area; `placement.floorplan` checks connectors and holes against it.
+   each block's parts inside its floorplan area, on the side the floorplan gives it (a block or connector "on the
+   bottom side" goes on B: `side: B` in `place`); `placement.floorplan` checks connectors and holes against it.
 4. The processor / main IC, then power stages: switcher, inductor and input capacitors in the tightest loop;
    regulator input and output capacitors at their pins.
 5. Decoupling capacitors at the supply pins they serve, with a short ground return; on the same side, except under a

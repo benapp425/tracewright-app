@@ -2356,6 +2356,11 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .kicadsplit .kicadmore:hover { background: var(--accent-soft); }
 /* floorplan: Solve, its caption, leader lines to moved names (floorplan.js) */
 .fp-solve { position: absolute; top: 4px; right: 4px; z-index: 2; }
+.fp-sides { position: absolute; top: 4px; left: 4px; z-index: 2; display: flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 2px; }
+.fp-side { border: 0; background: none; color: var(--text-3); font-size: 11.5px; padding: 2px 8px; border-radius: 5px; cursor: pointer; }
+.fp-side:hover { color: var(--text); } .fp-side.on { background: var(--surface-3); color: var(--text); font-weight: 600; }
+.fp-item.bottom rect { stroke-dasharray: 4 3; fill-opacity: .55; }
+.fp-item.off { opacity: .28; pointer-events: none; }
 .fp-solved { font-size: 11.5px; color: var(--text-3); text-align: center; margin: 2px 12px 6px; line-height: 1.45; }
 .fp-lead { stroke: var(--text-4); stroke-width: 1; stroke-dasharray: 2 2; }
 /* guided start: what cannot work as set, or is tight (guided.js feasCard; feasible.py) */
@@ -2429,6 +2434,10 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .dn-tag { font-size: 11px; padding: 1px 7px; border-radius: 5px; background: var(--surface-3); color: var(--text-2); }
 .dn-tag.ok { color: var(--ok); } .dn-tag.warn { color: var(--warn); } .dn-tag.bad { color: var(--err); }
 .dn-done { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--text-2); } .dn-done svg.ic { color: var(--ok); }
+.dn-rb { margin: 4px 4px 8px; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, .04); }
+.dn-rb .dn-lines div, .dn-bo .dn-lines div { font-size: 11.5px; }
+.dn-fix { color: var(--warn); }
+.dn-bo { margin: 2px 4px 8px; }
 .dn-hdi { margin: 2px 8px 8px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line-2); font-size: 12px; }
 .dn-opts { display: flex; flex-wrap: wrap; gap: 10px; padding: 6px 0 0 18px; }
 .dn-opt { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--text-2); cursor: pointer; }
@@ -2490,3 +2499,4 @@ body > .app, #app { animation: appin .4s var(--ease) both; }
 .guide-row .gi { color: var(--accent); padding-top: 2px; } .guide-row b { font-size: 13.5px; } .guide-row .small { color: var(--text-2); line-height: 1.45; margin-top: 2px; }
 .guide-tips { margin-top: 12px; font-size: 13px; } .guide-tips ul { margin: 6px 0 0; padding-left: 18px; color: var(--text-2); line-height: 1.55; }
 .sic.warn svg.ic { color: var(--warn); }
+.pr-row { cursor: pointer; } .pr-st { font-size: 11px; font-family: var(--mono); } .pr-st.ok { color: var(--ok); } .pr-st.bad { color: var(--err); } .pr-st.na { color: var(--hud-muted); }

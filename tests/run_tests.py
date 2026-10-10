@@ -3695,6 +3695,13 @@ def setup_says_when_a_pick_cannot_work():
     assert side and side["level"] == "tight" and "both sides" in side["fix"], side
     del p.cfg["constraints"]["assembly_sides"]
     p.save()
+    for layers, tight in ((8, True), (10, False)):                     # enough layers, but every signal layer taken?
+        p.cfg["constraints"]["layers"] = layers
+        p.save()
+        m = {i["key"]: i for i in feasible.check(p.root)}.get("bga-margin:MIMXRT1176DVMAA")
+        assert bool(m) == tight and (not m or (m["level"] == "tight" and f"{layers + 2} layers" in m["fix"])), (layers, m)
+    p.cfg["constraints"]["layers"] = 2
+    p.save()
 
     async def go():
         webapp = make_app()
@@ -3971,6 +3978,104 @@ def twelve_layers_hdi_and_bga_fanout():
     p.save_cfg()
     res = runner.run_all(p, only=["hdi.vias"], offline=True, write=False)
     assert any(x["severity"] == "error" and "HDI is off" in x["message"] for x in res["checks"][0]["findings"]), res["checks"][0]["findings"]
+
+
+def _dense_board(name, layers=6):
+    """A 0.8 mm 13 x 13 BGA (U9) on top whose signals (on its outer, third and fifth rings) go to two 0.5 mm 2 x 20
+    board-to-board connectors on the bottom below it (J8, J9), on `layers` copper layers; its other balls GND and +3V3."""
+    import re
+    from tw import stackup
+    from tw.pcb import client
+    from tw.board import Board
+    p = fixture_copy(name)
+    assert client.apply(p, [{"op": "outline", "rect": [100, 100, 195, 145]}], live=False)["ok"]
+    plan, _ = stackup.validate({"layers": layers}, {x: 1 for x in Board.load(p.pcb).nets})
+    p.cfg["stackup"] = plan
+    p.save_cfg()
+    assert stackup.apply(p, plan, live=False)["ok"]
+    root = env.share_dir("footprints")
+    bga, conn = "BGA-169_11.0x11.0mm_Layout13x13_P0.8mm_Ball0.5mm_Pad0.4mm_NSMD", "Molex_SlimStack_501920-4001_2x20_P0.50mm_Vertical"
+    txt = open(os.path.join(root, "Package_BGA.pretty", bga + ".kicad_mod")).read()
+    pads = re.findall(r'\(pad "([A-Z]+\d+)" smd \w+\s*\(at ([-\d.]+) ([-\d.]+)', txt)
+    xs, ys = sorted({float(x) for _, x, _ in pads}), sorted({float(y) for _, _, y in pads})
+    nets, sig = {}, []
+    for ball, x, y in pads:
+        r, c = ys.index(float(y)), xs.index(float(x))
+        ring = min(r, c, len(ys) - 1 - r, len(xs) - 1 - c)
+        if ring in (0, 2, 4) and (r + c) % 3:
+            nets[ball] = f"SIG_{ball}"
+            sig.append((float(x), float(y), ball))
+        else:
+            nets[ball] = "GND" if (r + c) % 2 == 0 else "+3V3"
+    ctxt = open(os.path.join(root, "Connector_Molex.pretty", conn + ".kicad_mod")).read()
+    cpins = sorted({int(n) for n in re.findall(r'\(pad "(\d+)" smd', ctxt)})
+    sig.sort()                                                   # left half of the balls to J8, right half to J9
+    half = len(sig) // 2
+    jn = {"J8": {}, "J9": {}}
+    for k, (x, y, ball) in enumerate(sig):
+        ref, i = ("J8", k) if k < half else ("J9", k - half)
+        jn[ref][str(cpins[i])] = f"SIG_{ball}"
+    ops = [{"op": "footprint", "dir": os.path.join(root, "Package_BGA.pretty"), "name": bga, "ref": "U9", "x": 172, "y": 122, "nets": nets},
+           {"op": "footprint", "dir": os.path.join(root, "Connector_Molex.pretty"), "name": conn, "ref": "J8", "x": 163, "y": 137,
+            "side": "B", "nets": jn["J8"]},
+           {"op": "footprint", "dir": os.path.join(root, "Connector_Molex.pretty"), "name": conn, "ref": "J9", "x": 181, "y": 137,
+            "side": "B", "nets": jn["J9"]}]
+    res = client.apply(p, ops, live=False)
+    assert res["ok"], res
+    return p, len(sig)
+
+
+@test(needs=("kicad", "kpy"))
+def dense_board_breakout_and_route():
+    """A dense board the way a person starts it: the routability read (escapes against layers, crowded lines, demand),
+    the BGA broken out (a dog-bone via for each ball that needs one, every signal ball's escape out to the edge of the
+    ball field on its layer, the outer rings on top and the inner ones on the layers below), vias beside the fine-pitch
+    connectors on the bottom whose nets change layer, then the router taking each net up at its port: every net routed,
+    unused escapes taken off, and KiCad's DRC clean with nothing left unconnected."""
+    import json as _json
+    from tw import breakout, routability, kicad
+    from tw.route import driver
+    from tw.board import Board
+    p, n_sig = _dense_board("dense6")
+    r = routability.estimate(p)
+    assert r["verdict"] in ("fine", "tight") and r["escapes"] and r["escapes"][0]["ref"] == "U9", r
+    rep = breakout.run(p, log=lambda m: None)
+    u9 = next(x for x in rep["parts"] if x["ref"] == "U9")
+    assert u9["escaped"] == n_sig and not u9["left"], (u9["escaped"], n_sig, u9["left"][:5])
+    assert u9["by_layer"].get("F.Cu") and len(u9["by_layer"]) >= 2, u9["by_layer"]       # outer rings on top, inner ones below
+    fields = {x["ref"]: x for x in rep["parts"] if x["kind"] == "fine-pitch"}
+    assert set(fields) >= {"J8", "J9"} and all(fields[j]["vias"] >= 1 for j in ("J8", "J9")), fields.keys()
+    assert _json.load(open(os.path.join(p.build, "breakout.json")))["parts"], "no ports for the router"
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+    bad = [v["description"] for v in d["violations"] if v["type"] not in ("via_dangling", "track_dangling")]
+    assert not bad, bad[:4]
+    res = driver.route(p, live=False, log=lambda m: None)
+    s_ = res["summary"]
+    assert not s_["failed"], list(s_["failed"])[:8]
+    d = kicad.drc(p.pcb, os.path.join(p.build, "drc.json"))
+    bad = [v["description"] for v in d["violations"] if v["type"] not in ("via_dangling",)]
+    assert not bad and not d["unconnected_items"], (bad[:4], len(d["unconnected_items"]))
+    b = Board.load(p.pcb)
+    assert sum(1 for t in b.tracks if t.net.startswith("SIG_")) > n_sig
+
+
+@test()
+def length_tuning_and_pin_plan_rules():
+    """The router's meander adds exactly the length asked for (as the board editor's does) and reports what is missing
+    when the run is too short; the pin plan moves only nets named after the chip pin they bring out."""
+    from tw.route import tune
+    from tw import pinplan, geom
+    for extra in (0.2, 1.0, 3.0, 7.5):
+        pts, added, short = tune.serpentine((0, 0), (20, 0), extra, 1.0, 2.0)
+        assert abs(added - extra) < 1e-6 and not short, (extra, added)
+        assert all(geom.octilinear(a, b) for a, b in zip(pts, pts[1:])), "a bump off 45-degree steps"
+    pts, added, short = tune.serpentine((0, 0), (6, 0), 10, 1.0, 1.5)
+    assert short > 4 and abs(added + short - 10) < 1e-6, (added, short)
+    assert tune.serpentine((0, 0), (2, 0), 1, 1.0, 1.0) is None
+    assert pinplan._named_after("/GPIO_Right/GPIO_AD_18", "GPIO_AD_18")
+    assert pinplan._named_after("/GPIO_SNVS_02_1V8", "GPIO_SNVS_02")
+    assert not pinplan._named_after("/UART1_TX", "GPIO_AD_24") and not pinplan._named_after("USB2_D_P", "USB2_DP")
+
 
 
 @test(needs=("kicad", "kpy"))
@@ -5338,6 +5443,66 @@ print(finish(env.project({root!r}))["connections"])
     assert 'hierarchical_label "{SENSE_LINE}"' in chip and '(label "SENSE_LINE_00"' in chip and '(bus_alias "SENSE_LINE"' in chip, chip[-600:]
     header = open(os.path.join(hw, "header.kicad_sch"), encoding="utf-8").read()
     assert '(label "GND"' in header and '(global_label "GND"' not in header, header.count('(global_label "GND"')
+
+
+@test(needs=("kicad",))
+def pin_plan_redraws_the_schematic():
+    """A pin plan (design/pin-plan.json, as tw.pinplan writes it) moves nets between a connector's pins: the generator
+    draws each net on its planned pin whatever the script says, KiCad's netlist has them there, the connections are
+    as asked, and the connector pinout written from the netlist shows it."""
+    import subprocess
+    from tw import pinout
+    from tw.netlist import Netlist
+    root = os.path.join(TMP, "pinplan")
+    os.makedirs(os.path.join(root, "design"))
+    hw = os.path.join(root, "hardware", "pp")
+    json.dump({"name": "PP", "kicad_project": "hardware/pp/pp.kicad_pro"}, open(os.path.join(root, "tracewright.json"), "w"))
+    json.dump({"swaps": {"J1": {"1": "3", "3": "1"}}}, open(os.path.join(root, "design", "pin-plan.json"), "w"))
+    script = f"""import sys
+sys.path.insert(0, {os.path.join(ROOT, "tracewright", "toolkit")!r})
+from tw import env
+from tw.sch import Design, finish, Part
+from tw.sch.auto import Page
+from tw.sch.kisch import make_ic
+from tw.examples.demo_board import catalog
+cat = catalog()
+cat["CHIP"] = Part(make_ic("CHIP", [{{"right": [(str(i + 1), f"GPIO_{{i}}", "bidirectional") for i in range(4)],
+                                     "left": [("5", "VDD", "power_in"), ("6", "GND", "power_in")], "width": 12.7}}], ref="U", value="CHIP"),
+                   "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "CHIP", "CHIP", "x", "")
+cat["HDR4"] = Part(make_ic("HDR4", [{{"left": [(str(i + 1), f"P{{i + 1}}", "passive") for i in range(4)], "width": 7.62}}], ref="J", value="HDR4"),
+                   "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", "HDR4", "HDR4", "x", "")
+d = Design("pp", title="Pin plan", company="t")
+top = d.root("Board", paper="A4")
+pg = Page(d, top, base=1, catalog=cat)
+g = pg.group("CHIP")
+u = g.part("CHIP", "U", ref="U1")
+g.power(u, "5", "+3V3")
+g.power(u, "6", "GND")
+for i in range(4):
+    g.net(u, str(i + 1), f"GPIO_{{i}}")
+g = pg.group("HEADER")
+j = g.part("HDR4", "J", ref="J1")
+for i in range(4):
+    g.net(j, str(i + 1), f"GPIO_{{i}}")
+pg.layout()
+d.write({hw!r})
+print(finish(env.project({root!r}))["connections"])
+"""
+    open(os.path.join(root, "design", "schematic.py"), "w").write(script)
+    os.makedirs(hw, exist_ok=True)
+    open(os.path.join(hw, "pp.kicad_pro"), "w").write("{}")
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tracewright", "toolkit", "tw", "cli.py"), "schematic"], cwd=root,
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0 and "Schematic done" in r.stdout, (r.stdout[-600:], r.stderr[-1200:])
+    rep = json.load(open(os.path.join(root, "build", "schematic-report.json")))
+    assert rep["connections"] == "as asked", rep.get("connections")
+    p = env.Project(root)
+    nl = Netlist.load(os.path.join(p.build, f"{p.stem}.net"))
+    assert nl.net_of("J1", "1") == "GPIO_2" and nl.net_of("J1", "3") == "GPIO_0" and nl.net_of("J1", "2") == "GPIO_1", \
+        [nl.net_of("J1", str(k)) for k in range(1, 5)]
+    pinout.write(p)
+    doc = open(os.path.join(root, "docs", "connectors.md")).read()
+    assert "| 1 | GPIO_2 |" in doc and "| 3 | GPIO_0 |" in doc, doc[:400]
 
 
 @test(needs=("kicad",))

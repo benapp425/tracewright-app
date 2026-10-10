@@ -206,6 +206,42 @@ def plan(project, board=None, refs=None):
     return out
 
 
+def area_ops(project, b, ref, rules):
+    """What a part's fan-out needs round it: the "TW neck" rule area where DRC holds the escape to the neck-down
+    clearance (redrawn when the routing layers changed), the DRC rule itself, and on each inner plane under the part a
+    patch of the plane's net at that clearance -- at the plane's usual clearance the via field cuts it into islands
+    and the balls' own vias lose it; the patch keeps the webs between the vias and joins the plane it lies on."""
+    from .route.driver import fine_pitch_areas
+    from .pcb import rules as dru
+    from . import stackup
+    cfg = getattr(project, "cfg", None) or {}
+    routing = stackup.routing_layers(stackup.get(cfg), b.copper)
+    area = next((r for rf, r in fine_pitch_areas(b, routing=routing) if rf == ref), None)
+    if not area:
+        return []
+    ops = []
+    x0, y0, x1, y1 = area
+    if not any(z.is_rule_area and z.name == f"TW neck {ref}" and set(z.layers) == set(b.copper) for z in b.zones):
+        ops.append({"op": "rule_area", "name": f"TW neck {ref}", "layers": list(b.copper),       # planes too: their fill
+                    "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], "no_tracks": False, "no_vias": False,
+                    "no_pour": False, "no_footprints": False})
+    dru.ensure_rules(project, dict([dru.neck_rule(rules["s"])]), replace=True)
+    poly = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    for z in b.zones:
+        if z.is_rule_area or not z.net or z.name.startswith("TW patch"):
+            continue
+        for l in z.layers:
+            if l in ("F.Cu", "B.Cu") or not z.outline:
+                continue
+            zb = geom.bbox([q for pl in z.outline for q in pl])
+            if zb[0] <= x0 and zb[1] <= y0 and zb[2] >= x1 and zb[3] >= y1 and \
+                    not any(o.name == f"TW patch {ref} {l}" for o in b.zones):
+                ops.append({"op": "zone", "net": z.net, "layers": [l], "polygon": poly, "name": f"TW patch {ref} {l}",
+                            "priority": (z.priority or 0) + 1, "clearance": rules["s"], "min_width": min(rules["w"], 0.1),
+                            "connect": "solid"})
+    return ops
+
+
 def fanout(project, ref, method=None, board=None):
     """(ops, summary): a via for each ball that needs one -- signal balls past the rings the top layer takes out, and every
     power and ground ball (to its plane) -- dog-bone (a short stub to a via between four balls, pointing away from the
@@ -282,34 +318,7 @@ def fanout(project, ref, method=None, board=None):
         if method == "microvia":                      # microvias: a DRC rule of their own (KiCad: board minimums else)
             from .pcb import rules as dru_
             dru_.ensure_rules(project, hdimod.dru_rules(cfg), replace=True)
-    ops = []
-    from .route.driver import fine_pitch_areas
-    from .pcb import rules as dru
-    from . import stackup
-    routing = stackup.routing_layers(stackup.get(cfg), b.copper)
-    area = next((r for rf, r in fine_pitch_areas(b, routing=routing) if rf == ref), None)
-    if area and (vias or stubs):                     # DRC holds the escape to the neck-down clearance in here
-        x0, y0, x1, y1 = area
-        if not any(z.is_rule_area and z.name == f"TW neck {ref}" for z in b.zones):
-            ops.append({"op": "rule_area", "name": f"TW neck {ref}", "layers": list(routing),
-                        "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], "no_tracks": False, "no_vias": False,
-                        "no_pour": False, "no_footprints": False})
-        dru.ensure_rules(project, dict([dru.neck_rule(rules["s"])]), replace=True)
-        # the inner planes under the part: at their usual clearance the via field cuts them into islands; a patch of
-        # the same net at the neck-down clearance keeps the webs between the vias (it joins the plane it lies on)
-        poly = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-        for z in b.zones:
-            if z.is_rule_area or not z.net or z.name.startswith("TW patch"):
-                continue
-            for l in z.layers:
-                if l in ("F.Cu", "B.Cu") or not z.outline:
-                    continue
-                zb = geom.bbox([q for pl in z.outline for q in pl])
-                if zb[0] <= x0 and zb[1] <= y0 and zb[2] >= x1 and zb[3] >= y1 and \
-                        not any(o.name == f"TW patch {ref} {l}" for o in b.zones):
-                    ops.append({"op": "zone", "net": z.net, "layers": [l], "polygon": poly, "name": f"TW patch {ref} {l}",
-                                "priority": (z.priority or 0) + 1, "clearance": rules["s"], "min_width": min(rules["w"], 0.1),
-                                "connect": "solid"})
+    ops = area_ops(project, b, ref, rules) if (vias or stubs) else []
     if stubs:
         ops.append({"op": "tracks", "items": stubs})
     if vias:

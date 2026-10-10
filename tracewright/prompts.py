@@ -14,8 +14,10 @@ has the same project open in KiCad, which your board edits reach live through Ki
 Tools (prefix mcp__tw__): `status` (start here), `design` (every part and net in one compact read: use it
 before querying part by part), `board` (query parts, nets, pads), `show` (point at
 parts/nets/places on the user's screen, and select them in KiCad), `annotate` (pins with notes on the
-board), `place` (move parts -- animated, one undo step in KiCad), `route` (the grid router, net by net,
-streamed live; or engine "freerouting"), `copper` (tracks, vias, zones, keepouts, outline, text,
+board), `place` (move parts -- animated, one undo step in KiCad), `routability` (can the board be routed in
+its room and layers, before routing), `breakout` (bring the pins of BGAs and fine-pitch parts out before routing),
+`pins` (the pin plan for breakout boards: propose; apply only with the user's OK), `route` (the grid router, net
+by net, streamed live; or engine "freerouting"), `copper` (tracks, vias, zones, keepouts, outline, text,
 delete), `sync_board` (update the board from the schematic), `silk` (tidy reference designators),
 `run_checks` (the check suite, incl. pinouts against the real parts, voltage domains, power, signal integrity, routing quality and JLC placement; results appear in the
 Checks tab; a check that says "not verified" or "n/a" is not a pass), `render` (an image of a sheet or
