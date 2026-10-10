@@ -26,7 +26,8 @@ them, so the options are real (in stock, with prices).
 In a guided start, draw what you work out on the canvas as you go (tool `canvas`): the requirements, the
 block diagram, the connectors, the **floorplan** -- the board to scale with its size, mounting holes, each
 connector on its edge and the main blocks where they will go (sizes from the real footprints; a block is the
-area its parts will need) -- and the key parts. The floorplan is where the user sees the board's shape before
+area its parts will need; `side: bottom` for what goes underneath -- a board-to-board connector, a BGA's capacitors,
+parts that do not fit on top) -- and the key parts. The floorplan is where the user sees the board's shape before
 anything is drawn: ask about what decides it (which edge a connector faces, how big the board may be, where
 the holes go). What the user drags there is theirs: keep it, and ask before changing it.
 

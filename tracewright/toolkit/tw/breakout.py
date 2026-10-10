@@ -23,6 +23,7 @@ import numpy as np
 from . import geom
 
 DPORT = 1.0          # a port this many pitches beyond the outermost ball row: clear of the outer dog-bone vias
+OUT_MAX = 0.4        # an escape's track outside its ball field: no more than its way out to the band and this
 UTIL = 0.6           # the share of a channel's tracks the breakout fills on one layer: the router needs the rest
 
 
@@ -95,6 +96,31 @@ class _Grid:
         if side == "W":
             return (self.X0 - e - depth, self.Y0 - P, self.X0 - e, self.Y1 + P)
         return (self.X1 + e, self.Y0 - P, self.X1 + e + depth, self.Y1 + P)
+
+    def way_out(self, side):
+        """The strip from the ball field's edge out to the far side of its port band: an escape leaves the field there and
+        nowhere else (running along outside the field, it would wall in the escapes ending beside it)."""
+        P, e, d = self.P, DPORT * self.P, 0.25
+        if side == "N":
+            return (self.X0 - P, self.Y0 - e - d, self.X1 + P, self.Y0 - P / 2)
+        if side == "S":
+            return (self.X0 - P, self.Y1 + P / 2, self.X1 + P, self.Y1 + e + d)
+        if side == "W":
+            return (self.X0 - e - d, self.Y0 - P, self.X0 - P / 2, self.Y1 + P)
+        return (self.X1 + P / 2, self.Y0 - P, self.X1 + e + d, self.Y1 + P)
+
+    def outside(self, segs):
+        """Length (mm) of an escape's track outside the ball field."""
+        x0, y0, x1, y1 = self.field(0.0)
+        out = 0.0
+        for _, a, b, _ in segs:
+            n = max(1, int(geom.dist(a, b) / 0.05))
+            for k in range(n):
+                t = (k + 0.5) / n
+                x, y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+                if not (x0 <= x <= x1 and y0 <= y <= y1):
+                    out += geom.dist(a, b) / n
+        return out
 
     def field(self, m=0.0):
         P = self.P
@@ -334,7 +360,13 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
                 tg = _cells_in(B, G.band(sd), li, lt)
                 if not tg:
                     continue
-                rec = Re.connect(p.net, prof, src, tg, allow_vias=False, layers=[L], margin=1.2)
+                within = np.zeros((len(B.layers), B.N), dtype=np.uint8)
+                within[li] = (B._rect(*G.field(0.0)) | B._rect(*G.way_out(sd))).ravel()
+                rec = Re.connect(p.net, prof, src, tg, allow_vias=False, layers=[L], margin=1.2, within=within)
+                if rec is not None and G.outside(rec["segments"]) > OUT_MAX + DPORT * P:
+                    Re.routes.remove(rec)           # out, then along the field's edge: it would wall in its neighbours
+                    Re.rebuild()
+                    rec = None
                 if rec is not None:
                     break
             if rec is None:

@@ -45,7 +45,10 @@ def _build(src, so):
     os.makedirs(os.path.dirname(so), exist_ok=True)
     arch = ["-arch", platform.machine()] if sys.platform == "darwin" else []
     try:
-        subprocess.run([cc, "-O3", "-shared", "-fPIC", *arch, "-o", so, src], check=False, capture_output=True, timeout=120)
+        tmp = f"{so}.{os.getpid()}.tmp"           # built aside, then swapped in: a route running on the old copy keeps it
+        subprocess.run([cc, "-O3", "-shared", "-fPIC", *arch, "-o", tmp, src], check=False, capture_output=True, timeout=120)
+        if os.path.exists(tmp):
+            os.replace(tmp, so)
     except (OSError, subprocess.SubprocessError):
         pass
 
@@ -79,10 +82,13 @@ def _lib():
         P8, P32 = (np.ctypeslib.ndpointer(t, flags="C_CONTIGUOUS") for t in (np.uint8, np.int32))
         L.astar.restype = ctypes.c_long
         PF = np.ctypeslib.ndpointer(np.float32, flags="C_CONTIGUOUS")
-        L.astar.argtypes = ([ctypes.c_int] * 3 + [P8, P8, ctypes.c_void_p, P32, ctypes.c_long, P8] + [ctypes.c_int] * 8
+        L.astar.argtypes = ([ctypes.c_int] * 3 + [P8, P8, ctypes.c_void_p, ctypes.c_void_p, P32, ctypes.c_long, P8] + [ctypes.c_int] * 8
                             + [ctypes.c_float] * 3 + [PF, PF, PF] + [ctypes.c_float, ctypes.c_int, ctypes.c_long, P32, ctypes.c_long])
         _LIB = L
     return _LIB
+
+
+PF_VIA = 3.0        # a negotiation's via on a cell another net holds: this many cells' price (it takes every layer)
 
 
 class Profile:
@@ -455,6 +461,7 @@ class Router:
         self.last_status = 0
         self.hist = np.zeros(len(board.layers) * board.N, dtype=np.float32)    # PathFinder history: contested cells
         self.use_hist = False
+        self.pf = None       # a negotiation's prices: {"hist": [layers * N], "pres": cost of a cell another net holds}
 
     # ------------------------------------------------------------------ A*
     def layer_costs(self, fcu_factor=1.0):
@@ -470,8 +477,8 @@ class Router:
         return out
 
     def astar(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, _legal=None, cell_cost=None,
-              margin=None):
-        """C search core: [(layer, idx), ...] source -> target, or None."""
+              margin=None, via_cost_at=None):
+        """C search core: [(layer, idx), ...] source -> target, or None. via_cost_at: [N] extra cost of a via there."""
         if not _lib():
             return self.astar_py(net, prof, sources, targets, fcu_factor, allow_vias, _legal)
         B = self.B; nx = B.nx; N = B.N
@@ -493,8 +500,12 @@ class Router:
         if cell_cost is not None:
             cc = np.ascontiguousarray(cell_cost, dtype=np.float32)
         lc = np.array(self.layer_costs(fcu_factor), dtype=np.float32)
+        vc = None
+        if via_cost_at is not None:
+            vc = np.ascontiguousarray(via_cost_at, dtype=np.float32)
         n = _lib().astar(nx, B.ny, nl, np.ascontiguousarray(lt).ravel(), np.ascontiguousarray(lv),
-                         cc.ctypes.data if cc is not None else None, src, len(src), tmask,
+                         cc.ctypes.data if cc is not None else None, vc.ctypes.data if vc is not None else None,
+                         src, len(src), tmask,
                          min(ti), max(ti), min(tj), max(tj), wi0, wi1, wj0, wj1,
                          self.bend45, self.bend90, self.via_cost, np.ascontiguousarray(lc[:, 0]), np.ascontiguousarray(lc[:, 1]),
                          np.ascontiguousarray(lc[:, 2]), self.hweight, 1 if allow_vias else 0, self.max_expand, out, cap)
@@ -700,11 +711,21 @@ class Router:
         return out
 
     def connect(self, net, prof, sources, targets, fcu_factor=1.0, allow_vias=True, cell_cost=None, margin=None, layers=None,
-                keep_to=None, escape=None):
+                keep_to=None, escape=None, within=None):
         """Route one connection; returns the committed route record or None. layers: only these routing layers;
         escape: [(layer index, cell indices)] kept open off those layers (a pad's way to its via); keep_to: [layers, N]
-        cells the path may be pulled tight over (with its own): a sketch's band."""
+        cells the path may be pulled tight over (with its own): a sketch's band; within: [layers, N] the only cells the path
+        may use (a breakout's escape: its ball field and its side's way out). With self.pf set (a negotiation,
+        driver.GridRoute._pathfinder) other nets' tracks are a price, not a wall: the search runs on the fixed copper,
+        a cell another net's copper holds costs pf["pres"] more, and pf["hist"] keeps what was contested before."""
         lt, lv = self.B.legal(net, prof)
+        held = vca = None
+        if self.pf is not None:
+            lt_s, lv_s = self.B.legal(net, prof, static=True)
+            pc = self.pf["hist"] + np.where((lt_s > lt).ravel(), np.float32(self.pf["pres"]), np.float32(0))
+            cell_cost = pc if cell_cost is None else cell_cost + pc
+            vca = np.where(lv_s > lv, np.float32(self.pf["pres"] * PF_VIA), np.float32(0))   # a via there: every layer
+            held, lt, lv = lt, lt_s, lv_s
         if layers is not None:
             keep = [li for li, l in enumerate(self.B.layers) if l in layers]
             if keep and len(keep) < len(self.B.layers):
@@ -715,20 +736,26 @@ class Router:
                         lt[li] = 0
                 for li, idx in escape or ():
                     lt[li][idx] = full[li][idx]
-        if cell_cost is None and self.use_hist:
+        if within is not None:
+            lt = lt & within
+        if cell_cost is None and self.use_hist and self.pf is None:
             cell_cost = self.hist
         path = self.astar(net, prof, sources, targets, fcu_factor, allow_vias, _legal=(lt, lv), cell_cost=cell_cost,
-                          margin=margin)
+                          margin=margin, via_cost_at=vca)
         if path is None and self.last_status == -2:        # search budget ran out: weighted retry, more budget
             hw, mx = self.hweight, self.max_expand
             self.hweight, self.max_expand = max(1.25, hw), 4 * mx
             try:
                 path = self.astar(net, prof, sources, targets, fcu_factor, allow_vias, _legal=(lt, lv),
-                                  cell_cost=cell_cost, margin=margin)
+                                  cell_cost=cell_cost, margin=margin, via_cost_at=vca)
             finally:
                 self.hweight, self.max_expand = hw, mx
         if path is None:
             return None
+        if held is not None:                             # pulled tight over free cells and its own, not across others
+            lt = held.copy()
+            for l, idx in path:
+                lt[l][idx] = 1
         if keep_to is not None:                          # pulled tight only within the band (and over its own cells)
             lt = lt & keep_to.astype(np.uint8)
             for l, idx in path:

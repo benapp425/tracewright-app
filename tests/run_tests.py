@@ -4035,7 +4035,7 @@ def dense_board_breakout_and_route():
     connectors on the bottom whose nets change layer, then the router taking each net up at its port: every net routed,
     unused escapes taken off, and KiCad's DRC clean with nothing left unconnected."""
     import json as _json
-    from tw import breakout, routability, kicad
+    from tw import breakout, routability, kicad, geom
     from tw.route import driver
     from tw.board import Board
     p, n_sig = _dense_board("dense6")
@@ -4045,6 +4045,18 @@ def dense_board_breakout_and_route():
     u9 = next(x for x in rep["parts"] if x["ref"] == "U9")
     assert u9["escaped"] == n_sig and not u9["left"], (u9["escaped"], n_sig, u9["left"][:5])
     assert u9["by_layer"].get("F.Cu") and len(u9["by_layer"]) >= 2, u9["by_layer"]       # outer rings on top, inner ones below
+    fx0, fy0, fx1, fy1 = u9["field"]
+
+    def outside(segs):                        # an escape leaves its field and stops: none runs along beside it
+        out = 0.0
+        for _l, a, b_, _w in segs:
+            k = max(1, int(geom.dist(a, b_) / 0.05))
+            for i in range(k):
+                x, y = a[0] + (b_[0] - a[0]) * (i + 0.5) / k, a[1] + (b_[1] - a[1]) * (i + 0.5) / k
+                out += 0 if fx0 <= x <= fx1 and fy0 <= y <= fy1 else geom.dist(a, b_) / k
+        return out
+    long_ = [(e["net"], round(outside(e["segments"]), 2)) for e in u9["escapes"] if outside(e["segments"]) > 1.25]
+    assert not long_, long_[:4]
     fields = {x["ref"]: x for x in rep["parts"] if x["kind"] == "fine-pitch"}
     assert set(fields) >= {"J8", "J9"} and all(fields[j]["vias"] >= 1 for j in ("J8", "J9")), fields.keys()
     assert _json.load(open(os.path.join(p.build, "breakout.json")))["parts"], "no ports for the router"

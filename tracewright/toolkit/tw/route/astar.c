@@ -68,6 +68,7 @@ long astar(int nx, int ny, int nl,
            const uint8_t *lt,          /* [nl][N] legal track cells */
            const uint8_t *lv,          /* [N] legal via cells (every layer) */
            const float *cc,            /* [nl][N] extra cell cost or NULL */
+           const float *vc,            /* [N] extra cost of a via at the cell, or NULL */
            const int32_t *src, long nsrc,
            const uint8_t *tmask,       /* [nl][N] target cells */
            int ti0, int ti1, int tj0, int tj1,   /* target bounding box, for the heuristic */
@@ -205,7 +206,7 @@ long astar(int nx, int ny, int nl,
             for (int ol = 0; ol < nl; ol++) {
                 if (ol == l || !lt[ol * N + idx]) continue;
                 long ns = ((long)ol * WN + w) * 9 + 8;
-                float ng = gs + via_cost + (cc ? cc[ol * N + idx] : 0.0f);
+                float ng = gs + via_cost + (cc ? cc[ol * N + idx] : 0.0f) + (vc ? vc[idx] : 0.0f);
                 if (ng < g[ns]) {
                     g[ns] = ng; came[ns] = (uint8_t)(16 + l * 9 + d);
                     hpush(ng + H(idx) + lh[ol], ng, (int32_t)ns);

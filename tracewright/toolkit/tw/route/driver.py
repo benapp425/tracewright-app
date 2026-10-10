@@ -22,6 +22,9 @@ from . import router as R
 
 VIA_COST = 1000.0          # a via costs as much as 10 mm of track: change layer to reach a pin or cross a bus
 CHEAP_VIA = 500.0
+PF_PRES = 4.0              # negotiation: a cell another net holds, at first (a free cell costs 10 a step)
+PF_GROW = 1.5              # ... and each round dearer by this
+PF_HIST = 3.0              # a cell contested in a round, dearer from then on
 V2_FCU_CROSS = 1.10        # F.Cu along y (B.Cu along x already); off by default: longer routes on SMD boards
 PAIR_K = 25.0              # v2: cost a cell for a pair's second half away from its partner's side
 REFINE_MIN_S = 20.0        # v2: the second look's time budget is the routing time, at least this
@@ -619,7 +622,12 @@ class GridRoute:
         rips, failed = {}, {}
         total = len(jobs)
         done, queue = self._on_their_layers(queue, by_net, pairs, total)
-        done = self._negotiate(queue, by_net, pairs, rips, failed, done, total, max_rips)
+        if self.ports and self.v2 and not self.sketch:   # a dense board: pairs and guided nets first, the rest negotiated
+            first = [n for n in queue if n in pairs or self._mode(n)[0] == "guided"]
+            done = self._negotiate(first, by_net, pairs, rips, failed, done, total, max_rips)
+            done = self._pathfinder([n for n in queue if n not in first], by_net, failed, done, total)
+        else:
+            done = self._negotiate(queue, by_net, pairs, rips, failed, done, total, max_rips)
         if failed and self.v2:
             if getattr(self, "budget_s", None):           # the second chance gets a time of its own: half the budget
                 self.t_start, self.budget_s, self.said_budget = time.time(), self.budget_s / 2, False
@@ -775,6 +783,116 @@ class GridRoute:
                 done = max(0, done - 1)
             queue = [net] + who + [q for q in queue if q not in who and q != net]
         return done
+
+    def _pathfinder(self, queue, by_net, failed, done, total, rounds=60):
+        """Negotiated congestion (PathFinder, McMurchie and Ebeling), for boards too full for rip-up one net at a time.
+        Every net is routed on the fixed copper alone: a cell another net's track holds is not a wall but costs more,
+        the price rising each round, and cells contested in earlier rounds stay dearer for good. Round after round the
+        nets that still share copper are routed again, until none do or the time budget is spent; then the nets
+        still sharing are ripped (the most contested first, until the rest are clear) and routed on what is free.
+        The nets already routed (pairs, the escapes' first pass) take part: one in another's way moves too.
+        Returns the routed count; failed gets the nets that found no way."""
+        B, Rt = self.B, self.Rt
+        mine = set(queue) | {n for n in by_net if n not in self.coupled and n not in self.coupled.values()
+                             and any(r["net"] == n and not r.get("fixed") for r in Rt.routes)}
+        # what does not take part (pairs, the planes' escape vias) is fixed copper for the negotiation: a wall, not a price
+        saved_fixed = (B.T0, B.V0)
+        theirs = [r for r in Rt.routes if r["net"] in mine and not r.get("fixed")]
+        Rt.rip(mine)
+        Rt.rebuild()
+        B.snapshot()
+        Rt.routes += theirs
+        Rt.rebuild()
+        Rt.pf = {"hist": np.zeros(len(B.layers) * B.N, dtype=np.float32), "pres": PF_PRES}
+        todo = list(queue)
+        t_round = time.time()
+        try:
+            for rnd in range(rounds):
+                for net in todo:
+                    Rt.rip([net])
+                    Rt.rebuild()
+                    fail = self.route_job(by_net[net], keep_going=True)
+                    if fail is not None:
+                        failed[net] = fail[2]
+                    else:
+                        failed.pop(net, None)
+                conf = self._conflicts(mine)
+                self.log(f"  round {rnd + 1}: {len(conf)} nets share copper, {sum(len(c) for c in conf.values())} cells "
+                         f"({time.time() - t_round:.0f} s)")
+                t_round = time.time()
+                if not conf or self._over_budget():
+                    break
+                for cells in conf.values():
+                    Rt.pf["hist"][np.fromiter((l * B.N + i for l, i in cells), dtype=np.int64)] += PF_HIST
+                Rt.pf["pres"] *= PF_GROW
+                # the most contested last: the others settle first, it then finds what they left
+                todo = sorted(conf, key=lambda n: len(conf[n]))
+        finally:
+            Rt.pf = None
+            B.T0, B.V0 = saved_fixed
+            Rt.rebuild(full=True)
+        conf = self._conflicts(mine)
+        again = []
+        for net in sorted(conf, key=lambda n: -len(conf[n])):    # clear the board: the most contested go first
+            if self._conflicts([net]):
+                Rt.rip([net])
+                Rt.rebuild()
+                again.append(net)
+        if again:
+            self.log(f"  {len(again)} nets still sharing copper: ripped and routed again on what is free")
+        for net in sorted(again, key=lambda n: len(conf[n])):
+            fail = self.route_job(by_net[net])
+            if fail is not None:
+                Rt.rip([net])
+                Rt.rebuild()
+                self.route_job(by_net[net], keep_going=True)
+                failed[net] = fail[2]
+            else:
+                failed.pop(net, None)
+        done = 0
+        for net in by_net:
+            recs = [r for r in Rt.routes if r["net"] == net and not r.get("fixed")]
+            if net not in failed:
+                done += 1
+            if net in failed:
+                self._emit("failed", net, {"segments": [s for r in recs for s in r["segments"]],
+                                           "vias": [v for r in recs for v in r["vias"]]}, where=failed[net], done=done,
+                           total=total)
+            elif recs and net in mine:
+                self._emit("routed", net, {"segments": [s for r in recs for s in r["segments"]],
+                                           "vias": [v for r in recs for v in r["vias"]]}, done=done, total=total,
+                           note="negotiated")
+        return done
+
+    def _conflicts(self, nets):
+        """{net: [(layer index, cell)]} for the nets whose copper another net's comes too near: the cells under its
+        tracks and inside its vias where the grid (its own profile, the neck's in a neck area) says another net's
+        copper is within clearance."""
+        B, Rt = self.B, self.Rt
+        by = collections.defaultdict(list)
+        for r in Rt.routes:
+            if r["net"] in nets and not r.get("fixed"):
+                by[r["net"]].append(r)
+        out = {}
+        for net, recs in by.items():
+            prof = recs[0]["profile"]
+            lt, _ = B.legal(net, prof)
+            cells = Rt.cells_of([s for r in recs for s in r["segments"]])
+            for r in recs:
+                for pos, d, _ in r["vias"]:
+                    j0, i0 = B.cell(*pos)
+                    pr = B.profiles[prof]
+                    hw = B.profiles[pr.neck].hw if pr.neck and B.neck_mask[j0, i0] else pr.hw
+                    k = max(0, int((d / 2 - hw) / R.RES))
+                    for dj in range(-k, k + 1):
+                        for di in range(-k, k + 1):
+                            if dj * dj + di * di <= k * k and 0 <= j0 + dj < B.ny and 0 <= i0 + di < B.nx:
+                                idx = (j0 + dj) * B.nx + i0 + di
+                                cells += [(l, idx) for l in range(len(B.layers))]
+            bad = [(l, i) for l, i in cells if not lt[l][i]]
+            if bad:
+                out[net] = bad
+        return out
 
     def _over_budget(self):
         """Past the route's time budget (tracewright.json route.budget_s, or the route's own): the nets left are routed
