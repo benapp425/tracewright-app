@@ -277,7 +277,8 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
             k = (round(x, 2), round(y, 2))
             if k in taken and taken[k] != p.net:
                 continue
-            if _via_ok(B, lv, x, y) and _seg_ok(B, lt, li_s, (p.x, p.y), (x, y)):
+            mine = taken.get(k) == p.net                # its net's via is there already: shared, only the stub to check
+            if (mine or _via_ok(B, lv, x, y)) and _seg_ok(B, lt, li_s, (p.x, p.y), (x, y)):
                 out.append((x, y))
         return out
 
@@ -336,14 +337,44 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
     by_num = {s_[0].num: s_[0] for s_ in need}
     for k, num in match.items():
         lay(by_num[num], k)
-    # supplies: their own spot, or one a neighbour of the same net already has (a via shared by two balls)
-    for p, r, c, ring in sorted(sup, key=lambda s_: -s_[3]):
-        pref = list(reversed(outward(p))) if ring < top else outward(p)
-        opts = spots(p, pref)
-        shared = [xy for xy in opts if taken.get((round(xy[0], 2), round(xy[1], 2))) == p.net]
-        pick = (shared or opts or [None])[0]
-        if pick:
-            lay(p, pick)
+    # the planes' balls: each needs a via down to its plane (nothing else reaches it once the escapes are in), and one
+    # via between two or three balls of the same plane serves them all -- the spots that serve the most balls still
+    # without one first. A ball with no spot left is joined on the surface to a neighbour of its plane that has its
+    # via, as two ground balls side by side are joined by hand
+    open_ = {p.num: p for p, r, c, ring in sup}
+    while open_:
+        serve = collections.defaultdict(list)
+        for p in open_.values():
+            for xy in spots(p, outward(p)):
+                serve[(p.net, (round(xy[0], 2), round(xy[1], 2)), xy)].append(p)
+        if not serve:
+            break
+        (net_, k, xy), ps = max(serve.items(), key=lambda kv: (len(kv[1]), taken.get(kv[0][1]) == kv[0][0]))
+        for p in ps:
+            lay(p, xy)
+            open_.pop(p.num, None)
+    at_rc = {(r, c): p for p, r, c, ring in gr["balls"]}
+    rc_of = {p.num: (r, c) for p, r, c, ring in gr["balls"]}
+    joined = True
+    while open_ and joined:
+        joined = False
+        for num, p in list(open_.items()):
+            r, c = rc_of[num]
+            for dr, dc in ((0, 1), (1, 0), (0, -1), (-1, 0)):
+                q = at_rc.get((r + dr, c + dc))
+                if q is None or q.net != p.net or (fp.ref, q.num) not in have_via:
+                    continue
+                lt, lv = B.legal(p.net, prof_of(p.net))
+                if not _seg_ok(B, lt, li_s, (p.x, p.y), (q.x, q.y)):
+                    continue
+                B.stamp_track(p.net, surface, (p.x, p.y), (q.x, q.y), rules["w"])
+                stubs.append({"net": p.net, "layer": surface, "a": [round(p.x, 4), round(p.y, 4)],
+                              "b": [round(q.x, 4), round(q.y, 4)], "w": rules["w"]})
+                have_via[(fp.ref, num)] = have_via[(fp.ref, q.num)]
+                open_.pop(num)
+                joined = True
+                break
+    plane_left = list(open_.values())
 
     # 2. escapes, layer by layer, outer rings first. Each side's channel takes as many tracks on a layer as fit across it
     # (to the board's edge or the first row of through-hole pads): more there would have the router change layer in the
@@ -469,6 +500,8 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
                 vias.append({"net": p.net, "x": end[0], "y": end[1], "d": vd, "drill": rules["via_drill"]})
                 have_via[(fp.ref, p.num)] = end
                 long_bones.append(p.num)
+    for p in plane_left:
+        left.append({"net": p.net, "pad": p.num, "ring": None, "why": "no via spot, and no neighbour of its plane to join"})
     for p, r, c, ring, under, other in todo + [s_ for s_ in sig if s_[4] and (fp.ref, s_[0].num) not in have_via]:
         left.append({"net": p.net, "pad": p.num, "ring": ring,
                      "why": "no via spot" if (ring >= top or under) and (fp.ref, p.num) not in have_via else "no room on any layer"})
