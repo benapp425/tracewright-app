@@ -25,6 +25,7 @@ CHEAP_VIA = 500.0
 PF_PRES = 4.0              # negotiation: a cell another net holds, at first (a free cell costs 10 a step)
 PF_GROW = 1.5              # ... and each round dearer by this
 PF_HIST = 3.0              # a cell contested in a round, dearer from then on
+PF_MAX = 1e9               # the price of a held cell stops rising here
 V2_FCU_CROSS = 1.10        # F.Cu along y (B.Cu along x already); off by default: longer routes on SMD boards
 PAIR_K = 25.0              # v2: cost a cell for a pair's second half away from its partner's side
 REFINE_MIN_S = 20.0        # v2: the second look's time budget is the routing time, at least this
@@ -824,7 +825,7 @@ class GridRoute:
                     break
                 for cells in conf.values():
                     Rt.pf["hist"][np.fromiter((l * B.N + i for l, i in cells), dtype=np.int64)] += PF_HIST
-                Rt.pf["pres"] *= PF_GROW
+                Rt.pf["pres"] = min(Rt.pf["pres"] * PF_GROW, PF_MAX)
                 # the most contested last: the others settle first, it then finds what they left
                 todo = sorted(conf, key=lambda n: len(conf[n]))
         finally:

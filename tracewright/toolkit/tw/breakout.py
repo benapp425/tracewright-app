@@ -528,7 +528,7 @@ def _perimeter_part(g, fp, kinds, rules, pads_by_net, planes, pitch_max=0.65):
         along = (abs(n[1]), abs(n[0]))                      # the row's direction
         ps.sort(key=lambda p: p.x * along[0] + p.y * along[1])
         if crowd(ps, (-n[0], -n[1])) < crowd(ps, n):        # through vias keep off the parts on the other side too: the
-            n = (-n[0], -n[1])                              # emptier side of the row (between two rows, under the body)
+            n = (-n[0], -n[1])                              # emptier side of the row first (between two rows, under the body)
         for k, p in enumerate(ps):
             half = max((abs((q[0] - p.x) * n[0] + (q[1] - p.y) * n[1]) for q in (p.poly or [])), default=max(p.w, p.h) / 2)
             d1 = half + max(s + vr, getattr(B, "hole_cl", 0.0) + rules["via_drill"] / 2) + 0.02     # hole clearance too
@@ -537,11 +537,14 @@ def _perimeter_part(g, fp, kinds, rules, pads_by_net, planes, pitch_max=0.65):
             prof = g.net_class.get(p.net, "Default")
             lt, lv = B.legal(p.net, prof)
             ok = None
-            # outward first, in its row of the stagger, then farther out; then the other way (between two rows of pads,
-            # under the part's body) -- a through via must keep off the parts on the other side as well
-            near = (d1, d2) if k % 2 == 0 else (d2, d1)
-            tries = [(n, d) for d in near + (near[0] + 0.9, near[1] + 0.9, near[0] + 1.8)]
-            tries += [((-n[0], -n[1]), d) for d in near]
+            # every other pad's via on the other side of the row: one row of vias each side, each via reached from
+            # its side (two staggered rows on one side wall the inner row's vias in behind the outer row's). Then the
+            # stagger on the side with room, farther out, and the other way round -- a through via keeps off the
+            # parts on the board's other side as well
+            m = (-n[0], -n[1])
+            first_, second_ = (n, m) if k % 2 == 0 else (m, n)
+            tries = [(first_, d1), (second_, d2), (first_, d2), (second_, d1)]
+            tries += [(n, d) for d in (d1 + 0.9, d2 + 0.9, d1 + 1.8)]
             for (nn, d) in tries:
                 x, y = round(p.x + nn[0] * d, 4), round(p.y + nn[1] * d, 4)
                 if (round(x, 2), round(y, 2)) in taken or not _via_ok(B, lv, x, y) or not _seg_ok(B, lt, li, (p.x, p.y), (x, y)):

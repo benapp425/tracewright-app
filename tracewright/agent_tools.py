@@ -851,6 +851,9 @@ def tool_list(rt, app):
                + (f"\nFinished by Freerouting (everything routed before held fixed); still open: "
                   + (", ".join(n.rsplit('/', 1)[-1] for n in s["still_open"]) or "none") if s.get("finished_by") else "")
                + (f"\nTuned: {', '.join(n.rsplit('/', 1)[-1] for n in s['tuned'])}" if s.get("tuned") else "")
+               + (f"\nStill contested when the negotiation ended (the board's bottlenecks: room, a layer, or another pin "
+                  "there): " + "; ".join(f"{c['nets']} nets at ({c['at'][0]:.0f}, {c['at'][1]:.0f}) mm on {c['layer']}"
+                                         for c in s["contested"][:6]) if failed and s.get("contested") else "")
                + ("\nNets are still open on a dense board: route with engine freerouting and finish true completes them "
                   "with what is routed held fixed." if failed and not s.get("finished_by") and engine == "grid" else ""))
         if engine == "freerouting":
