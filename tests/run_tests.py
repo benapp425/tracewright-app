@@ -321,6 +321,13 @@ def stackups_planned_checked_and_put_on_the_board():
             plan4, _ = stackup.validate({"layers": 4}, list(b.nets))
             res = stackup.apply(rt.p.tw, plan4)
             assert not res["ok"] and "In3.Cu" in res["error"], res
+            # the same six layers with In3 a signal layer now: its old plane comes off, the new one goes on In2
+            plan_b = dict(rt.p.cfg["stackup"], roles=["signal", "plane", "plane", "signal", "plane", "signal"],
+                          planes={"In1.Cu": "GND", "In2.Cu": planes["In3.Cu"], "In4.Cu": "GND"})
+            res = stackup.apply(rt.p.tw, plan_b)
+            assert res["ok"] and any("taken off" in d for d in res["did"]), res
+            on = {z.layers[0] for z in Board.load(pcb).zones if "plane" in z.name}
+            assert on == {"In1.Cu", "In2.Cu", "In4.Cu"}, on
         finally:
             rt.stop()
     asyncio.run(go())

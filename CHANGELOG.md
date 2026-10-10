@@ -36,6 +36,7 @@ Dense boards: BGAs and fine-pitch connectors broken out the way a person starts 
 - **Shorts under a BGA.** A pad's escape to its plane drawn at its class's full width inside a fine-pitch area, where it had been checked at the narrow width, could touch the next pad. It is drawn at the width it was checked at, and joins a via of its own net already there before adding one.
 - **Overlapping plane patches** under neighbouring fine-pitch parts get distinct priorities, as KiCad requires.
 - **Neck areas after a stack-up change** are redrawn on the new layers.
+- **Planes after a stack-up change.** A plane an earlier stack-up poured on a layer that is now a signal layer (or another net's plane) comes off; it had filled the layer the router was given.
 - **Plane escapes.** A pad already joined to its plane by a via is left alone; a pad with tracks but no via still gets one.
 - **Labels in generated schematics.** Labels side by side on a crowded connector or BGA no longer overlap. A ground between bundled signals gets a plain label like theirs, and a label next to a sideways supply arrow runs out past the supply's name.
 - **Schematics of big parts in seconds** (an RT1176's power sheet took over ten minutes), and the wrong connections a reused reference or a fallback label made are gone.

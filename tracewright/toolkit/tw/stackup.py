@@ -362,6 +362,14 @@ def apply(project, plan, board=None, live="auto"):
     if b.outline:
         outer = max(b.outline, key=lambda o: abs(_area(o)))
         zops = []
+        # the planes an earlier plan poured (named "<net> plane <layer>") on a layer that is now a signal layer, or
+        # now another net's plane, come off: left there, a pour fills the signal layer the router is given
+        keep = {f"{short(plan['planes'].get(l))} plane {l}" for l, r in zip(want, plan["roles"]) if r == "plane"}
+        stale = sorted({z.name for z in b.zones if not z.is_rule_area and re.match(r"^\S+ plane \S+\.Cu$", z.name or "")
+                        and z.name not in keep})
+        if stale:
+            zops.append({"op": "delete", "kinds": ["zone"], "names": stale})
+            did.append("taken off: " + ", ".join(stale))
         for l, r in zip(want, plan["roles"]):
             if r != "plane":
                 continue
