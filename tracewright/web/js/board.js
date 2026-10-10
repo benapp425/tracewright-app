@@ -1069,8 +1069,10 @@ export class BoardView {
 
   // ------------------------------------------------------------------ routing: which nets the router takes, which keep rules, which are left for you
   async loadRouting(force) {
-    if (this.routingLoading || (!force && this.routing)) return this.routing;
+    if (this.routingLoading) { if (force) this.routingAgain = true; return this.routing; }   // read again once this one ends
+    if (!force && this.routing) return this.routing;
     this.routingLoading = true;
+    this.routingAgain = false;
     const P = `/api/projects/${encodeURIComponent(this.pid)}`;
     try {
       const [r, e, g, pr] = await Promise.all([api(`${P}/routing`), api(`${P}/escape`).catch(() => null), api(`${P}/regions`).catch(() => null),
@@ -1078,6 +1080,7 @@ export class BoardView {
       this.routing = { ...r, escape: e, regions: g ? g.regions : [], regionKinds: g ? g.kinds : {}, pairs: pr ? pr.pairs : [] };
     } catch (e) { this.routing = { error: e.message }; }
     this.routingLoading = false;
+    if (this.routingAgain) return this.loadRouting(true);   // a change came in while it was reading: what it read is old
     if (this.panel === "routing") this.renderLayers();
     return this.routing;
   }

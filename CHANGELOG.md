@@ -41,6 +41,7 @@ Dense boards: BGAs and fine-pitch connectors broken out the way a person starts 
 - **A BGA's ground and supply balls.** Two balls of the same plane share one via between them again (the hole-to-hole check had ruled out the via already there); a ball with no via spot left joins a neighbour of its plane on the surface, and one that cannot is named in the breakout's report instead of being left unconnected unsaid.
 - **Labels in generated schematics.** Labels side by side on a crowded connector or BGA no longer overlap. A ground between bundled signals gets a plain label like theirs, and a label next to a sideways supply arrow runs out past the supply's name.
 - **Schematics of big parts in seconds** (an RT1176's power sheet took over ten minutes), and the wrong connections a reused reference or a fallback label made are gone.
+- **A region set while Board › Routing was still reading** shows at once; the panel reads again when it ends.
 - Board lengths count arcs along the arc.
 - Without KiCad installed, starting a project shows an error instead of stopping the app.
 
