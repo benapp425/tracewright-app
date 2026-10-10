@@ -641,7 +641,11 @@ def tool_list(rt, app):
             if r["kind"] == "array":
                 lines.append(f"{r['ref']}: {r['escaped']} of {r['signals'] - r['under']} signal balls out ("
                              + ", ".join(f"{k} {v}" for k, v in r["by_layer"].items()) + f"), {r['vias']} vias"
-                             + (f"; not out: {', '.join(x['pad'] + ' ' + x['net'].rsplit('/', 1)[-1] for x in r['left'][:12])}" if r["left"] else ""))
+                             + (f"; not out: {', '.join(x['pad'] + ' ' + x['net'].rsplit('/', 1)[-1] for x in sig_left[:12])}"
+                                if (sig_left := [x for x in r["left"] if x.get("ring") is not None]) else "")
+                             + (f"; NO VIA TO ITS PLANE (unconnected until there is room for one): "
+                                f"{', '.join(x['pad'] + ' ' + x['net'].rsplit('/', 1)[-1] for x in pl_left[:16])}"
+                                if (pl_left := [x for x in r["left"] if x.get("ring") is None]) else ""))
             else:
                 lines.append(f"{r['ref']}: {r['vias']} vias beside {r['pads']} pads" + (f", {len(r['left'])} without room" if r["left"] else ""))
         if rep.get("error"):
