@@ -832,6 +832,10 @@ class GridRoute:
             B.T0, B.V0 = saved_fixed
             Rt.rebuild(full=True)
         conf = self._conflicts(mine)
+        self.contested = self._contested(conf)
+        if self.contested:
+            self.log("  contested: " + "; ".join(f"{c['nets']} nets at ({c['at'][0]:.1f}, {c['at'][1]:.1f}) on {c['layer']}"
+                                                 for c in self.contested[:6]))
         again = []
         for net in sorted(conf, key=lambda n: -len(conf[n])):    # clear the board: the most contested go first
             if self._conflicts([net]):
@@ -863,6 +867,19 @@ class GridRoute:
                                            "vias": [v for r in recs for v in r["vias"]]}, done=done, total=total,
                            note="negotiated")
         return done
+
+    def _contested(self, conf, cell=1.0):
+        """Where nets still share copper after a negotiation, the busiest places first: [{at, layer, nets, names}] on a
+        1 mm grid -- the board's real bottlenecks (more room, a layer, or another pin there)."""
+        B = self.B
+        spots = collections.defaultdict(set)
+        for net, cells in conf.items():
+            for l, idx in cells:
+                x, y = B.xy(idx // B.nx, idx % B.nx)
+                spots[(l, round(x / cell), round(y / cell))].add(net)
+        out = [{"at": [k[1] * cell, k[2] * cell], "layer": B.layers[k[0]], "nets": len(v), "names": sorted(v)}
+               for k, v in spots.items() if len(v) >= 2]
+        return sorted(out, key=lambda c: -c["nets"])[:40]
 
     def _conflicts(self, nets):
         """{net: [(layer index, cell)]} for the nets whose copper another net's comes too near: the cells under its
@@ -941,6 +958,8 @@ class GridRoute:
                    "stitching_vias": n_stitch, "neck_areas": [ref for ref, _ in self.necks],
                    "coupled_pairs": self._coupled_pairs(),
                    "straightened": getattr(self, "straightened", 0), "left_as_routed": getattr(self, "refine_left", 0)}
+        if getattr(self, "contested", None):            # a negotiation's bottlenecks (dense boards)
+            summary["contested"] = self.contested
         return summary, segs, vias
 
     def _coupled_pairs(self):

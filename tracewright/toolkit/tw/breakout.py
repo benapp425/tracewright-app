@@ -181,6 +181,39 @@ def _channel_caps(B, G, rules):
     return out
 
 
+def _band_caps(B, G, rules, layers):
+    """{(side, layer): tracks}: how many escapes a side's port band sends out on a layer -- the free share of that
+    layer along lines 0.5 to 3 mm beyond the band (the parts on that side of the board take theirs on their own
+    layer), at the class pitch, filled to UTIL."""
+    pitch = rules["w_class"] + rules["s_class"]
+    T = B.T[next(iter(B.profiles))]
+    out = {}
+    for sd in ("N", "S", "W", "E"):
+        x0, y0, x1, y1 = G.band(sd)
+        along = (x1 - x0) if sd in ("N", "S") else (y1 - y0)
+        n = max(2, int(along / 0.1))
+        for L in layers:
+            li = B.layers.index(L)
+            share = 1.0
+            for d in (0.5, 1.5, 3.0):
+                free = 0
+                for k in range(n):
+                    f = (k + 0.5) / n
+                    if sd == "N":
+                        px, py = x0 + (x1 - x0) * f, y0 - d
+                    elif sd == "S":
+                        px, py = x0 + (x1 - x0) * f, y1 + d
+                    elif sd == "W":
+                        px, py = x0 - d, y0 + (y1 - y0) * f
+                    else:
+                        px, py = x1 + d, y0 + (y1 - y0) * f
+                    j, i = B.cell(px, py)
+                    free += 0 <= j < B.ny and 0 <= i < B.nx and T[li][j, i] == -1
+                share = min(share, free / n)
+            out[(sd, L)] = max(2, int(share * along / pitch * UTIL))
+    return out
+
+
 def _others(pads_by_net, net, ref):
     return [p for p in pads_by_net.get(net, []) if p["ref"] != ref]
 
@@ -320,11 +353,29 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
     todo = [s for s in sig if not s[4]]
     done, by_layer, left, long_bones = [], collections.Counter(), [], []
     count = collections.Counter()
+    # each side's escapes spread over the layers: no layer takes more than its band has room for on it, nor (but the
+    # last) much more than an even share of the side's -- a side's surface crowded by parts, or one inner layer
+    # filled while the next stays empty, leaves the router a bus it cannot fan out
+    bcap = _band_caps(B, G, rules, order)
+    band_n, even = collections.Counter(), {}
+
+    def band_ok(sd, L):
+        if L == order[-1]:
+            return band_n[(sd, L)] < bcap[(sd, L)]
+        return band_n[(sd, L)] < min(bcap[(sd, L)], even.get(sd, 1 << 30))
     cen = lambda pts: (sum(q[0] for q in pts) / len(pts), sum(q[1] for q in pts) / len(pts))
-    for L in order:
+    for k_, L in enumerate(order):
         li = B.layers.index(L)
         nxt = []
         cand = sorted(todo, key=lambda s: (s[3], s[1], s[2]))
+        pend = collections.Counter()                # the side each ball still to go out prefers, shared over the layers left
+        for s_ in todo:
+            ox, oy = cen([q["pos"] for q in s_[5]]) if s_[5] else (G.cx, G.cy)
+            d_ = {"N": s_[1], "S": G.R - 1 - s_[1], "W": s_[2], "E": G.C - 1 - s_[2]}
+            fac = {"N": G.Y0 - oy, "S": oy - G.Y1, "W": G.X0 - ox, "E": ox - G.X1}
+            pend[min(d_, key=lambda sd: d_[sd] + (0 if fac[sd] > 0 or L == surface else 3))] += 1    # as chosen below
+        rest = max(1, len(order) - k_ - (1 if len(order) - k_ > 1 else 0))      # the far side's own parts leave it little
+        even = {sd: math.ceil(1.4 * n_ / rest) for sd, n_ in pend.items()}
         for s in cand:
             p, r, c, ring, under, other = s
             via = have_via.get((fp.ref, p.num))
@@ -355,7 +406,8 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
             else:
                 sides = sorted(dist_, key=lambda sd: (dist_[sd] + (0 if sd in facing else 3), -beyond[sd]))
             rec = None
-            ok_ = [x for x in sides if chan_of(x, other) is None or count[(chan_of(x, other), L)] < cap[chan_of(x, other)]]
+            ok_ = [x for x in sides if (chan_of(x, other) is None or count[(chan_of(x, other), L)] < cap[chan_of(x, other)])
+                   and band_ok(x, L)]
             for sd in ok_[:2]:
                 tg = _cells_in(B, G.band(sd), li, lt)
                 if not tg:
@@ -379,6 +431,7 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
                          "segments": [[l_, [round(a[0], 4), round(a[1], 4)], [round(b[0], 4), round(b[1], 4)], round(w_, 4)]
                                       for l_, a, b, w_ in segs]})
             by_layer[L] += 1
+            band_n[(sd, L)] += 1
             if chan_of(sd, other):
                 count[(chan_of(sd, other), L)] += 1
         todo = nxt
