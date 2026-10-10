@@ -25,7 +25,7 @@ CHEAP_VIA = 500.0
 PF_PRES = 4.0              # negotiation: a cell another net holds, at first (a free cell costs 10 a step)
 PF_GROW = 1.5              # ... and each round dearer by this
 PF_HIST = 3.0              # a cell contested in a round, dearer from then on
-PF_MAX = 1e9               # the price of a held cell stops rising here
+PF_MAX = 400.0             # the price of a held cell stops rising here (far above it the rounds stop settling)
 V2_FCU_CROSS = 1.10        # F.Cu along y (B.Cu along x already); off by default: longer routes on SMD boards
 PAIR_K = 25.0              # v2: cost a cell for a pair's second half away from its partner's side
 REFINE_MIN_S = 20.0        # v2: the second look's time budget is the routing time, at least this
@@ -807,6 +807,7 @@ class GridRoute:
         Rt.pf = {"hist": np.zeros(len(B.layers) * B.N, dtype=np.float32), "pres": PF_PRES}
         todo = list(queue)
         t_round = time.time()
+        best = None                                     # the round with the fewest contested cells: the one legalised
         try:
             for rnd in range(rounds):
                 for net in todo:
@@ -818,9 +819,11 @@ class GridRoute:
                     else:
                         failed.pop(net, None)
                 conf = self._conflicts(mine)
-                self.log(f"  round {rnd + 1}: {len(conf)} nets share copper, {sum(len(c) for c in conf.values())} cells "
-                         f"({time.time() - t_round:.0f} s)")
+                n_cells = sum(len(c) for c in conf.values())
+                self.log(f"  round {rnd + 1}: {len(conf)} nets share copper, {n_cells} cells ({time.time() - t_round:.0f} s)")
                 t_round = time.time()
+                if best is None or n_cells < best[0]:
+                    best = (n_cells, list(Rt.routes), dict(failed))
                 if not conf or self._over_budget():
                     break
                 for cells in conf.values():
@@ -831,6 +834,10 @@ class GridRoute:
         finally:
             Rt.pf = None
             B.T0, B.V0 = saved_fixed
+            if best is not None:                        # later rounds can undo what earlier ones settled
+                Rt.routes = best[1]
+                failed.clear()
+                failed.update(best[2])
             Rt.rebuild(full=True)
         conf = self._conflicts(mine)
         self.contested = self._contested(conf)
