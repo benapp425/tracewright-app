@@ -4022,6 +4022,8 @@ def _dense_board(name, layers=6):
             "side": "B", "nets": jn["J9"]}]
     res = client.apply(p, ops, live=False)
     assert res["ok"], res
+    from tw.pro import set_board_rules                          # KiCad's default hole clearance, as most boards have it
+    set_board_rules(p.pro, {"min_hole_clearance": 0.25})
     return p, len(sig)
 
 

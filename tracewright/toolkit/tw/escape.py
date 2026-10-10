@@ -12,7 +12,7 @@ tab shows it, and fanout() puts the vias down so the router starts from them.
 The ring count is the usual estimate: the outer ring escapes straight out; each track that fits between two balls (or
 two vias) takes one more ring out on that layer. Power and ground balls drop to their planes through their own vias.
 """
-import math, statistics
+import collections, math, statistics
 
 from . import geom
 
@@ -206,7 +206,7 @@ def plan(project, board=None, refs=None):
     return out
 
 
-def area_ops(project, b, ref, rules):
+def area_ops(project, b, ref, rules, taken=None):
     """What a part's fan-out needs round it: the "TW neck" rule area where DRC holds the escape to the neck-down
     clearance (redrawn when the routing layers changed), the DRC rule itself, and on each inner plane under the part a
     patch of the plane's net at that clearance -- at the plane's usual clearance the via field cuts it into islands
@@ -227,6 +227,13 @@ def area_ops(project, b, ref, rules):
                     "no_pour": False, "no_footprints": False})
     dru.ensure_rules(project, dict([dru.neck_rule(rules["s"])]), replace=True)
     poly = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    # patches of neighbouring parts may overlap: KiCad wants overlapping zones at distinct priorities, so each new one on
+    # a layer goes one above every patch already there
+    taken = taken if taken is not None else collections.Counter()     # shared across one batch of parts
+    for o in b.zones:
+        if o.name.startswith("TW patch"):
+            for l in o.layers:
+                taken[l] = max(taken[l], o.priority or 0)
     for z in b.zones:
         if z.is_rule_area or not z.net or z.name.startswith("TW patch"):
             continue
@@ -236,8 +243,10 @@ def area_ops(project, b, ref, rules):
             zb = geom.bbox([q for pl in z.outline for q in pl])
             if zb[0] <= x0 and zb[1] <= y0 and zb[2] >= x1 and zb[3] >= y1 and \
                     not any(o.name == f"TW patch {ref} {l}" for o in b.zones):
+                pri = max((z.priority or 0) + 1, taken[l] + 1)
+                taken[l] = pri
                 ops.append({"op": "zone", "net": z.net, "layers": [l], "polygon": poly, "name": f"TW patch {ref} {l}",
-                            "priority": (z.priority or 0) + 1, "clearance": rules["s"], "min_width": min(rules["w"], 0.1),
+                            "priority": pri, "clearance": rules["s"], "min_width": min(rules["w"], 0.1),
                             "connect": "solid"})
     return ops
 

@@ -11,6 +11,9 @@ from .. import env, kicad
 KPY_EXPORT = r'''
 import sys, os, pcbnew
 b = pcbnew.LoadBoard(sys.argv[1])
+if len(sys.argv) > 3 and sys.argv[3] == "keep":     # finishing a route: what is there is exported fixed (protected)
+    for t in b.GetTracks():
+        t.SetLocked(True)
 # Rule areas that restrict nothing (they only name a region for custom DRC rules, like the
 # router's "TW neck" areas) are exported as hard keepouts and stall Freerouting: leave them out.
 grave = []
@@ -87,7 +90,9 @@ def _kpy_inline(code, *args, timeout=900):
 STALL_PASSES = 50          # Freerouting 2.1 ignores its pass limit and retries what it cannot route until pass 999
 
 
-def route(project=None, max_passes=30, threads=None, on_progress=None, log=print, timeout=1200):
+def route(project=None, max_passes=30, threads=None, on_progress=None, log=print, timeout=1200, keep_routed=False):
+    """Route the board with Freerouting. keep_routed: finish a route -- the tracks and vias already there (the grid
+    router's, a breakout's, the user's) go to Freerouting fixed, and it routes only the connections still open."""
     project = project or env.project()
     jar = find_jar()
     if not jar:
@@ -102,7 +107,7 @@ def route(project=None, max_passes=30, threads=None, on_progress=None, log=print
         if os.path.exists(f):
             os.remove(f)
     t0 = time.time()
-    r = _kpy_inline(KPY_EXPORT, project.pcb, dsn)
+    r = _kpy_inline(KPY_EXPORT, project.pcb, dsn, *(["keep"] if keep_routed else []))
     if not r.get("ok") or not os.path.exists(dsn):
         return {"summary": {"ok": False, "error": f"DSN export failed: {r.get('error', '')}"}}
     threads = threads or max(1, (os.cpu_count() or 2) - 1)

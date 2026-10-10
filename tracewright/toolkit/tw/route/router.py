@@ -293,7 +293,11 @@ class Board:
                 if not via_only:
                     self._mark(self.T[pname][li], sl, dist < cl + pr.hw - 1e-6, code)
                 vcode = -2 if block_all_vias else code
-                self._mark(self.V[pname][li], sl, dist < cl + pr.vr - 1e-6, vcode)
+                vthr = cl + pr.vr
+                hc = getattr(self, "hole_cl", 0.0)
+                if hc and not bare:                       # a via's hole keeps the board's hole clearance from it too
+                    vthr = max(vthr, hc + pr.via_drill / 2 + extra)
+                self._mark(self.V[pname][li], sl, dist < vthr - 1e-6, vcode)
 
     def _outline(self, ol, holes, edge_cl=0.3):
         inside = _poly_dist(self.GX, self.GY, ol) == 0
@@ -354,6 +358,12 @@ class Board:
         router's own vias go through every layer, so one on any spanned layer is blocked there as well. With the
         board's hole-to-hole minimum (self.h2h) and the drill, no other via's hole comes nearer than that."""
         cls = self.net_class.get(net, "Default")
+        hc = getattr(self, "hole_cl", 0.0)
+        if hc:                                            # its hole: other copper keeps the board's hole clearance from it
+            dr = drill if drill else d * 0.45
+            ls_h = list(self.layers) if layers is None else [l for l in layers if l in self.layers]
+            if ls_h:
+                self.stamp(net, cls, ls_h, "circle", (pos[0], pos[1], dr / 2), extra=hc, bare=True)
         h2h = getattr(self, "h2h", 0.0)
         if h2h and layers is None:
             dr = drill if drill else d * 0.45
@@ -815,20 +825,29 @@ class Router:
             self._stamp(r)
         self._on_grid = {k: kept[k] if k in kept else (r, self._windows(r)) for k, r in now.items()}
 
-    def blockers(self, net, prof, sources, targets, fcu_factor=1.0, penalty=60.0, margin=None, include_fixed=False):
+    def blockers(self, net, prof, sources, targets, fcu_factor=1.0, penalty=60.0, margin=None, include_fixed=False,
+                 layers=None, allow_vias=True):
         """Which routed nets stand in the way of this connection? Route on the fixed copper only, with
-        a penalty for cells taken by routed nets, and return the nets owning those cells."""
+        a penalty for cells taken by routed nets, and return the nets owning those cells. layers: only these
+        routing layers (a route kept to one layer asks who is in its way there)."""
         B = self.B
         lt_s, lv_s = B.legal(net, prof, static=True)
         lt_d, lv_d = B.legal(net, prof)
+        if layers is not None:
+            keep = [li for li, l in enumerate(B.layers) if l in layers]
+            lt_s, lt_d = lt_s.copy(), lt_d.copy()
+            for li in range(len(B.layers)):
+                if li not in keep:
+                    lt_s[li] = 0
+                    lt_d[li] = 1                         # nothing there counts as in the way
         cc = np.where(lt_d == 0, penalty, 0.0).astype(np.float32).ravel()
         hw, mx = self.hweight, self.max_expand          # a rough answer is enough here: weighted, bigger budget
         self.hweight, self.max_expand = max(2.0, hw), 4 * mx
         try:
-            path = self.astar(net, prof, sources, targets, fcu_factor, True, _legal=(lt_s, lv_s), cell_cost=cc,
+            path = self.astar(net, prof, sources, targets, fcu_factor, allow_vias, _legal=(lt_s, lv_s), cell_cost=cc,
                               margin=margin)
             if path is None and self.last_status == -2:     # still too dear: plain shortest path on fixed copper
-                path = self.astar(net, prof, sources, targets, fcu_factor, True, _legal=(lt_s, lv_s), margin=margin)
+                path = self.astar(net, prof, sources, targets, fcu_factor, allow_vias, _legal=(lt_s, lv_s), margin=margin)
         finally:
             self.hweight, self.max_expand = hw, mx
         if path is None:

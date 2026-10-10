@@ -23,6 +23,7 @@ import numpy as np
 from . import geom
 
 DPORT = 1.0          # a port this many pitches beyond the outermost ball row: clear of the outer dog-bone vias
+UTIL = 0.6           # the share of a channel's tracks the breakout fills on one layer: the router needs the rest
 
 
 def _path(project):
@@ -236,16 +237,29 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
     # matching of balls to spots, so a ball with one free spot gets it and its neighbours take their others (parts on the
     # far side, a decoupling capacitor under the part, take spots)
     need = [s_ for s_ in sig if s_[3] >= top or s_[4]]
-    # the surface's channels: the outer balls a side has more of than its channel takes go down too (inner ring first)
-    cap = _channel_caps(B, G, rules)
+    # the channels beside the ball field: a net whose far end lies past the field's other end runs the length of the
+    # channel on its escape's side (or, from the top or bottom side, of the nearer channel round it). Each channel takes
+    # on each layer the tracks that fit across it, filled to a share that leaves the router room (UTIL); the outer balls
+    # a channel's surface share has no room for go down by a via too (inner ring first)
+    cap = {k: max(3, int(v * UTIL)) for k, v in _channel_caps(B, G, rules).items()}
+
+    def chan_of(sd, other):
+        ox, oy = sum(q["pos"][0] for q in other) / len(other), sum(q["pos"][1] for q in other) / len(other)
+        if sd in ("W", "E"):
+            return None if G.Y0 - 1 <= oy <= G.Y1 + 1 else sd
+        if (sd == "N" and oy > G.Y1 + 1) or (sd == "S" and oy < G.Y0 - 1):
+            return "W" if ox < G.cx else "E"
+        return None
     near = collections.defaultdict(list)
     for s_ in sig:
         if s_[3] < top and not s_[4]:
             d_ = {"N": s_[1], "S": G.R - 1 - s_[1], "W": s_[2], "E": G.C - 1 - s_[2]}
-            near[min(d_, key=d_.get)].append(s_)
-    for sd, ss in near.items():
-        if len(ss) > cap[sd]:
-            need += sorted(ss, key=lambda s_: -s_[3])[:len(ss) - cap[sd]]
+            ch = chan_of(min(d_, key=d_.get), s_[5])
+            if ch:
+                near[ch].append(s_)
+    for ch, ss in near.items():
+        if len(ss) > cap[ch]:
+            need += sorted(ss, key=lambda s_: -s_[3])[:len(ss) - cap[ch]]
     cand = {s_[0].num: [(round(x, 2), round(y, 2)) for x, y in spots(s_[0], outward(s_[0]))] for s_ in need}
     match = {}
 
@@ -315,7 +329,8 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
             else:
                 sides = sorted(dist_, key=lambda sd: (dist_[sd] + (0 if sd in facing else 3), -beyond[sd]))
             rec = None
-            for sd in [x for x in sides if count[(x, L)] < cap[x]][:2]:
+            ok_ = [x for x in sides if chan_of(x, other) is None or count[(chan_of(x, other), L)] < cap[chan_of(x, other)]]
+            for sd in ok_[:2]:
                 tg = _cells_in(B, G.band(sd), li, lt)
                 if not tg:
                     continue
@@ -332,7 +347,8 @@ def _area_part(g, fp, kinds, rules, routing, pads_by_net, planes, log):
                          "segments": [[l_, [round(a[0], 4), round(a[1], 4)], [round(b[0], 4), round(b[1], 4)], round(w_, 4)]
                                       for l_, a, b, w_ in segs]})
             by_layer[L] += 1
-            count[(sd, L)] += 1
+            if chan_of(sd, other):
+                count[(chan_of(sd, other), L)] += 1
         todo = nxt
         if L == surface:                            # outer balls the surface's channels had no room for: a via, then below
             for s in todo:
@@ -414,12 +430,23 @@ def _perimeter_part(g, fp, kinds, rules, pads_by_net, planes, pitch_max=0.65):
         rows[n].append(p)
     stubs, vias, made, left = [], [], [], []
     taken = {(round(v["pos"][0], 2), round(v["pos"][1], 2)) for v in g.dump["vias"]}
+    others = [(q.x, q.y) for f2 in g.b.fp_list if f2.ref != fp.ref for q in f2.pads]
+
+    def crowd(ps, nn, reach=2.5):
+        """Other parts' pads (any side) in the strip a row of vias would take on that side of the row."""
+        along = (abs(nn[1]), abs(nn[0]))
+        lo = min(p.x * along[0] + p.y * along[1] for p in ps) - 1
+        hi = max(p.x * along[0] + p.y * along[1] for p in ps) + 1
+        base = sum(p.x * nn[0] + p.y * nn[1] for p in ps) / len(ps)
+        return sum(1 for x, y in others if lo <= x * along[0] + y * along[1] <= hi and 0.2 < (x * nn[0] + y * nn[1]) - base <= reach)
     for n, ps in rows.items():
         along = (abs(n[1]), abs(n[0]))                      # the row's direction
         ps.sort(key=lambda p: p.x * along[0] + p.y * along[1])
+        if crowd(ps, (-n[0], -n[1])) < crowd(ps, n):        # through vias keep off the parts on the other side too: the
+            n = (-n[0], -n[1])                              # emptier side of the row (between two rows, under the body)
         for k, p in enumerate(ps):
             half = max((abs((q[0] - p.x) * n[0] + (q[1] - p.y) * n[1]) for q in (p.poly or [])), default=max(p.w, p.h) / 2)
-            d1 = half + s + vr + 0.02
+            d1 = half + max(s + vr, getattr(B, "hole_cl", 0.0) + rules["via_drill"] / 2) + 0.02     # hole clearance too
             space = max(vd + s, rules["via_drill"] + getattr(B, "h2h", 0.25))        # between two vias' centres
             d2 = d1 + max(0.45, vd, math.sqrt(max(0.0, space ** 2 - pitch ** 2)) + 0.02)
             prof = g.net_class.get(p.net, "Default")
@@ -496,9 +523,10 @@ def run(project, refs=None, apply=True, log=print, apply_fn=None):
             parts.append(r)
             log(f"{fp.ref}: {r['vias']} vias beside {r['pads']} pads that change layer ({len(r['left'])} without room)")
     ops = []
+    pri = collections.Counter()                      # the plane patches' priorities, distinct where they overlap
     for r in parts:
         if r.get("stubs") or r.get("new_vias") or r.get("escapes"):
-            ops += escape.area_ops(project, b, r["ref"], rules)
+            ops += escape.area_ops(project, b, r["ref"], rules, taken=pri)
     stubs = [t for r in parts for t in r.get("stubs", [])]
     tracks = stubs + [{"net": e["net"], "layer": l_, "a": a, "b": b_, "w": w_} for r in parts for e in r.get("escapes", [])
                       for l_, a, b_, w_ in e["segments"]]
@@ -641,8 +669,22 @@ def make_room(project, refs=None, apply=True, reach=0.8, log=print, apply_fn=Non
             bx = geom.bbox([q for pl in pls for q in pl])
             return (bx[0] - m, bx[1] - m, bx[2] + m, bx[3] + m)
 
+        cy_now = {}                                    # courtyards of parts moved here, where they now are
+
+        def court(f, dx=0.0, dy=0.0, da=0):
+            """The part's courtyard box where it would be (its pads' box and a margin when it has no courtyard)."""
+            loops = cy_now.get(f.ref) or f.courtyard()
+            if not loops:
+                return box(shapes(f, dx, dy, da))
+            pts = []
+            for lp in loops:
+                for x, y in lp:
+                    vx, vy = geom.rot(x - f.x, y - f.y, da)
+                    pts.append((f.x + vx + dx, f.y + vy + dy))
+            return geom.bbox(pts)
+
         cur = {f.ref: shapes(f) for f in far}
-        boxes = {f.ref: box(shapes(f)) for f in same_side}
+        boxes = {f.ref: court(f) for f in same_side}
         spots = sorted({s for ss in need.values() for s in ss})
 
         def blocked_by(pls):
@@ -686,8 +728,9 @@ def make_room(project, refs=None, apply=True, reach=0.8, log=print, apply_fn=Non
                             if not (dx or dy or da):
                                 continue
                             pls = shapes(f, dx, dy, da)
-                            bb = box(pls)
-                            if any(bb[0] < o[2] and o[0] < bb[2] and bb[1] < o[3] and o[1] < bb[3] for o in others):
+                            bb = court(f, dx, dy, da)
+                            if any(bb[0] < o[2] - 1e-6 and o[0] < bb[2] - 1e-6 and bb[1] < o[3] - 1e-6 and o[1] < bb[3] - 1e-6
+                                   for o in others):
                                 continue
                             nb = blocked_by(pls)
                             if len(nb) >= len(blk[f.ref]) and best is not None:
@@ -702,7 +745,9 @@ def make_room(project, refs=None, apply=True, reach=0.8, log=print, apply_fn=Non
                     _, dx, dy, da, nb, pls = best
                     base = best[0][0]
                     blk[f.ref] = nb
-                    boxes[f.ref] = box(pls)
+                    boxes[f.ref] = court(f, dx, dy, da)
+                    cy_now[f.ref] = [[(f.x + geom.rot(x - f.x, y - f.y, da)[0] + dx, f.y + geom.rot(x - f.x, y - f.y, da)[1] + dy)
+                                      for x, y in lp] for lp in (cy_now.get(f.ref) or f.courtyard())]
                     nx_, ny_ = round(f.x + dx, 4), round(f.y + dy, 4)
                     rot = (f.angle + da) % 360
                     moves.append({"op": "move", "ref": f.ref, "x": nx_, "y": ny_, "rot": rot})

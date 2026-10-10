@@ -742,11 +742,13 @@ def tool_list(rt, app):
 
     @reg("route", "Route nets with the grid router (human style: 0/45/90, few vias, supplies first; streamed live to the "
          "app and into KiCad when the board is open). nets: names (default: every unrouted net); clear: tear up those "
-         "nets first; engine: grid | freerouting (the whole board only, replacing what is routed; no nets); along: a "
-         "review flag's id whose route sketch the nets should follow (the router keeps to the user's line where it can).",
+         "nets first; engine: grid | freerouting (the whole board only; no nets); finish (with freerouting): keep every "
+         "track and via already there and route only what is still open -- the way to complete a dense board the grid "
+         "router left nets open on; along: a review flag's id whose route sketch the nets should follow (the router keeps "
+         "to the user's line where it can).",
          {"type": "object", "properties": {"nets": {"type": "array", "items": {"type": "string"}}, "clear": {"type": "boolean"},
                                            "engine": {"type": "string", "enum": ["grid", "freerouting"]},
-                                           "along": {"type": "string"}}})
+                                           "finish": {"type": "boolean"}, "along": {"type": "string"}}})
     async def route(args):
         from tw.route import driver
         tw = proj()
@@ -780,7 +782,11 @@ def tool_list(rt, app):
                 mirror.on(ev)
         rt.mark_self(600)
         try:
-            if engine == "freerouting":
+            if engine == "freerouting" and args.get("finish"):
+                from tw.route import freerouting
+                res = await run(lambda: freerouting.route(tw, keep_routed=True, on_progress=progress,
+                                                          log=lambda m: hub.emit("route.log", text=m)))
+            elif engine == "freerouting":
                 res = await run(driver.route, tw, nets=None, engine="freerouting", on_progress=progress, live=False)
             elif mirror:
                 g = await run(lambda: driver.GridRoute(tw, nets=nets, clear=bool(args.get("clear")), on_progress=progress,
@@ -812,6 +818,16 @@ def tool_list(rt, app):
                 left = await run(driver.islands_left, tw, [n for n in g.planes if g._net_ok(n)])
                 if left:
                     summary["islands"] = left
+                await run(link.save)
+                if g.ports:                               # the breakout's escapes the route did not use
+                    from tw import breakout
+                    summary["unused_escapes"] = await run(breakout.prune, tw, list(summary.get("failed") or []))
+                from tw.route import tune as tunemod      # pairs and length groups within their budgets
+                try:
+                    tr = await run(tunemod.tune, tw, True, lambda m: None)
+                    summary["tuned"] = [x["net"] for x in tr["tuned"]]
+                except Exception:
+                    pass
                 await run(driver._report, tw, g, summary)
                 res = {"summary": summary, "apply": {"via": "live", "ok": True}}
             else:
@@ -831,7 +847,12 @@ def tool_list(rt, app):
                + (f"\nLeft for hand routing (the routing plan, Design > Routing): {', '.join(n.rsplit('/', 1)[-1] for n in s['left_for_hand'])} "
                   "-- route each in the editor's way (copper tool), keeping its rules, or name it in nets to route it here"
                   if s.get("left_for_hand") else "")
-               + (f" (preset {s['preset']})" if s.get("preset") and s["preset"] != "balanced" else ""))
+               + (f" (preset {s['preset']})" if s.get("preset") and s["preset"] != "balanced" else "")
+               + (f"\nFinished by Freerouting (everything routed before held fixed); still open: "
+                  + (", ".join(n.rsplit('/', 1)[-1] for n in s["still_open"]) or "none") if s.get("finished_by") else "")
+               + (f"\nTuned: {', '.join(n.rsplit('/', 1)[-1] for n in s['tuned'])}" if s.get("tuned") else "")
+               + ("\nNets are still open on a dense board: route with engine freerouting and finish true completes them "
+                  "with what is routed held fixed." if failed and not s.get("finished_by") and engine == "grid" else ""))
         if engine == "freerouting":
             txt = f"freerouting: {_json(s)}"
         return _text(txt + "\nNext: run_checks (drc, route.style, power.width, hs.pairs) and render the board.")

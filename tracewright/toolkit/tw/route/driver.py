@@ -352,6 +352,13 @@ class GridRoute:
         profs, clear = profiles_for(self.pro, self.net_class, nets, necks=bool(self.necks or fine), neck_w=self.neck_w,
                                     neck_cl=self.neck_cl, neck_via=neck_via)
         B = R.Board(dump, profs, clear, self.net_class, necks=[r for _, r in self.necks] + fine, layers=self.routing)
+        try:                                             # the board's hole-to-hole and hole clearance minimums (before any
+            _r = ((json.load(open(self.p.pro)).get("board") or {}).get("design_settings") or {}).get("rules", {}) \
+                if self.p.pro else {}                     # copper is stamped: a via's hole keeps them from all of it)
+        except Exception:
+            _r = {}
+        B.h2h = float(_r.get("min_hole_to_hole", 0.25))
+        B.hole_cl = float(_r.get("min_hole_clearance", 0.25))
         B.stamp_pads()
         for _, box, kind, _, cl_ in self.regions:     # more spacing: pads inside keep the region's clearance round them
             if kind != "spacing":
@@ -375,11 +382,6 @@ class GridRoute:
         for t in dump["tracks"]:
             if t["layer"] in B.layers:
                 B.stamp_track(t["net"], t["layer"], t["a"], t["b"], t["w"])
-        try:                                             # the board's hole-to-hole minimum keeps vias' holes apart
-            B.h2h = float(((json.load(open(self.p.pro)).get("board") or {}).get("design_settings") or {})
-                          .get("rules", {}).get("min_hole_to_hole", 0.25)) if self.p.pro else 0.25
-        except Exception:
-            B.h2h = 0.25
         for v in dump["vias"]:
             B.stamp_via(v["net"], v["pos"], v["d"], v.get("layers") if v.get("kind", "through") != "through" else None,
                         drill=v.get("drill"))
@@ -467,6 +469,7 @@ class GridRoute:
                 if 0 <= j < B.ny and 0 <= i < B.nx and lv[j * B.nx + i]:
                     cand.append((math.hypot(dj, di), j, i))
         src = [c for c in R.pad_cells(B, p, prof) if c[0] == li]
+        w_ = B.profiles[pr.neck].w if pr.neck and B.neck_mask[j0, i0] else pr.w     # in a neck area: the width it was checked at
         near = sorted((geom.dist(v["pos"], p["pos"]), v["pos"]) for v in self.dump["vias"]
                       if v["net"] == net and v.get("kind", "through") == "through" and geom.dist(v["pos"], p["pos"]) <= radius)
         for _, pos in near:                           # a via of its own net already there (a BGA's, under a capacitor)
@@ -475,7 +478,7 @@ class GridRoute:
                 dg = Rt._dogleg(lt[li], divmod(idx, B.nx), (jv, iv))
                 if dg:
                     pts = [B.xy(*c) for c in dg]
-                    segs = [(layer, pa, pb, pr.w) for pa, pb in zip(pts, pts[1:]) if pa != pb]
+                    segs = [(layer, pa, pb, w_) for pa, pb in zip(pts, pts[1:]) if pa != pb]
                     rec = Rt.add(net, prof, segs, [])
                     self._emit("escape", net, rec)
                     return True
@@ -485,7 +488,7 @@ class GridRoute:
                 dg = Rt._dogleg(lt[li], a, (j, i))
                 if dg:
                     pts = [B.xy(*c) for c in dg]
-                    segs = [(layer, pa, pb, pr.w) for pa, pb in zip(pts, pts[1:]) if pa != pb]
+                    segs = [(layer, pa, pb, w_) for pa, pb in zip(pts, pts[1:]) if pa != pb]
                     vp = B.profiles[pr.neck] if pr.neck and B.neck_mask[j, i] else pr      # a neck area's via there
                     rec = Rt.add(net, prof, segs, [(pts[-1], vp.via_d, vp.via_drill)])
                     self._emit("escape", net, rec)
@@ -618,6 +621,8 @@ class GridRoute:
         done, queue = self._on_their_layers(queue, by_net, pairs, total)
         done = self._negotiate(queue, by_net, pairs, rips, failed, done, total, max_rips)
         if failed and self.v2:
+            if getattr(self, "budget_s", None):           # the second chance gets a time of its own: half the budget
+                self.t_start, self.budget_s, self.said_budget = time.time(), self.budget_s / 2, False
             done = self.second_chance(by_net, pairs, failed, done, total, max_rips)
         self._finish_run(t0, failed, total)
         return self._result(t0, failed, total)
@@ -1141,6 +1146,23 @@ def route(project=None, nets=None, engine="grid", clear=False, apply=True, on_pr
         if out["apply"].get("ok") and g.ports:          # escapes laid for nets that were joined another way: off again
             from .. import breakout
             out["summary"]["unused_escapes"] = breakout.prune(project, keep_failed=list(summary.get("failed") or []))
+        finish = ((getattr(project, "cfg", None) or {}).get("route") or {}).get("finish", "none")
+        if out["apply"].get("ok") and summary.get("failed") and finish == "freerouting":
+            # what the grid router left open on a dense board, finished by Freerouting (push and shove, negotiated
+            # congestion) with every track and via already there held fixed
+            from . import freerouting
+            if freerouting.find_jar() and freerouting.java()[0]:
+                log(f"  {len(summary['failed'])} nets left: Freerouting finishes them, the rest held fixed")
+                fr = freerouting.route(project, keep_routed=True, log=log, on_progress=on_progress)
+                out["summary"]["finished_by"] = "freerouting" if fr["summary"].get("ok") else None
+                if not fr["summary"].get("ok"):
+                    out["summary"]["finish_error"] = fr["summary"].get("error")
+                else:
+                    from .. import ratsnest
+                    open_ = sorted({l[4] for l in ratsnest.ratsnest(Board.load(project.pcb))})
+                    out["summary"]["still_open"] = open_
+                    log(f"  after Freerouting: {len(open_)} net{'s' if len(open_) != 1 else ''} still open"
+                        + (": " + ", ".join(n.rsplit("/", 1)[-1] for n in open_[:12]) if open_ else ""))
         if out["apply"].get("ok") and tune_after:        # pairs within their skew budget, length groups within theirs
             from . import tune as tunemod
             try:

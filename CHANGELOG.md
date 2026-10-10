@@ -15,6 +15,7 @@ Dense boards: BGAs and fine-pitch connectors broken out the way a person starts 
 - **Parts on both sides in the floorplan.** In the setup's floorplan, F (or the bar's button) puts a block or connector on the bottom side. It is drawn dashed, Top / Bottom / Both shows one side or both, blocks on opposite sides no longer clash, and applying the floorplan puts those parts on the bottom.
 - **Pairs and their budgets.** Clicking a differential pair shows both halves' lengths, the skew and how much is allowed (1.25 mm for USB 2.0; 0.15 mm for MIPI, HDMI, LVDS, PCIe, Ethernet and SATA; 0.5 mm for clocks and other fast pairs; 10 mm for USB full speed; or the project's own). Board › Routing lists every pair, and Tune brings the ones over budget within it.
 - **Length tuning after the route.** Meanders on the shorter half of each pair over its budget, and on short members of length groups.
+- **Finishing a route with Freerouting.** Freerouting can finish the nets the grid router left open, with everything already routed held fixed: the agent's `route` tool with engine freerouting and `finish`, or tracewright.json `route.finish`.
 - **Connector pinouts from the design.** `./tw pinout` writes `docs/connectors.md` from KiCad's netlist; the pin plan keeps it current.
 - **Bundled signals between sheets.** Four or more signals between the same sheets travel as one bus, with one line per bus on the top sheet.
 - **A tidy top sheet.** Sheet symbols in rows, sized to their pins, with names above and file names below, clear of the title block.
@@ -30,7 +31,9 @@ Dense boards: BGAs and fine-pitch connectors broken out the way a person starts 
 ### Fixed
 - **Vias between a BGA's balls.** Inside a fine-pitch area every net class now keeps the area's clearance. A via no longer keeps an extra margin from other nets' pads, which ruled out every spot between 0.8 mm balls. The router places the fan-out's smaller via there, the same size it checked against.
 - **Planes under a via field.** The fine-pitch rule areas now cover every copper layer, so a plane's fill under a BGA keeps the narrow clearance. At the class clearance, the fill walled the plane's own vias off from the plane.
-- **Hole-to-hole.** The router keeps vias' holes apart by the board's minimum.
+- **Hole-to-hole and hole clearance.** The router keeps vias' holes apart, and away from other copper, by the board's minimums (KiCad's default hole clearance, 0.25 mm, is wider than a 0.1 mm track clearance next to a via).
+- **Shorts under a BGA.** A pad's escape to its plane drawn at its class's full width inside a fine-pitch area, where it had been checked at the narrow width, could touch the next pad. It is drawn at the width it was checked at, and joins a via of its own net already there before adding one.
+- **Overlapping plane patches** under neighbouring fine-pitch parts get distinct priorities, as KiCad requires.
 - **Neck areas after a stack-up change** are redrawn on the new layers.
 - **Plane escapes.** A pad already joined to its plane by a via is left alone; a pad with tracks but no via still gets one.
 - **Labels in generated schematics.** Labels side by side on a crowded connector or BGA no longer overlap. A ground between bundled signals gets a plain label like theirs, and a label next to a sideways supply arrow runs out past the supply's name.

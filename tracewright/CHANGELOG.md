@@ -3,6 +3,44 @@
 All notable changes to Tracewright. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-10-10
+
+Dense boards: BGAs and fine-pitch connectors broken out the way a person starts them, the pins planned from the layout, and the route finished.
+
+### Added
+- **Breakout.** Before routing, every BGA gets a via on each ball that needs one and each signal ball's track out to the edge of its ball field, layer by layer, outer rings first. The router then takes each net up where its escape ends. Vias go in two staggered rows beside fine-pitch connectors whose nets change layer (a board-to-board connector on the bottom fed from a chip on top). Board › Routing › Break out, the `breakout` tool, or `./tw breakout`.
+- **Room under a BGA.** Capacitors and resistors on the bottom under a BGA move a fraction of a millimetre, or turn a quarter, so every ball has a spot for its via.
+- **Pin plan.** On a breakout board, each free GPIO moves to the connector pin that lies the way it leaves the chip, so the tracks run side by side instead of crossing (on the RT1176 test board, same-layer crossings fell from about 500 to about 310). Moves stay within the GPIO's own connector and connector row, functions such as UART, USB and Ethernet stay where they are, and the schematic is drawn again with the plan once you agree. `docs/pin-plan.md` lists every move.
+- **Room to route.** Board › Routing says whether the board can be routed in its size and layers: each BGA's escape against the signal layers, the busiest lines across the board, and the tracks' share of the free area. Tight or impossible boards get fixes (a layer more, a larger board). The guided setup also says when a BGA needs every signal layer the board has.
+- **Parts on both sides in the floorplan.** In the setup's floorplan, F (or the bar's button) puts a block or connector on the bottom side. It is drawn dashed, Top / Bottom / Both shows one side or both, blocks on opposite sides no longer clash, and applying the floorplan puts those parts on the bottom.
+- **Pairs and their budgets.** Clicking a differential pair shows both halves' lengths, the skew and how much is allowed (1.25 mm for USB 2.0; 0.15 mm for MIPI, HDMI, LVDS, PCIe, Ethernet and SATA; 0.5 mm for clocks and other fast pairs; 10 mm for USB full speed; or the project's own). Board › Routing lists every pair, and Tune brings the ones over budget within it.
+- **Length tuning after the route.** Meanders on the shorter half of each pair over its budget, and on short members of length groups.
+- **Finishing a route with Freerouting.** Freerouting can finish the nets the grid router left open, with everything already routed held fixed: the agent's `route` tool with engine freerouting and `finish`, or tracewright.json `route.finish`.
+- **Connector pinouts from the design.** `./tw pinout` writes `docs/connectors.md` from KiCad's netlist; the pin plan keeps it current.
+- **Bundled signals between sheets.** Four or more signals between the same sheets travel as one bus, with one line per bus on the top sheet.
+- **A tidy top sheet.** Sheet symbols in rows, sized to their pins, with names above and file names below, clear of the title block.
+- `./tw schematic` generates the schematic in the foreground and ends with one line saying it is done, or what failed. Claude uses it, so it knows when generation has finished.
+- New projects offer 2 to 12 layers (it stopped at 6).
+- **BGA capacitors on the bottom**, each beside the via of the ball it serves; the Parts on design limit (top only or both sides) keeps everything on top.
+- Parts drawn aside from their pin carry a line naming it ("near U1 pin P12"), and layout keeps them near that pin.
+
+### Changed
+- **Decoupling capacitors in a row by default**, each row labelled with the pin it belongs beside.
+- **The router's time budget** (tracewright.json `route.budget_s`): once spent, nothing more is ripped up, the rest is routed where it fits, and what failed is named.
+
+### Fixed
+- **Vias between a BGA's balls.** Inside a fine-pitch area every net class now keeps the area's clearance. A via no longer keeps an extra margin from other nets' pads, which ruled out every spot between 0.8 mm balls. The router places the fan-out's smaller via there, the same size it checked against.
+- **Planes under a via field.** The fine-pitch rule areas now cover every copper layer, so a plane's fill under a BGA keeps the narrow clearance. At the class clearance, the fill walled the plane's own vias off from the plane.
+- **Hole-to-hole and hole clearance.** The router keeps vias' holes apart, and away from other copper, by the board's minimums (KiCad's default hole clearance, 0.25 mm, is wider than a 0.1 mm track clearance next to a via).
+- **Shorts under a BGA.** A pad's escape to its plane drawn at its class's full width inside a fine-pitch area, where it had been checked at the narrow width, could touch the next pad. It is drawn at the width it was checked at, and joins a via of its own net already there before adding one.
+- **Overlapping plane patches** under neighbouring fine-pitch parts get distinct priorities, as KiCad requires.
+- **Neck areas after a stack-up change** are redrawn on the new layers.
+- **Plane escapes.** A pad already joined to its plane by a via is left alone; a pad with tracks but no via still gets one.
+- **Labels in generated schematics.** Labels side by side on a crowded connector or BGA no longer overlap. A ground between bundled signals gets a plain label like theirs, and a label next to a sideways supply arrow runs out past the supply's name.
+- **Schematics of big parts in seconds** (an RT1176's power sheet took over ten minutes), and the wrong connections a reused reference or a fallback label made are gone.
+- Board lengths count arcs along the arc.
+- Without KiCad installed, starting a project shows an error instead of stopping the app.
+
 ## [1.1.0] - 2026-10-07
 
 Simulate the board as it is laid out, plan who routes each net, take on dense boards, and get the board built.

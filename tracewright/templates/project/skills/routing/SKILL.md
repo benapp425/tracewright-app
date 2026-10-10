@@ -19,7 +19,10 @@ description: Route the board like a person - supplies first and wide, pairs coup
    pin map), then bring any pin table the design keeps up to date.
    Then `breakout` with make_room: the parts under each BGA moved off its via spots, a via for every ball that needs
    one, each signal ball's escape out to the edge of its ball field on its layer, and vias beside fine-pitch parts
-   whose nets change layer. `route` then takes each net up at its port; escapes it did not use come off again.
+   whose nets change layer. `route` then takes each net up at its port; escapes it did not use come off again. On a
+   dense board the grid router may leave nets open where channels are crowded: route them again (`route` nets ...),
+   or let Freerouting finish them with everything already routed held fixed (`route` with engine freerouting and
+   finish true; slow on a crowded board). Say which nets, if any, are still open.
    `./tw space` shows where the board is crowded; regions (`region`) keep tracks out of an area, forbid vias, allow
    finer tracks or demand more spacing.
 3. Planes and pours: the stack-up's planes (`stackup` show; apply pours them), each signal layer next to one; on
